@@ -336,8 +336,7 @@ impl SearchTab {
         let mut puzzles: Vec<config::Puzzle> = Vec::new();
 
         let reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .flexible(true)
+        .has_headers(true)
         .from_path(&config::SETTINGS.puzzle_db_location);
 
         if let Ok(mut reader) = reader {
