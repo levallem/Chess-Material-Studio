@@ -266,3 +266,143 @@ pub struct Puzzle {
     #[serde(default)]
     pub opening: String,
 }
+
+impl Puzzle {
+    pub fn solver_move_count(&self) -> usize {
+        self.moves.split_whitespace().count() / 2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE: &str = include_str!("../tests/fixtures/lichess_puzzles_sample.csv");
+
+    fn read_fixture_puzzles() -> Vec<Puzzle> {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(FIXTURE.as_bytes());
+        reader
+            .deserialize::<Puzzle>()
+            .map(|r| r.expect("fixture row should deserialize into Puzzle"))
+            .collect()
+    }
+
+    #[test]
+    fn test_current_csv_has_daily_date_header_and_data() {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(FIXTURE.as_bytes());
+        let headers = reader.headers().expect("fixture should have headers");
+        assert_eq!(headers.len(), 11);
+        assert_eq!(headers.get(10), Some("DailyDate"));
+
+        let records: Vec<csv::StringRecord> = reader
+            .records()
+            .map(|r| r.expect("fixture row should be valid CSV"))
+            .collect();
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[2].len(), 11);
+        assert_eq!(records[2].get(10), Some("2026-08-28"));
+
+        let puzzles = read_fixture_puzzles();
+        let puzzle = &puzzles[2];
+        assert_eq!(puzzle.puzzle_id, "00010");
+        assert_eq!(puzzle.fen, "r1bqkb1r/pppppppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3");
+        assert_eq!(puzzle.moves, "f3g5 e7e6 g5f7");
+        assert_eq!(puzzle.rating, 1700);
+        assert_eq!(puzzle.rating_deviation, 80);
+        assert_eq!(puzzle.popularity, 92);
+        assert_eq!(puzzle.nb_plays, 7500);
+        assert_eq!(puzzle.themes, "fork sacrifice middlegame");
+        assert_eq!(puzzle.game_url, "https://lichess.org/training/ghi789");
+        assert_eq!(puzzle.opening, "Italian_Game");
+    }
+
+    #[test]
+    fn test_csv_deserializes_correct_row_count() {
+        let puzzles = read_fixture_puzzles();
+        assert_eq!(puzzles.len(), 4, "fixture should produce exactly 4 puzzles");
+    }
+
+    #[test]
+    fn test_all_fields_on_normal_puzzle() {
+        let puzzles = read_fixture_puzzles();
+        let p = &puzzles[0];
+        assert_eq!(p.puzzle_id, "00008");
+        assert_eq!(p.fen, "N4k3/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1");
+        assert_eq!(p.moves, "e1e8");
+        assert_eq!(p.rating, 1500);
+        assert_eq!(p.rating_deviation, 70);
+        assert_eq!(p.popularity, 95);
+        assert_eq!(p.nb_plays, 10000);
+        assert_eq!(p.themes, "fork opening");
+        assert_eq!(p.game_url, "https://lichess.org/training/abc123");
+        assert_eq!(p.opening, "Italian_Game");
+    }
+
+    #[test]
+    fn test_empty_opening_tags() {
+        let puzzles = read_fixture_puzzles();
+        let p = &puzzles[1];
+        assert_eq!(p.opening, "", "empty OpeningTags should deserialize to empty string");
+    }
+
+    #[test]
+    fn test_multiple_themes_preserved() {
+        let puzzles = read_fixture_puzzles();
+        let p = &puzzles[2];
+        assert_eq!(p.themes, "fork sacrifice middlegame");
+    }
+
+    #[test]
+    fn test_solver_move_count_cases() {
+        let cases: Vec<(&str, usize)> = vec![
+            ("", 0),
+            ("e2e4", 0),
+            ("e2e4 e7e5", 1),
+            ("e2e4 e7e5 g1f3", 1),
+            ("e2e4 e7e5 g1f3 d7d5", 2),
+            ("e2e4 e7e5 g1f3 d7d5 d2d4", 2),
+            ("e2e4 e7e5 g1f3 d7d5 d2d4 e5d4", 3),
+        ];
+        for (moves_str, expected) in cases {
+            let puzzle = Puzzle {
+                puzzle_id: String::new(),
+                fen: String::new(),
+                moves: moves_str.to_string(),
+                rating: 0,
+                rating_deviation: 0,
+                popularity: 0,
+                nb_plays: 0,
+                themes: String::new(),
+                game_url: String::new(),
+                opening: String::new(),
+            };
+            assert_eq!(
+                puzzle.solver_move_count(),
+                expected,
+                "moves: {:?}",
+                moves_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_solver_move_count_whitespace_robustness() {
+        let puzzle = Puzzle {
+            puzzle_id: String::new(),
+            fen: String::new(),
+            moves: "e2e4   e7e5    g1f3".to_string(),
+            rating: 0,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: String::new(),
+            game_url: String::new(),
+            opening: String::new(),
+        };
+        assert_eq!(puzzle.solver_move_count(), 1);
+    }
+}

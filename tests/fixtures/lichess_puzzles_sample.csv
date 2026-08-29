@@ -1,0 +1,5 @@
+PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate
+00008,N4k3/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1,e1e8,1500,70,95,10000,fork opening,https://lichess.org/training/abc123,Italian_Game,
+00009,r1bqkbnr/pppppppp/2n5/4P3/8/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2,d2d4,1600,50,88,5000,opening,https://lichess.org/training/def456,,
+00010,r1bqkb1r/pppppppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3,f3g5 e7e6 g5f7,1700,80,92,7500,fork sacrifice middlegame,https://lichess.org/training/ghi789,Italian_Game,2026-08-28
+00011,5k2/8/8/8/4R3/8/5K2/8 w - - 0 1,e4e7,1300,60,70,3000,oneMove,https://lichess.org/training/jkl012,,
