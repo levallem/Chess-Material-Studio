@@ -3,7 +3,7 @@ use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 use crate::config::{self, Puzzle};
-use crate::models::NewFavorite;
+use crate::models::{NewFavorite, NewPuzzle};
 use crate::schema::favs;
 use crate::schema::favs::dsl::*;
 
@@ -121,6 +121,37 @@ pub fn toggle_favorite(puzzle: Puzzle) {
             .execute(&mut conn)
             .expect("Error saving new favorite");
     }
+}
+
+pub fn import_puzzles_from_reader<R: std::io::Read>(
+    conn: &mut SqliteConnection,
+    source: R,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(source);
+
+    let mut count = 0usize;
+    for result in reader.deserialize::<Puzzle>() {
+        let puzzle = result?;
+        let new_puzzle = NewPuzzle {
+            puzzle_id: &puzzle.puzzle_id,
+            fen: &puzzle.fen,
+            moves: &puzzle.moves,
+            rating: puzzle.rating,
+            rating_deviation: puzzle.rating_deviation,
+            popularity: puzzle.popularity,
+            nb_plays: puzzle.nb_plays,
+            themes: &puzzle.themes,
+            game_url: &puzzle.game_url,
+            opening_tags: &puzzle.opening,
+        };
+        diesel::insert_into(crate::schema::puzzles::table)
+            .values(&new_puzzle)
+            .execute(conn)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -252,5 +283,85 @@ mod tests {
 
         conn.run_pending_migrations(MIGRATIONS)
             .expect("Second migration run should succeed (idempotent)");
+    }
+
+    const FIXTURE: &str = include_str!("../tests/fixtures/lichess_puzzles_sample.csv");
+
+    #[test]
+    fn test_importer_inserts_all_fixture_puzzles() {
+        let mut conn = setup_test_db();
+        let count = super::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
+            .expect("import should succeed");
+        assert_eq!(count, 4, "fixture contains 4 puzzles");
+    }
+
+    #[test]
+    fn test_importer_puzzle_count_matches_sqlite() {
+        let mut conn = setup_test_db();
+        super::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
+            .expect("import should succeed");
+
+        let count: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count query should succeed");
+        assert_eq!(count, 4, "SQLite should contain exactly 4 rows");
+    }
+
+    #[test]
+    fn test_importer_round_trip_all_fields() {
+        let mut conn = setup_test_db();
+        super::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
+            .expect("import should succeed");
+
+        let p: Puzzle = crate::schema::puzzles::table
+            .filter(crate::schema::puzzles::dsl::puzzle_id.eq("00010"))
+            .first::<Puzzle>(&mut conn)
+            .expect("puzzle 00010 should exist");
+
+        assert_eq!(p.puzzle_id, "00010");
+        assert_eq!(p.fen, "r1bqkb1r/pppppppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3");
+        assert_eq!(p.moves, "f3g5 e7e6 g5f7");
+        assert_eq!(p.rating, 1700);
+        assert_eq!(p.rating_deviation, 80);
+        assert_eq!(p.popularity, 92);
+        assert_eq!(p.nb_plays, 7500);
+        assert_eq!(p.themes, "fork sacrifice middlegame");
+        assert_eq!(p.game_url, "https://lichess.org/training/ghi789");
+        assert_eq!(p.opening, "Italian_Game");
+    }
+
+    #[test]
+    fn test_importer_empty_opening_tags_preserved() {
+        let mut conn = setup_test_db();
+        super::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
+            .expect("import should succeed");
+
+        let p: Puzzle = crate::schema::puzzles::table
+            .filter(crate::schema::puzzles::dsl::puzzle_id.eq("00009"))
+            .first::<Puzzle>(&mut conn)
+            .expect("puzzle 00009 should exist");
+        assert_eq!(p.opening, "", "empty OpeningTags should be empty string, not NULL");
+    }
+
+    #[test]
+    fn test_importer_daily_date_ignored() {
+        let mut conn = setup_test_db();
+        let result = super::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes());
+        assert!(result.is_ok(), "importing CSV with DailyDate column should succeed");
+
+        let p: Puzzle = crate::schema::puzzles::table
+            .filter(crate::schema::puzzles::dsl::puzzle_id.eq("00010"))
+            .first::<Puzzle>(&mut conn)
+            .expect("puzzle 00010 should exist");
+        assert_eq!(p.rating, 1700, "DailyDate should be ignored, puzzle parsed correctly");
+    }
+
+    #[test]
+    fn test_importer_invalid_csv_returns_error() {
+        let mut conn = setup_test_db();
+        let bad_csv = b"PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\n00008,fen,e1e8,invalid,70,95,10000,fork,https://url.com,,\n";
+        let result = super::import_puzzles_from_reader(&mut conn, &bad_csv[..]);
+        assert!(result.is_err(), "invalid Rating should produce an error");
     }
 }
