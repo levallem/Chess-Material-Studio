@@ -154,6 +154,39 @@ pub fn import_puzzles_from_reader<R: std::io::Read>(
     Ok(count)
 }
 
+pub fn import_puzzles_from_reader_transactional<R: std::io::Read>(
+    conn: &mut SqliteConnection,
+    source: R,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    conn.transaction(|conn| {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(source);
+
+        let mut count = 0usize;
+        for result in reader.deserialize::<Puzzle>() {
+            let puzzle = result?;
+            let new_puzzle = NewPuzzle {
+                puzzle_id: &puzzle.puzzle_id,
+                fen: &puzzle.fen,
+                moves: &puzzle.moves,
+                rating: puzzle.rating,
+                rating_deviation: puzzle.rating_deviation,
+                popularity: puzzle.popularity,
+                nb_plays: puzzle.nb_plays,
+                themes: &puzzle.themes,
+                game_url: &puzzle.game_url,
+                opening_tags: &puzzle.opening,
+            };
+            diesel::insert_into(crate::schema::puzzles::table)
+                .values(&new_puzzle)
+                .execute(conn)?;
+            count += 1;
+        }
+        Ok(count)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +396,40 @@ mod tests {
         let bad_csv = b"PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\n00008,fen,e1e8,invalid,70,95,10000,fork,https://url.com,,\n";
         let result = super::import_puzzles_from_reader(&mut conn, &bad_csv[..]);
         assert!(result.is_err(), "invalid Rating should produce an error");
+    }
+
+    #[test]
+    fn test_transactional_importer_inserts_all_fixture_puzzles() {
+        let mut conn = setup_test_db();
+        let count =
+            super::import_puzzles_from_reader_transactional(&mut conn, FIXTURE.as_bytes())
+                .expect("transactional import should succeed");
+        assert_eq!(count, 4, "fixture contains 4 puzzles");
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count query should succeed");
+        assert_eq!(rows, 4, "SQLite should contain exactly 4 rows");
+    }
+
+    #[test]
+    fn test_transactional_importer_rolls_back_on_invalid_row() {
+        let mut conn = setup_test_db();
+        let csv_with_invalid =
+            b"PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\n00008,N4k3/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1,e1e8,1500,70,95,10000,fork,https://lichess.org/training/abc123,Italian_Game,\n00009,fen,other,not_a_number,70,95,10000,mate,https://lichess.org/training/xyz789,,\n";
+
+        let result =
+            super::import_puzzles_from_reader_transactional(&mut conn, &csv_with_invalid[..]);
+        assert!(
+            result.is_err(),
+            "a valid row followed by an invalid row should fail the transaction"
+        );
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count query should succeed");
+        assert_eq!(rows, 0, "entire transaction should roll back, no partial rows");
     }
 }
