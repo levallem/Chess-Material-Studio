@@ -27,3 +27,10 @@ table! {
         opening_tags -> Text,
     }
 }
+
+table! {
+    puzzle_import_progress (source_key) {
+        source_key -> Text,
+        completed_rows -> BigInt,
+    }
+}
