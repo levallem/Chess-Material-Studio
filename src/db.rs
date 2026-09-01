@@ -1,6 +1,7 @@
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::config::{self, Puzzle};
 use crate::models::{NewFavorite, NewPuzzle};
@@ -317,6 +318,99 @@ pub fn import_puzzles_from_reader_chunked<R: std::io::Read>(
     }
 
     Ok(total_inserted)
+}
+
+// ── CMS-007 — File wrapper & stable source identity ────────────────
+
+const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+
+/// FNV-1a 64-bit hash — streaming, one byte at a time.
+/// XOR first, then multiply (the "a" variant).
+fn fnv1a_update(hash: u64, byte: u8) -> u64 {
+    (hash ^ (byte as u64)).wrapping_mul(FNV_PRIME)
+}
+
+/// Compute FNV-1a 64-bit over an arbitrary `Read` source.
+fn fnv1a_hash_reader<R: Read>(reader: &mut R) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut hash = FNV_OFFSET_BASIS;
+    let mut buf = [0u8; 65536]; // 64 KiB buffer
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for &byte in &buf[..n] {
+            hash = fnv1a_update(hash, byte);
+        }
+    }
+    Ok(hash)
+}
+
+/// Result of a file-based puzzle import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PuzzleFileImportResult {
+    pub source_key: String,
+    pub inserted_rows: usize,
+}
+
+/// Compute a stable `source_key` from an already-open `File`.
+///
+/// Reads the entire file to compute FNV-1a 64-bit, then rewinds
+/// the cursor to byte 0 so the caller can re-read for import.
+fn puzzle_source_key_from_open_file(
+    file: &mut std::fs::File,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let file_size = file.metadata()?.len();
+
+    file.seek(SeekFrom::Start(0))?;
+    let hash = {
+        let mut reader = std::io::BufReader::new(&mut *file);
+        fnv1a_hash_reader(&mut reader)?
+    };
+
+    file.seek(SeekFrom::Start(0))?;
+
+    Ok(format!("cms-source-v1:{}:{:016x}", file_size, hash))
+}
+
+/// Compute a stable `source_key` from a file path.
+///
+/// Format: `cms-source-v1:<file_size>:<fnv64_hex>`
+///
+/// The hash is FNV-1a 64-bit over the **entire** file content.
+/// Two files with identical content always produce the same key,
+/// regardless of path, name, or modification time.
+///
+/// **Cost**: reads the full file once. Intentional for CMS-007;
+/// caching can be added later if needed.
+pub fn puzzle_source_key_from_file<P: AsRef<std::path::Path>>(
+    path: P,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut file = std::fs::File::open(path)?;
+    puzzle_source_key_from_open_file(&mut file)
+}
+
+/// Import puzzles from a physical CSV file.
+///
+/// Opens the file once: the same handle is used for fingerprinting
+/// and for the chunked import — no TOCTOU window.
+pub fn import_puzzles_from_file_chunked<P: AsRef<std::path::Path>>(
+    conn: &mut SqliteConnection,
+    path: P,
+    chunk_size: usize,
+) -> Result<PuzzleFileImportResult, Box<dyn std::error::Error>> {
+    let mut file = std::fs::File::open(&path)?;
+
+    // fingerprint the same handle we'll import from
+    let source_key = puzzle_source_key_from_open_file(&mut file)?;
+
+    let inserted = import_puzzles_from_reader_chunked(conn, file, &source_key, chunk_size)?;
+
+    Ok(PuzzleFileImportResult {
+        source_key,
+        inserted_rows: inserted,
+    })
 }
 
 #[cfg(test)]
@@ -815,5 +909,161 @@ Rating,GameUrl,PuzzleId,OpeningTags,FEN,Moves,RatingDeviation,Popularity,NbPlays
         assert_eq!(p.rating, 2100);
         assert_eq!(p.fen, "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
         assert_eq!(p.opening, "Sicilian_Defense");
+    }
+
+    // ── CMS-007 tests ──────────────────────────────────────────────
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp_path(name: &str) -> std::path::PathBuf {
+        let id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp");
+        std::fs::create_dir_all(&dir).ok();
+        dir.join(format!("{}_{}_{}", name, std::process::id(), id))
+    }
+
+    fn write_tmp(name: &str, content: &[u8]) -> std::path::PathBuf {
+        let p = tmp_path(name);
+        // Write and explicitly drop the file to release any handles before reading
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&p).expect("create tmp file");
+            f.write_all(content).expect("write tmp file");
+            f.sync_all().expect("sync tmp file");
+        }
+        p
+    }
+
+    // FNV-1a 64 test vector: empty string = offset basis
+    #[test]
+    fn test_cms007_fnv_empty_vector() {
+        let hash = fnv1a_hash_reader(&mut std::io::Cursor::new(b"")).unwrap();
+        assert_eq!(hash, 0xcbf29ce484222325, "FNV-1a 64-bit of empty string");
+    }
+
+    // FNV-1a test vector: "a" = known value
+    #[test]
+    fn test_cms007_fnv_single_byte() {
+        let hash = fnv1a_hash_reader(&mut std::io::Cursor::new(b"a")).unwrap();
+        // FNV-1a 64("a") = af63dc4c8601ec8c
+        assert_eq!(hash, 0xaf63dc4c8601ec8c, "FNV-1a 64-bit of 'a'");
+    }
+
+    #[test]
+    fn test_cms007_deterministic_source_key() {
+        let p = write_tmp("det", b"abc\n123\n");
+        let k1 = super::puzzle_source_key_from_file(&p).unwrap();
+        let k2 = super::puzzle_source_key_from_file(&p).unwrap();
+        assert_eq!(k1, k2, "same file must produce same key");
+        assert!(k1.starts_with("cms-source-v1:"), "format prefix");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn test_cms007_same_content_different_path() {
+        let a = write_tmp("path_a", b"abc\n123\n");
+        let b = write_tmp("path_b", b"abc\n123\n");
+        let ka = super::puzzle_source_key_from_file(&a).unwrap();
+        let kb = super::puzzle_source_key_from_file(&b).unwrap();
+        assert_eq!(ka, kb, "same content must produce same key regardless of path");
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&b).ok();
+    }
+
+    #[test]
+    fn test_cms007_different_content_different_key() {
+        let a = write_tmp("diff_a", b"abc\n");
+        let b = write_tmp("diff_b", b"abd\n");
+        let ka = super::puzzle_source_key_from_file(&a).unwrap();
+        let kb = super::puzzle_source_key_from_file(&b).unwrap();
+        assert_ne!(ka, kb, "different content must produce different key");
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&b).ok();
+    }
+
+    #[test]
+    fn test_cms007_size_in_source_key() {
+        let content = b"hello world";
+        let p = write_tmp("size", content);
+        let key = super::puzzle_source_key_from_file(&p).unwrap();
+        let expected_size = content.len();
+        let prefix = format!("cms-source-v1:{}:", expected_size);
+        assert!(key.starts_with(&prefix), "key should contain file size, got: {}", key);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn test_cms007_missing_file_returns_error() {
+        let p = tmp_path("nonexistent_xyz");
+        let result = super::puzzle_source_key_from_file(&p);
+        assert!(result.is_err(), "missing file should return Err");
+    }
+
+    #[test]
+    fn test_cms007_modified_content_changes_source_key() {
+        let p = write_tmp("mod_a", b"abc\n");
+        let ka = super::puzzle_source_key_from_file(&p).unwrap();
+        std::fs::write(&p, b"abd\n").unwrap();
+        let kb = super::puzzle_source_key_from_file(&p).unwrap();
+        assert_ne!(ka, kb, "modified content must change key");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn test_cms007_wrapper_imports_fixture() {
+        let p = write_tmp("fixture", FIXTURE.as_bytes());
+        let mut conn = setup_test_db();
+        let result = super::import_puzzles_from_file_chunked(&mut conn, &p, 2)
+            .expect("wrapper import should succeed");
+        assert_eq!(result.inserted_rows, 4, "fixture has 4 puzzles");
+        assert!(!result.source_key.is_empty(), "source_key must not be empty");
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count");
+        assert_eq!(rows, 4);
+
+        let cp: i64 = crate::schema::puzzle_import_progress::table
+            .filter(crate::schema::puzzle_import_progress::dsl::source_key.eq(&result.source_key))
+            .select(crate::schema::puzzle_import_progress::dsl::completed_rows)
+            .first::<i64>(&mut conn)
+            .expect("checkpoint");
+        assert_eq!(cp, 4, "checkpoint should equal total rows");
+
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn test_cms007_second_run_inserts_zero() {
+        let p = write_tmp("fixture2", FIXTURE.as_bytes());
+        let mut conn = setup_test_db();
+
+        let r1 = super::import_puzzles_from_file_chunked(&mut conn, &p, 2)
+            .expect("first import");
+        assert_eq!(r1.inserted_rows, 4);
+
+        let r2 = super::import_puzzles_from_file_chunked(&mut conn, &p, 2)
+            .expect("second import");
+        assert_eq!(r2.inserted_rows, 0, "second run should insert 0");
+        assert_eq!(r1.source_key, r2.source_key, "source_key must be stable");
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count");
+        assert_eq!(rows, 4, "still 4 rows");
+
+        let cp: i64 = crate::schema::puzzle_import_progress::table
+            .filter(crate::schema::puzzle_import_progress::dsl::source_key.eq(&r1.source_key))
+            .select(crate::schema::puzzle_import_progress::dsl::completed_rows)
+            .first::<i64>(&mut conn)
+            .expect("checkpoint");
+        assert_eq!(cp, 4);
+
+        std::fs::remove_file(&p).ok();
     }
 }
