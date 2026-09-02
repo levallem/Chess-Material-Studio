@@ -159,6 +159,7 @@ impl SettingsTab {
                     last_opening: self.saved_configs.last_opening,
                     last_variation: self.saved_configs.last_variation.clone(),
                     last_opening_side: self.saved_configs.last_opening_side,
+                    puzzle_sqlite_location: self.saved_configs.puzzle_sqlite_location.clone(),
                 };
                 let file = std::fs::File::create(SETTINGS_FILE);
                 match file {

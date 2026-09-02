@@ -493,7 +493,7 @@ impl OfflinePuzzles {
 
     // Old Iced application trait stuff
     fn init() -> (Self, Task<Message>) {
-        let has_lichess_db = std::path::Path::new(&config::SETTINGS.puzzle_db_location).exists();
+        let has_lichess_db = config::puzzle_source_exists(&config::SETTINGS);
         (
             Self::new(has_lichess_db),
             Task::discard(iced::font::load(Cow::from(config::CHESS_ALPHA_BYTES))).chain(window::latest())

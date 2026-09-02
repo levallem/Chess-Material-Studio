@@ -9,6 +9,10 @@ use diesel::sqlite::SqliteConnection;
 use crate::models::Puzzle;
 use crate::schema::puzzles;
 
+diesel::define_sql_function! {
+    fn instr(haystack: diesel::sql_types::Text, needle: diesel::sql_types::Text) -> diesel::sql_types::Integer;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchSide {
     Any,
@@ -52,13 +56,11 @@ pub fn search_puzzles(
         .limit(limit);
 
     if let Some(ref theme) = filters.theme_tag {
-        let pattern = format!("%{}%", theme);
-        query = query.filter(puzzles::dsl::themes.like(pattern));
+        query = query.filter(instr(puzzles::dsl::themes, theme).gt(0));
     }
 
     if let Some(ref opening) = filters.opening_tag {
-        let pattern = format!("%{}%", opening);
-        query = query.filter(puzzles::dsl::opening_tags.like(pattern));
+        query = query.filter(instr(puzzles::dsl::opening_tags, opening).gt(0));
     }
 
     // Preserves legacy SearchTab semantics.
@@ -66,10 +68,10 @@ pub fn search_puzzles(
     match filters.side {
         SearchSide::Any => {}
         SearchSide::White => {
-            query = query.filter(puzzles::dsl::game_url.like("%black%"));
+            query = query.filter(instr(puzzles::dsl::game_url, "black").gt(0));
         }
         SearchSide::Black => {
-            query = query.filter(puzzles::dsl::game_url.not_like("%black%"));
+            query = query.filter(instr(puzzles::dsl::game_url, "black").eq(0));
         }
     }
 
@@ -93,6 +95,14 @@ mod tests {
             .expect("Failed to run migrations");
         crate::puzzle_import::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
             .expect("fixture import should succeed");
+        conn
+    }
+
+    fn setup_empty_db() -> SqliteConnection {
+        let mut conn =
+            SqliteConnection::establish(":memory:").expect("Failed to open in-memory database");
+        conn.run_pending_migrations(MIGRATIONS)
+            .expect("Failed to run migrations");
         conn
     }
 
@@ -308,5 +318,115 @@ mod tests {
             ..default_filters()
         };
         assert!(search_puzzles(&mut conn, &filters).is_err());
+    }
+
+    // CMS-013: instr literal semantics — underscore is NOT wildcard
+    #[test]
+    fn test_underscore_is_literal() {
+        let mut conn = setup_empty_db();
+        crate::puzzle_import::import_puzzles_from_reader(
+            &mut conn,
+            "PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\nA,fen,e1e8,1500,70,95,10000,fork,https://url.com,Italian_Game,\nB,fen,e1e8,1500,70,95,10000,fork,https://url.com,ItalianXGame,\n".as_bytes(),
+        ).unwrap();
+        let filters = PuzzleSearchFilters {
+            opening_tag: Some("Italian_Game".into()),
+            ..default_filters()
+        };
+        let results = search_puzzles(&mut conn, &filters).unwrap();
+        let mut got = ids(&results);
+        got.sort();
+        assert_eq!(got, vec!["A"]);
+    }
+
+    // CMS-013: instr literal semantics — percent is NOT wildcard
+    #[test]
+    fn test_percent_is_literal() {
+        let mut conn = setup_empty_db();
+        crate::puzzle_import::import_puzzles_from_reader(
+            &mut conn,
+            "PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\nA,fen,e1e8,1500,70,95,10000,fork,https://url.com,Test%Line,\nB,fen,e1e8,1500,70,95,10000,fork,https://url.com,TestXLine,\n".as_bytes(),
+        ).unwrap();
+        let filters = PuzzleSearchFilters {
+            opening_tag: Some("Test%Line".into()),
+            ..default_filters()
+        };
+        let results = search_puzzles(&mut conn, &filters).unwrap();
+        let mut got = ids(&results);
+        got.sort();
+        assert_eq!(got, vec!["A"]);
+    }
+
+    // CMS-013: instr is case-sensitive — reproduces String::contains
+    #[test]
+    fn test_case_sensitivity() {
+        let mut conn = setup_empty_db();
+        crate::puzzle_import::import_puzzles_from_reader(
+            &mut conn,
+            "PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\nA,fen,e1e8,1500,70,95,10000,fork,https://url.com,Italian_Game,\nB,fen,e1e8,1500,70,95,10000,fork,https://url.com,italian_game,\n".as_bytes(),
+        ).unwrap();
+        let filters = PuzzleSearchFilters {
+            opening_tag: Some("Italian_Game".into()),
+            ..default_filters()
+        };
+        let results = search_puzzles(&mut conn, &filters).unwrap();
+        let mut got = ids(&results);
+        got.sort();
+        assert_eq!(got, vec!["A"]);
+    }
+
+    // CMS-013: theme also uses instr
+    #[test]
+    fn test_theme_uses_instr() {
+        let mut conn = setup_empty_db();
+        crate::puzzle_import::import_puzzles_from_reader(
+            &mut conn,
+            "PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\nA,fen,e1e8,1500,70,95,10000,myfork_x,https://url.com,,\n".as_bytes(),
+        ).unwrap();
+        let filters = PuzzleSearchFilters {
+            theme_tag: Some("fork".into()),
+            ..default_filters()
+        };
+        let results = search_puzzles(&mut conn, &filters).unwrap();
+        let mut got = ids(&results);
+        got.sort();
+        assert_eq!(got, vec!["A"]);
+    }
+
+    // CMS-013: side White is case-sensitive — only lowercase "black" matches
+    #[test]
+    fn test_side_white_case_sensitive() {
+        let mut conn = setup_empty_db();
+        crate::puzzle_import::import_puzzles_from_reader(
+            &mut conn,
+            "PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\nA,fen,e1e8,1500,70,95,10000,fork,https://example/black,Italian_Game,\nB,fen,e1e8,1500,70,95,10000,fork,https://example/Black,Italian_Game,\nC,fen,e1e8,1500,70,95,10000,fork,https://example/white,Italian_Game,\n".as_bytes(),
+        ).unwrap();
+        let filters = PuzzleSearchFilters {
+            opening_tag: Some("Italian_Game".into()),
+            side: SearchSide::White,
+            ..default_filters()
+        };
+        let results = search_puzzles(&mut conn, &filters).unwrap();
+        let mut got = ids(&results);
+        got.sort();
+        assert_eq!(got, vec!["A"], "only lowercase 'black' should match (case-sensitive)");
+    }
+
+    // CMS-013: side Black excludes only lowercase "black"
+    #[test]
+    fn test_side_black_case_sensitive() {
+        let mut conn = setup_empty_db();
+        crate::puzzle_import::import_puzzles_from_reader(
+            &mut conn,
+            "PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\nA,fen,e1e8,1500,70,95,10000,fork,https://example/black,Italian_Game,\nB,fen,e1e8,1500,70,95,10000,fork,https://example/Black,Italian_Game,\nC,fen,e1e8,1500,70,95,10000,fork,https://example/white,Italian_Game,\n".as_bytes(),
+        ).unwrap();
+        let filters = PuzzleSearchFilters {
+            opening_tag: Some("Italian_Game".into()),
+            side: SearchSide::Black,
+            ..default_filters()
+        };
+        let results = search_puzzles(&mut conn, &filters).unwrap();
+        let mut got = ids(&results);
+        got.sort();
+        assert_eq!(got, vec!["B", "C"], "Black side excludes only lowercase 'black'");
     }
 }

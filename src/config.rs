@@ -64,6 +64,8 @@ pub struct OfflinePuzzlesConfig {
     pub last_opening: Openings,
     pub last_variation: Variation,
     pub last_opening_side: Option<OpeningSide>,
+    #[serde(default)]
+    pub puzzle_sqlite_location: Option<String>,
 }
 
 impl ::std::default::Default for OfflinePuzzlesConfig {
@@ -91,7 +93,15 @@ impl ::std::default::Default for OfflinePuzzlesConfig {
             last_opening: Openings::Any,
             last_variation: Variation::ANY,
             last_opening_side: Some(OpeningSide::Any),
+            puzzle_sqlite_location: None,
         }
+    }
+}
+
+pub fn puzzle_source_exists(config: &OfflinePuzzlesConfig) -> bool {
+    match &config.puzzle_sqlite_location {
+        Some(sqlite_path) => std::path::Path::new(sqlite_path).is_file(),
+        None => std::path::Path::new(&config.puzzle_db_location).is_file(),
     }
 }
 
@@ -372,5 +382,79 @@ mod tests {
             opening: String::new(),
         };
         assert_eq!(puzzle.solver_move_count(), 1);
+    }
+
+    #[test]
+    fn test_old_settings_json_deserializes() {
+        let settings_json = include_str!("../settings.json");
+        let config: OfflinePuzzlesConfig = serde_json::from_str(settings_json)
+            .expect("existing settings.json should deserialize");
+        assert!(
+            config.puzzle_sqlite_location.is_none(),
+            "puzzle_sqlite_location should be None when absent from JSON"
+        );
+    }
+
+    #[test]
+    fn test_default_puzzle_sqlite_location_is_none() {
+        let config = OfflinePuzzlesConfig::default();
+        assert_eq!(config.puzzle_sqlite_location, None);
+    }
+
+    fn tmp_path(name: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp");
+        std::fs::create_dir_all(&dir).ok();
+        dir.join(format!("{}_{}", name, std::process::id()))
+    }
+
+    #[test]
+    fn test_source_exists_csv_active() {
+        let csv_path = tmp_path("source_csv_active.csv");
+        std::fs::write(&csv_path, b"test").unwrap();
+        let cfg = OfflinePuzzlesConfig {
+            puzzle_sqlite_location: None,
+            puzzle_db_location: csv_path.to_str().unwrap().to_string(),
+            ..OfflinePuzzlesConfig::default()
+        };
+        assert!(puzzle_source_exists(&cfg));
+        let _ = std::fs::remove_file(&csv_path);
+    }
+
+    #[test]
+    fn test_source_exists_csv_missing() {
+        let cfg = OfflinePuzzlesConfig {
+            puzzle_sqlite_location: None,
+            puzzle_db_location: "/nonexistent/path.csv".to_string(),
+            ..OfflinePuzzlesConfig::default()
+        };
+        assert!(!puzzle_source_exists(&cfg));
+    }
+
+    #[test]
+    fn test_source_exists_sqlite_active_csv_missing() {
+        let sqlite_path = tmp_path("source_sqlite_active.sqlite");
+        std::fs::write(&sqlite_path, b"test").unwrap();
+        let cfg = OfflinePuzzlesConfig {
+            puzzle_sqlite_location: Some(sqlite_path.to_str().unwrap().to_string()),
+            puzzle_db_location: "/nonexistent/path.csv".to_string(),
+            ..OfflinePuzzlesConfig::default()
+        };
+        assert!(puzzle_source_exists(&cfg));
+        let _ = std::fs::remove_file(&sqlite_path);
+    }
+
+    #[test]
+    fn test_source_exists_sqlite_missing_csv_existing() {
+        let csv_path = tmp_path("source_csv_fallback.csv");
+        std::fs::write(&csv_path, b"test").unwrap();
+        let cfg = OfflinePuzzlesConfig {
+            puzzle_sqlite_location: Some("/nonexistent/db.sqlite".to_string()),
+            puzzle_db_location: csv_path.to_str().unwrap().to_string(),
+            ..OfflinePuzzlesConfig::default()
+        };
+        assert!(!puzzle_source_exists(&cfg), "SQLite missing should NOT fall back to CSV");
+        let _ = std::fs::remove_file(&csv_path);
     }
 }

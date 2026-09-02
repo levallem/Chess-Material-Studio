@@ -3,7 +3,9 @@ use iced::widget::{Container, Button, column as col, Text, Radio, row, Row, Svg,
 use iced::widget::text::LineHeight;
 use iced::{alignment, Alignment, Element, Length, Task, Theme};
 use std::io::BufReader;
+use std::path::Path;
 
+use diesel::Connection;
 use iced_aw::TabLabel;
 use chess::{Piece, PROMOTION_PIECES};
 use crate::config::{load_config, SETTINGS_FILE, PIECES_DIRECTORY};
@@ -234,6 +236,202 @@ pub struct SearchTab {
     pub promotion_piece_img: Vec<Handle>,
 }
 
+fn adapt_sqlite_puzzle(
+    puzzle: offline_chess_puzzles::models::Puzzle,
+) -> config::Puzzle {
+    config::Puzzle {
+        puzzle_id: puzzle.puzzle_id,
+        fen: puzzle.fen,
+        moves: puzzle.moves,
+        rating: puzzle.rating,
+        rating_deviation: puzzle.rating_deviation,
+        popularity: puzzle.popularity,
+        nb_plays: puzzle.nb_plays,
+        themes: puzzle.themes,
+        game_url: puzzle.game_url,
+        opening: puzzle.opening,
+    }
+}
+
+fn search_csv_from_path(
+    csv_path: &Path,
+    min_rating: i32,
+    max_rating: i32,
+    min_popularity: i32,
+    theme: TacticalThemes,
+    opening: Openings,
+    variation: Variation,
+    op_side: Option<OpeningSide>,
+    result_limit: usize,
+) -> Option<Vec<config::Puzzle>> {
+    let mut puzzles: Vec<config::Puzzle> = Vec::new();
+
+    let reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(csv_path);
+
+    if let Ok(mut reader) = reader {
+        puzzles.clear();
+        if opening != Openings::Any {
+            let opening_tag: &str = if variation.name != Variation::ANY_STR {
+                &variation.name
+            } else {
+                opening.get_field_name()
+            };
+            let side = match op_side {
+                None => OpeningSide::Any,
+                Some(x) => x
+            };
+            match side {
+                OpeningSide::Any => {
+                    for result in reader.deserialize::<config::Puzzle>() {
+                        if let Ok(record) = result &&
+                                record.opening.contains(opening_tag) &&
+                                record.rating >= min_rating && record.rating <= max_rating &&
+                                record.popularity >= min_popularity &&
+                                record.themes.contains(theme.get_tag_name()) {
+                            puzzles.push(record);
+                        }
+                        if puzzles.len() == result_limit {
+                            break;
+                        }
+                    }
+                } OpeningSide::Black => {
+                    for result in reader.deserialize::<config::Puzzle>() {
+                        if let Ok(record) = result &&
+                                record.opening.contains(opening_tag) &&
+                                !record.game_url.contains("black") &&
+                                record.rating >= min_rating && record.rating <= max_rating &&
+                                record.popularity >= min_popularity &&
+                                record.themes.contains(theme.get_tag_name()) {
+                            puzzles.push(record);
+                        }
+                        if puzzles.len() == result_limit {
+                            break;
+                        }
+                    }
+                } OpeningSide::White => {
+                    for result in reader.deserialize::<config::Puzzle>() {
+                        if let Ok(record) = result &&
+                                record.opening.contains(opening_tag) &&
+                                record.game_url.contains("black") &&
+                                record.rating >= min_rating && record.rating <= max_rating &&
+                                record.popularity >= min_popularity &&
+                                record.themes.contains(theme.get_tag_name()) {
+                            puzzles.push(record);
+                        }
+                        if puzzles.len() == result_limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            for result in reader.deserialize::<config::Puzzle>() {
+                if let Ok(record) = result && record.rating >= min_rating && record.rating <= max_rating &&
+                        record.popularity >= min_popularity &&
+                        record.themes.contains(theme.get_tag_name()) {
+                    puzzles.push(record);
+                }
+                if puzzles.len() == result_limit {
+                    break;
+                }
+            }
+        }
+    }
+    Some(puzzles)
+}
+
+fn search_sqlite_from_path(
+    db_path: &Path,
+    min_rating: i32,
+    max_rating: i32,
+    min_popularity: i32,
+    theme: TacticalThemes,
+    opening: Openings,
+    variation: Variation,
+    op_side: Option<OpeningSide>,
+    result_limit: usize,
+) -> Result<Vec<config::Puzzle>, String> {
+    if !db_path.is_file() {
+        return Err(format!("database file not found: {}", db_path.display()));
+    }
+    let path_str = db_path.to_str().ok_or("invalid db path (non-UTF-8)")?;
+    let mut conn = diesel::sqlite::SqliteConnection::establish(path_str)
+        .map_err(|e| format!("cannot open DB: {}", e))?;
+
+    let theme_tag = match theme {
+        TacticalThemes::All => None,
+        other => Some(other.get_tag_name().to_string()),
+    };
+
+    let opening_tag = if opening == Openings::Any {
+        None
+    } else if variation.name != Variation::ANY_STR {
+        Some(variation.name.to_string())
+    } else {
+        Some(opening.get_field_name().to_string())
+    };
+
+    let side = if opening_tag.is_none() {
+        offline_chess_puzzles::puzzle_search::SearchSide::Any
+    } else {
+        match op_side {
+            None | Some(OpeningSide::Any) => offline_chess_puzzles::puzzle_search::SearchSide::Any,
+            Some(OpeningSide::White) => offline_chess_puzzles::puzzle_search::SearchSide::White,
+            Some(OpeningSide::Black) => offline_chess_puzzles::puzzle_search::SearchSide::Black,
+        }
+    };
+
+    let filters = offline_chess_puzzles::puzzle_search::PuzzleSearchFilters {
+        min_rating,
+        max_rating,
+        min_popularity,
+        theme_tag,
+        opening_tag,
+        side,
+        limit: result_limit,
+    };
+
+    let results = offline_chess_puzzles::puzzle_search::search_puzzles(&mut conn, &filters)?;
+    Ok(results.into_iter().map(adapt_sqlite_puzzle).collect())
+}
+
+pub fn search_with_config(
+    config: &config::OfflinePuzzlesConfig,
+    min_rating: i32,
+    max_rating: i32,
+    min_popularity: i32,
+    theme: TacticalThemes,
+    opening: Openings,
+    variation: Variation,
+    op_side: Option<OpeningSide>,
+    result_limit: usize,
+) -> Option<Vec<config::Puzzle>> {
+    match &config.puzzle_sqlite_location {
+        Some(sqlite_path) => {
+            let path = std::path::Path::new(sqlite_path);
+            match search_sqlite_from_path(
+                path, min_rating, max_rating, min_popularity,
+                theme, opening, variation, op_side, result_limit,
+            ) {
+                Ok(results) => Some(results),
+                Err(e) => {
+                    eprintln!("CMS-013: SQLite search failed: {}", e);
+                    None
+                }
+            }
+        }
+        None => {
+            let csv_path = std::path::Path::new(&config.puzzle_db_location);
+            search_csv_from_path(
+                csv_path, min_rating, max_rating, min_popularity,
+                theme, opening, variation, op_side, result_limit,
+            )
+        }
+    }
+}
+
 impl SearchTab {
     pub fn new() -> Self {
         SearchTab {
@@ -333,84 +531,12 @@ impl SearchTab {
     }
 
     pub async fn search(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation: Variation, op_side: Option<OpeningSide>, result_limit: usize) -> Option<Vec<config::Puzzle>> {
-        let mut puzzles: Vec<config::Puzzle> = Vec::new();
-
-        let reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(&config::SETTINGS.puzzle_db_location);
-
-        if let Ok(mut reader) = reader {
-            puzzles.clear();
-            //self.current_puzzle_move = 1;
-            //self.current_puzzle = 0;
-            if opening != Openings::Any {
-                let opening_tag: &str = if variation.name != Variation::ANY_STR {
-                    &variation.name
-                } else {
-                    opening.get_field_name()
-                };
-                let side = match op_side {
-                    None => OpeningSide::Any,
-                    Some(x) => x
-                };
-                match side {
-                    OpeningSide::Any => {
-                        for result in reader.deserialize::<config::Puzzle>() {
-                            if let Ok(record) = result &&
-                                    record.opening.contains(opening_tag) &&
-                                    record.rating >= min_rating && record.rating <= max_rating &&
-                                    record.popularity >= min_popularity &&
-                                    record.themes.contains(theme.get_tag_name()) {
-                                puzzles.push(record);
-                            }
-                            if puzzles.len() == result_limit {
-                                break;
-                            }
-                        }
-                    } OpeningSide::Black => {
-                        for result in reader.deserialize::<config::Puzzle>() {
-                            if let Ok(record) = result &&
-                                    record.opening.contains(opening_tag) &&
-                                    !record.game_url.contains("black") &&
-                                    record.rating >= min_rating && record.rating <= max_rating &&
-                                    record.popularity >= min_popularity &&
-                                    record.themes.contains(theme.get_tag_name()) {
-                                puzzles.push(record);
-                            }
-                            if puzzles.len() == result_limit {
-                                break;
-                            }
-                        }
-                    } OpeningSide::White => {
-                        for result in reader.deserialize::<config::Puzzle>() {
-                            if let Ok(record) = result &&
-                                    record.opening.contains(opening_tag) &&
-                                    record.game_url.contains("black") &&
-                                    record.rating >= min_rating && record.rating <= max_rating &&
-                                    record.popularity >= min_popularity &&
-                                    record.themes.contains(theme.get_tag_name()) {
-                                puzzles.push(record);
-                            }
-                            if puzzles.len() == result_limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else {
-                for result in reader.deserialize::<config::Puzzle>() {
-                    if let Ok(record) = result && record.rating >= min_rating && record.rating <= max_rating &&
-                            record.popularity >= min_popularity &&
-                            record.themes.contains(theme.get_tag_name()) {
-                        puzzles.push(record);
-                    }
-                    if puzzles.len() == result_limit {
-                        break;
-                    }
-                }
-            }
-        }
-        Some(puzzles)
+        let config = load_config();
+        search_with_config(
+            &config,
+            min_rating, max_rating, min_popularity,
+            theme, opening, variation, op_side, result_limit,
+        )
     }
 }
 
@@ -563,5 +689,326 @@ impl Tab for SearchTab {
             .into();
 
         content.map(Message::Search)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use offline_chess_puzzles::puzzle_import::MIGRATIONS;
+    use diesel_migrations::MigrationHarness;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const FIXTURE: &str = include_str!("../tests/fixtures/lichess_puzzles_sample.csv");
+
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp_path(name: &str) -> std::path::PathBuf {
+        let id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp");
+        std::fs::create_dir_all(&dir).ok();
+        dir.join(format!("{}_{}_{}", name, std::process::id(), id))
+    }
+
+    fn setup_test_sqlite() -> std::path::PathBuf {
+        let db_path = tmp_path("search_tab_test");
+        let mut conn = diesel::sqlite::SqliteConnection::establish(db_path.to_str().unwrap())
+            .expect("Failed to open test database");
+        conn.run_pending_migrations(MIGRATIONS)
+            .expect("Failed to run migrations");
+        offline_chess_puzzles::puzzle_import::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
+            .expect("fixture import should succeed");
+        drop(conn);
+        db_path
+    }
+
+    fn setup_test_csv() -> std::path::PathBuf {
+        let csv_path = tmp_path("search_tab_test.csv");
+        std::fs::write(&csv_path, FIXTURE.as_bytes()).expect("write fixture csv");
+        csv_path
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ── Adapter test ────────────────────────────────────────────────
+
+    #[test]
+    fn test_adapt_sqlite_puzzle_all_fields() {
+        let lib_puzzle = offline_chess_puzzles::models::Puzzle {
+            puzzle_id: "test_001".to_string(),
+            fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1".to_string(),
+            moves: "e7e5".to_string(),
+            rating: 1500,
+            rating_deviation: 70,
+            popularity: 95,
+            nb_plays: 10000,
+            themes: "fork opening".to_string(),
+            game_url: "https://lichess.org/training/abc123".to_string(),
+            opening: "Italian_Game".to_string(),
+        };
+        let adapted = adapt_sqlite_puzzle(lib_puzzle);
+        assert_eq!(adapted.puzzle_id, "test_001");
+        assert_eq!(adapted.fen, "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+        assert_eq!(adapted.moves, "e7e5");
+        assert_eq!(adapted.rating, 1500);
+        assert_eq!(adapted.rating_deviation, 70);
+        assert_eq!(adapted.popularity, 95);
+        assert_eq!(adapted.nb_plays, 10000);
+        assert_eq!(adapted.themes, "fork opening");
+        assert_eq!(adapted.game_url, "https://lichess.org/training/abc123");
+        assert_eq!(adapted.opening, "Italian_Game");
+    }
+
+    // ── Dispatcher: None → CSV ──────────────────────────────────────
+
+    #[test]
+    fn test_none_sqlite_uses_csv() {
+        let csv_path = setup_test_csv();
+        let mut cfg = config::OfflinePuzzlesConfig::default();
+        cfg.puzzle_sqlite_location = None;
+        cfg.puzzle_db_location = csv_path.to_str().unwrap().to_string();
+
+        let results = search_with_config(
+            &cfg,
+            0, 4000, -100,
+            TacticalThemes::All,
+            Openings::Any,
+            Variation::ANY.clone(),
+            Some(OpeningSide::Any),
+            10,
+        );
+        assert!(results.is_some());
+        let puzzles = results.unwrap();
+        let mut ids: Vec<&str> = puzzles.iter().map(|p| p.puzzle_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["00008", "00009", "00010", "00011"]);
+        cleanup(&csv_path);
+    }
+
+    // ── Dispatcher: Some → SQLite ───────────────────────────────────
+
+    #[test]
+    fn test_some_sqlite_uses_sqlite() {
+        let db_path = setup_test_sqlite();
+        let mut cfg = config::OfflinePuzzlesConfig::default();
+        cfg.puzzle_sqlite_location = Some(db_path.to_str().unwrap().to_string());
+        cfg.puzzle_db_location = "/nonexistent/path.csv".to_string();
+
+        let results = search_with_config(
+            &cfg,
+            0, 4000, -100,
+            TacticalThemes::All,
+            Openings::Any,
+            Variation::ANY.clone(),
+            Some(OpeningSide::Any),
+            10,
+        );
+        assert!(results.is_some());
+        let puzzles = results.unwrap();
+        let mut ids: Vec<&str> = puzzles.iter().map(|p| p.puzzle_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["00008", "00009", "00010", "00011"]);
+        cleanup(&db_path);
+    }
+
+    // ── Dispatcher: error → no fallback ─────────────────────────────
+
+    #[test]
+    fn test_sqlite_error_no_fallback() {
+        let csv_path = setup_test_csv();
+        let mut cfg = config::OfflinePuzzlesConfig::default();
+        cfg.puzzle_sqlite_location = Some("/nonexistent/db.sqlite".to_string());
+        cfg.puzzle_db_location = csv_path.to_str().unwrap().to_string();
+
+        let results = search_with_config(
+            &cfg,
+            0, 4000, -100,
+            TacticalThemes::All,
+            Openings::Any,
+            Variation::ANY.clone(),
+            Some(OpeningSide::Any),
+            10,
+        );
+        assert!(results.is_none(), "SQLite error should NOT fall back to CSV");
+        cleanup(&csv_path);
+    }
+
+    // ── Parity: ALL ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parity_all() {
+        let db_path = setup_test_sqlite();
+        let csv_path = setup_test_csv();
+
+        let csv_results = search_csv_from_path(
+            &csv_path, 0, 4000, -100,
+            TacticalThemes::All, Openings::Any, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+        let sqlite_results = search_sqlite_from_path(
+            &db_path, 0, 4000, -100,
+            TacticalThemes::All, Openings::Any, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+
+        let csv_ids: std::collections::HashSet<&str> = csv_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        let sqlite_ids: std::collections::HashSet<&str> = sqlite_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        assert_eq!(csv_ids, sqlite_ids);
+        cleanup(&db_path);
+        cleanup(&csv_path);
+    }
+
+    // ── Parity: rating + popularity ─────────────────────────────────
+
+    #[test]
+    fn test_parity_rating_popularity() {
+        let db_path = setup_test_sqlite();
+        let csv_path = setup_test_csv();
+
+        let csv_results = search_csv_from_path(
+            &csv_path, 1500, 1700, 90,
+            TacticalThemes::All, Openings::Any, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+        let sqlite_results = search_sqlite_from_path(
+            &db_path, 1500, 1700, 90,
+            TacticalThemes::All, Openings::Any, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+
+        let csv_ids: std::collections::HashSet<&str> = csv_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        let sqlite_ids: std::collections::HashSet<&str> = sqlite_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        assert_eq!(csv_ids, sqlite_ids);
+        cleanup(&db_path);
+        cleanup(&csv_path);
+    }
+
+    // ── Parity: theme ───────────────────────────────────────────────
+
+    #[test]
+    fn test_parity_theme_fork() {
+        let db_path = setup_test_sqlite();
+        let csv_path = setup_test_csv();
+
+        let csv_results = search_csv_from_path(
+            &csv_path, 0, 4000, -100,
+            TacticalThemes::Fork, Openings::Any, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+        let sqlite_results = search_sqlite_from_path(
+            &db_path, 0, 4000, -100,
+            TacticalThemes::Fork, Openings::Any, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+
+        let csv_ids: std::collections::HashSet<&str> = csv_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        let sqlite_ids: std::collections::HashSet<&str> = sqlite_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        assert_eq!(csv_ids, sqlite_ids);
+        cleanup(&db_path);
+        cleanup(&csv_path);
+    }
+
+    // ── Parity: opening ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parity_opening() {
+        let db_path = setup_test_sqlite();
+        let csv_path = setup_test_csv();
+
+        let csv_results = search_csv_from_path(
+            &csv_path, 0, 4000, -100,
+            TacticalThemes::All, Openings::ItalianGame, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+        let sqlite_results = search_sqlite_from_path(
+            &db_path, 0, 4000, -100,
+            TacticalThemes::All, Openings::ItalianGame, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+
+        let csv_ids: std::collections::HashSet<&str> = csv_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        let sqlite_ids: std::collections::HashSet<&str> = sqlite_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        assert_eq!(csv_ids, sqlite_ids);
+        cleanup(&db_path);
+        cleanup(&csv_path);
+    }
+
+    // ── Parity: side Black ──────────────────────────────────────────
+
+    #[test]
+    fn test_parity_side_black() {
+        let db_path = setup_test_sqlite();
+        let csv_path = setup_test_csv();
+
+        let csv_results = search_csv_from_path(
+            &csv_path, 0, 4000, -100,
+            TacticalThemes::All, Openings::ItalianGame, Variation::ANY.clone(),
+            Some(OpeningSide::Black), 10,
+        ).unwrap();
+        let sqlite_results = search_sqlite_from_path(
+            &db_path, 0, 4000, -100,
+            TacticalThemes::All, Openings::ItalianGame, Variation::ANY.clone(),
+            Some(OpeningSide::Black), 10,
+        ).unwrap();
+
+        let csv_ids: std::collections::HashSet<&str> = csv_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        let sqlite_ids: std::collections::HashSet<&str> = sqlite_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        assert_eq!(csv_ids, sqlite_ids);
+        cleanup(&db_path);
+        cleanup(&csv_path);
+    }
+
+    // ── Parity: side White ──────────────────────────────────────────
+
+    #[test]
+    fn test_parity_side_white() {
+        let db_path = setup_test_sqlite();
+        let csv_path = setup_test_csv();
+
+        let csv_results = search_csv_from_path(
+            &csv_path, 0, 4000, -100,
+            TacticalThemes::All, Openings::ItalianGame, Variation::ANY.clone(),
+            Some(OpeningSide::White), 10,
+        ).unwrap();
+        let sqlite_results = search_sqlite_from_path(
+            &db_path, 0, 4000, -100,
+            TacticalThemes::All, Openings::ItalianGame, Variation::ANY.clone(),
+            Some(OpeningSide::White), 10,
+        ).unwrap();
+
+        let csv_ids: std::collections::HashSet<&str> = csv_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        let sqlite_ids: std::collections::HashSet<&str> = sqlite_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        assert_eq!(csv_ids, sqlite_ids);
+        cleanup(&db_path);
+        cleanup(&csv_path);
+    }
+
+    // ── Parity: combined ────────────────────────────────────────────
+
+    #[test]
+    fn test_parity_combined() {
+        let db_path = setup_test_sqlite();
+        let csv_path = setup_test_csv();
+
+        let csv_results = search_csv_from_path(
+            &csv_path, 1600, 1800, 0,
+            TacticalThemes::Fork, Openings::ItalianGame, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+        let sqlite_results = search_sqlite_from_path(
+            &db_path, 1600, 1800, 0,
+            TacticalThemes::Fork, Openings::ItalianGame, Variation::ANY.clone(),
+            Some(OpeningSide::Any), 10,
+        ).unwrap();
+
+        let csv_ids: std::collections::HashSet<&str> = csv_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        let sqlite_ids: std::collections::HashSet<&str> = sqlite_results.iter().map(|p| p.puzzle_id.as_str()).collect();
+        assert_eq!(csv_ids, sqlite_ids);
+        cleanup(&db_path);
+        cleanup(&csv_path);
     }
 }
