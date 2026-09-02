@@ -120,17 +120,29 @@ pub fn upsert_checkpoint(
     Ok(())
 }
 
-pub fn import_puzzles_from_reader_chunked<R: std::io::Read>(
+// ── CMS-009 — Shared chunked import implementation ────────────────
+//
+// `max_rows` = maximum TOTAL rows confirmed in checkpoint (not "insert N more").
+// `None` = unlimited (CMS-006 behavior preserved).
+// `Some(n)` = capped at n total rows.
+
+fn import_puzzles_from_reader_chunked_impl<R: std::io::Read>(
     conn: &mut SqliteConnection,
     source: R,
     source_key: &str,
     chunk_size: usize,
+    max_rows: Option<usize>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     if chunk_size == 0 {
         return Err("chunk_size must be greater than 0".into());
     }
     if source_key.is_empty() {
         return Err("source_key must not be empty".into());
+    }
+    if let Some(limit) = max_rows {
+        if limit == 0 {
+            return Err("max_rows must be greater than 0".into());
+        }
     }
 
     let mut reader = csv::ReaderBuilder::new()
@@ -142,9 +154,15 @@ pub fn import_puzzles_from_reader_chunked<R: std::io::Read>(
         return Err("completed_rows is negative".into());
     }
 
-    // Deserialize using header-based mapping (Puzzle's serde rename attributes).
-    // DailyDate is an unknown CSV field for Puzzle and is ignored
-    // during header-based Serde deserialization.
+    // When limited, if already at or past the target, nothing to do.
+    if let Some(limit) = max_rows {
+        if completed_rows as usize >= limit {
+            return Ok(0);
+        }
+    }
+
+    let max_insertable = max_rows.map(|limit| limit - completed_rows as usize);
+
     let mut iter = reader.deserialize::<Puzzle>();
 
     // Skip already-confirmed rows, validating deserialization on each.
@@ -158,8 +176,16 @@ pub fn import_puzzles_from_reader_chunked<R: std::io::Read>(
     let mut previous_completed = completed_rows;
 
     loop {
-        let mut chunk: Vec<Puzzle> = Vec::with_capacity(chunk_size);
-        for _ in 0..chunk_size {
+        let effective_chunk = match max_insertable {
+            Some(remaining) => chunk_size.min(remaining - total_inserted),
+            None => chunk_size,
+        };
+        if effective_chunk == 0 {
+            break;
+        }
+
+        let mut chunk: Vec<Puzzle> = Vec::with_capacity(effective_chunk);
+        for _ in 0..effective_chunk {
             match iter.next() {
                 Some(Ok(puzzle)) => chunk.push(puzzle),
                 Some(Err(e)) => return Err(e.into()),
@@ -200,6 +226,25 @@ pub fn import_puzzles_from_reader_chunked<R: std::io::Read>(
     }
 
     Ok(total_inserted)
+}
+
+pub fn import_puzzles_from_reader_chunked<R: std::io::Read>(
+    conn: &mut SqliteConnection,
+    source: R,
+    source_key: &str,
+    chunk_size: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    import_puzzles_from_reader_chunked_impl(conn, source, source_key, chunk_size, None)
+}
+
+pub fn import_puzzles_from_reader_chunked_limited<R: std::io::Read>(
+    conn: &mut SqliteConnection,
+    source: R,
+    source_key: &str,
+    chunk_size: usize,
+    max_rows: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    import_puzzles_from_reader_chunked_impl(conn, source, source_key, chunk_size, Some(max_rows))
 }
 
 // ── CMS-007 — File wrapper & stable source identity ────────────────
@@ -288,6 +333,35 @@ pub fn import_puzzles_from_file_chunked<P: AsRef<std::path::Path>>(
     let source_key = puzzle_source_key_from_open_file(&mut file)?;
 
     let inserted = import_puzzles_from_reader_chunked(conn, file, &source_key, chunk_size)?;
+
+    Ok(PuzzleFileImportResult {
+        source_key,
+        inserted_rows: inserted,
+    })
+}
+
+/// CMS-009 — Limited file wrapper.
+///
+/// Same contract as `import_puzzles_from_file_chunked` but capped at `max_rows`
+/// total confirmed rows in the checkpoint. Uses the same file handle for
+/// fingerprinting and import (no TOCTOU).
+pub fn import_puzzles_from_file_chunked_limited<P: AsRef<std::path::Path>>(
+    conn: &mut SqliteConnection,
+    path: P,
+    chunk_size: usize,
+    max_rows: usize,
+) -> Result<PuzzleFileImportResult, Box<dyn std::error::Error>> {
+    let mut file = std::fs::File::open(&path)?;
+
+    let source_key = puzzle_source_key_from_open_file(&mut file)?;
+
+    let inserted = import_puzzles_from_reader_chunked_limited(
+        conn,
+        file,
+        &source_key,
+        chunk_size,
+        max_rows,
+    )?;
 
     Ok(PuzzleFileImportResult {
         source_key,
@@ -924,6 +998,169 @@ Rating,GameUrl,PuzzleId,OpeningTags,FEN,Moves,RatingDeviation,Popularity,NbPlays
             .first::<i64>(&mut conn)
             .expect("checkpoint");
         assert_eq!(cp, 4);
+
+        std::fs::remove_file(&p).ok();
+    }
+
+    // ── CMS-009 tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_cms009_limited_import_a() {
+        // fixture=4, max_rows=2, chunk_size=2 → inserted=2
+        let mut conn = setup_test_db();
+        let inserted = super::import_puzzles_from_reader_chunked_limited(
+            &mut conn,
+            FIXTURE.as_bytes(),
+            "cms009-a",
+            2,
+            2,
+        )
+        .expect("limited import should succeed");
+        assert_eq!(inserted, 2);
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count");
+        assert_eq!(rows, 2);
+
+        let cp: i64 = crate::schema::puzzle_import_progress::table
+            .filter(crate::schema::puzzle_import_progress::dsl::source_key.eq("cms009-a"))
+            .select(crate::schema::puzzle_import_progress::dsl::completed_rows)
+            .first::<i64>(&mut conn)
+            .expect("checkpoint");
+        assert_eq!(cp, 2);
+    }
+
+    #[test]
+    fn test_cms009_limited_import_b() {
+        // second execution with same max_rows=2 → inserted=0
+        let mut conn = setup_test_db();
+
+        super::import_puzzles_from_reader_chunked_limited(
+            &mut conn,
+            FIXTURE.as_bytes(),
+            "cms009-b",
+            2,
+            2,
+        )
+        .expect("first import");
+
+        let inserted = super::import_puzzles_from_reader_chunked_limited(
+            &mut conn,
+            FIXTURE.as_bytes(),
+            "cms009-b",
+            2,
+            2,
+        )
+        .expect("second import");
+        assert_eq!(inserted, 0);
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count");
+        assert_eq!(rows, 2);
+
+        let cp: i64 = crate::schema::puzzle_import_progress::table
+            .filter(crate::schema::puzzle_import_progress::dsl::source_key.eq("cms009-b"))
+            .select(crate::schema::puzzle_import_progress::dsl::completed_rows)
+            .first::<i64>(&mut conn)
+            .expect("checkpoint");
+        assert_eq!(cp, 2);
+    }
+
+    #[test]
+    fn test_cms009_limited_import_c() {
+        // increase max_rows from 2 to 4 → inserted=2 additional
+        let mut conn = setup_test_db();
+
+        super::import_puzzles_from_reader_chunked_limited(
+            &mut conn,
+            FIXTURE.as_bytes(),
+            "cms009-c",
+            2,
+            2,
+        )
+        .expect("first import");
+
+        let inserted = super::import_puzzles_from_reader_chunked_limited(
+            &mut conn,
+            FIXTURE.as_bytes(),
+            "cms009-c",
+            2,
+            4,
+        )
+        .expect("resume import");
+        assert_eq!(inserted, 2);
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count");
+        assert_eq!(rows, 4);
+
+        let cp: i64 = crate::schema::puzzle_import_progress::table
+            .filter(crate::schema::puzzle_import_progress::dsl::source_key.eq("cms009-c"))
+            .select(crate::schema::puzzle_import_progress::dsl::completed_rows)
+            .first::<i64>(&mut conn)
+            .expect("checkpoint");
+        assert_eq!(cp, 4);
+    }
+
+    #[test]
+    fn test_cms009_limited_import_d() {
+        // chunk_size=3, max_rows=2 → must insert exactly 2, never 3
+        let mut conn = setup_test_db();
+        let inserted = super::import_puzzles_from_reader_chunked_limited(
+            &mut conn,
+            FIXTURE.as_bytes(),
+            "cms009-d",
+            3,
+            2,
+        )
+        .expect("limited import should succeed");
+        assert_eq!(inserted, 2);
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count");
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn test_cms009_limited_import_e() {
+        // max_rows=0 → Err
+        let mut conn = setup_test_db();
+        let result = super::import_puzzles_from_reader_chunked_limited(
+            &mut conn,
+            FIXTURE.as_bytes(),
+            "cms009-e",
+            2,
+            0,
+        );
+        assert!(result.is_err(), "max_rows=0 should return Err");
+    }
+
+    #[test]
+    fn test_cms009_file_wrapper_limited() {
+        let p = write_tmp("cms009_fw", FIXTURE.as_bytes());
+        let mut conn = setup_test_db();
+
+        let result = super::import_puzzles_from_file_chunked_limited(&mut conn, &p, 2, 2)
+            .expect("limited file wrapper should succeed");
+        assert_eq!(result.inserted_rows, 2);
+
+        // source_key must be identical to full-file source_key
+        let full_key = super::puzzle_source_key_from_file(&p).unwrap();
+        assert_eq!(result.source_key, full_key, "limited source_key must match full");
+
+        let rows: i64 = crate::schema::puzzles::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count");
+        assert_eq!(rows, 2);
 
         std::fs::remove_file(&p).ok();
     }
