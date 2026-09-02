@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use iced::Font;
 
-use diesel::prelude::*;
+pub use crate::models::Puzzle;
 
 pub static SETTINGS: LazyLock<OfflinePuzzlesConfig> = LazyLock::new(|| {
     load_config()
@@ -239,38 +239,6 @@ pub fn coord_to_san(board: &Board, coords: String, lang: &lang::Language) -> Opt
         }
     }
     san
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, Queryable)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
-pub struct Puzzle {
-    #[serde(rename = "PuzzleId")]
-    pub puzzle_id: String,
-    #[serde(rename = "FEN")]
-    pub fen: String,
-    #[serde(rename = "Moves")]
-    pub moves: String,
-    #[serde(rename = "Rating")]
-    pub rating: i32,
-    #[serde(rename = "RatingDeviation")]
-    pub rating_deviation: i32,
-    #[serde(rename = "Popularity")]
-    pub popularity: i32,
-    #[serde(rename = "NbPlays")]
-    pub nb_plays: i32,
-    #[serde(rename = "Themes")]
-    pub themes: String,
-    #[serde(rename = "GameUrl")]
-    pub game_url: String,
-    #[serde(rename = "OpeningTags")]
-    #[serde(default)]
-    pub opening: String,
-}
-
-impl Puzzle {
-    pub fn solver_move_count(&self) -> usize {
-        self.moves.split_whitespace().count() / 2
-    }
 }
 
 #[cfg(test)]
