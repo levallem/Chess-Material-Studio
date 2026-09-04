@@ -3,12 +3,353 @@ use std::str::FromStr;
 use lopdf::dictionary;
 use lopdf::{Document, Object, Stream};
 use lopdf::content::{Content, Operation};
-use chess::{Board, ChessMove, Color, Piece, Square};
+use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Rank, Square};
 
 use crate::{config, PuzzleTab, lang};
 
-// This is basically all copy-pasted from the lopdf example, I left the comments
-// as they might be useful.
+// ─── Private helpers for PGN generation ────────────────────────────────────
+
+/// Parse a UCI move string and verify it is legal on the given board.
+fn parse_legal_uci_move(board: &Board, uci: &str) -> Result<ChessMove, String> {
+    let (source_str, dest_str, promo_char) = if uci.len() == 5 {
+        (&uci[0..2], &uci[2..4], Some(uci[4..5].to_lowercase()))
+    } else if uci.len() == 4 {
+        (&uci[0..2], &uci[2..4], None)
+    } else {
+        return Err(format!("Invalid UCI length: {}", uci));
+    };
+
+    let source = Square::from_str(source_str)
+        .map_err(|e| format!("Invalid source square '{}': {:?}", source_str, e))?;
+    let dest = Square::from_str(dest_str)
+        .map_err(|e| format!("Invalid destination square '{}': {:?}", dest_str, e))?;
+
+    let promotion = match promo_char.as_deref() {
+        Some("q") => Some(Piece::Queen),
+        Some("r") => Some(Piece::Rook),
+        Some("b") => Some(Piece::Bishop),
+        Some("n") => Some(Piece::Knight),
+        Some("") | None => None,
+        Some(other) => return Err(format!("Invalid promotion piece: '{}'", other)),
+    };
+
+    let chess_move = ChessMove::new(source, dest, promotion);
+    if board.legal(chess_move) {
+        Ok(chess_move)
+    } else {
+        Err(format!("Illegal UCI move: {} on board {}", uci, board))
+    }
+}
+
+/// Generate standard (language-independent) SAN for a legal move.
+///
+/// Uses KQRBN letters, O-O / O-O-O for castling, x for captures,
+/// =Q/=R/=B/=N for promotions, + for check, # for checkmate.
+fn move_to_standard_san(board: &Board, chess_move: ChessMove) -> Result<String, String> {
+    if !board.legal(chess_move) {
+        return Err(format!("Illegal move on board {}", board));
+    }
+
+    let source = chess_move.get_source();
+    let dest = chess_move.get_dest();
+    let piece = board.piece_on(source).ok_or("No piece on source square")?;
+    let is_capture = board.piece_on(dest).is_some()
+        || (piece == Piece::Pawn && source.get_file() != dest.get_file());
+
+    // Castling
+    if piece == Piece::King {
+        let file_diff = (source.get_file().to_index() as i8) - (dest.get_file().to_index() as i8);
+        if file_diff == 2 {
+            let mut san = "O-O-O".to_string();
+            let next = board.make_move_new(chess_move);
+            match next.status() {
+                BoardStatus::Checkmate => san.push('#'),
+                _ if next.checkers().popcnt() != 0 => san.push('+'),
+                _ => {}
+            }
+            return Ok(san);
+        } else if file_diff == -2 {
+            let mut san = "O-O".to_string();
+            let next = board.make_move_new(chess_move);
+            match next.status() {
+                BoardStatus::Checkmate => san.push('#'),
+                _ if next.checkers().popcnt() != 0 => san.push('+'),
+                _ => {}
+            }
+            return Ok(san);
+        }
+    }
+
+    let mut san = String::new();
+
+    // Piece letter (pawns have none)
+    match piece {
+        Piece::King => san.push('K'),
+        Piece::Queen => san.push('Q'),
+        Piece::Rook => san.push('R'),
+        Piece::Bishop => san.push('B'),
+        Piece::Knight => san.push('N'),
+        Piece::Pawn => {}
+    }
+
+    // Disambiguation for non-pawn, non-king pieces
+    if piece != Piece::King && piece != Piece::Pawn {
+        let mut has_ambiguity = false;
+        let mut same_file = false;
+        let mut same_rank = false;
+        for legal_m in MoveGen::new_legal(board) {
+            if legal_m == chess_move {
+                continue;
+            }
+            if board.piece_on(legal_m.get_source()) == Some(piece)
+                && legal_m.get_dest() == dest
+            {
+                has_ambiguity = true;
+                if legal_m.get_source().get_file() == source.get_file() {
+                    same_file = true;
+                }
+                if legal_m.get_source().get_rank() == source.get_rank() {
+                    same_rank = true;
+                }
+            }
+        }
+        if has_ambiguity {
+            if !same_file {
+                let file_char = (b'a' + source.get_file().to_index() as u8) as char;
+                san.push(file_char);
+            } else if !same_rank {
+                let rank_char = (b'1' + source.get_rank().to_index() as u8) as char;
+                san.push(rank_char);
+            } else {
+                let file_char = (b'a' + source.get_file().to_index() as u8) as char;
+                let rank_char = (b'1' + source.get_rank().to_index() as u8) as char;
+                san.push(file_char);
+                san.push(rank_char);
+            }
+        }
+    }
+
+    // Capture
+    if is_capture {
+        if piece == Piece::Pawn {
+            let file_char = (b'a' + source.get_file().to_index() as u8) as char;
+            // Insert file before 'x' for pawn captures
+            let mut capture_str = String::new();
+            capture_str.push(file_char);
+            capture_str.push('x');
+            capture_str.push_str(&dest.to_string());
+            san.push_str(&capture_str);
+        } else {
+            san.push('x');
+            san.push_str(&dest.to_string());
+        }
+    } else {
+        san.push_str(&dest.to_string());
+    }
+
+    // Promotion
+    if let Some(promo) = chess_move.get_promotion() {
+        let promo_char = match promo {
+            Piece::Queen => "Q",
+            Piece::Rook => "R",
+            Piece::Bishop => "B",
+            Piece::Knight => "N",
+            _ => return Err("Invalid promotion piece".to_string()),
+        };
+        san.push('=');
+        san.push_str(promo_char);
+    }
+
+    // Check / checkmate
+    let next = board.make_move_new(chess_move);
+    match next.status() {
+        BoardStatus::Checkmate => san.push('#'),
+        _ if next.checkers().popcnt() != 0 => san.push('+'),
+        _ => {}
+    }
+
+    Ok(san)
+}
+
+/// Convert a board to a PGN-compatible FEN string.
+///
+/// The `chess` crate stores en passant as the destination of the double-pushed
+/// pawn (e.g. e5 after e7-e5), but standard FEN requires the capture-target
+/// square (e.g. e6). This function corrects that and normalizes counters to `0 1`.
+fn board_to_pgn_fen(board: &Board) -> Result<String, String> {
+    let fen = board.to_string();
+    let fields: Vec<&str> = fen.split_whitespace().collect();
+    if fields.len() != 6 {
+        return Err(format!("Unexpected FEN field count: {}", fields.len()));
+    }
+
+    // Correct en passant: the chess crate stores the double-push destination,
+    // but standard FEN uses the capture-target square (one rank further).
+    let ep_field = match board.en_passant() {
+        None => "-".to_string(),
+        Some(sq) => {
+            let rank = sq.get_rank().to_index();
+            let file = sq.get_file();
+            let target_rank = if board.side_to_move() == Color::White {
+                // Black just moved: target is one rank further toward rank 8
+                Rank::from_index(rank + 1)
+            } else {
+                // White just moved: target is one rank further toward rank 1
+                Rank::from_index(rank - 1)
+            };
+            Square::make_square(target_rank, file).to_string()
+        }
+    };
+
+    Ok(format!(
+        "{} {} {} {} 0 1",
+        fields[0], fields[1], fields[2], ep_field
+    ))
+}
+
+/// Build the PGN text for a single puzzle as a complete game.
+fn build_pgn_game(puzzle: &config::Puzzle, date: &str) -> Result<String, String> {
+    let moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
+    if moves.is_empty() {
+        return Err("Puzzle has no moves".to_string());
+    }
+
+    // Parse original FEN
+    let original_board = Board::from_str(&puzzle.fen)
+        .map_err(|e| format!("Invalid FEN '{}': {:?}", puzzle.fen, e))?;
+
+    // Apply trigger move (moves[0]) — it is NOT part of the solution
+    let trigger = parse_legal_uci_move(&original_board, moves[0])
+        .map_err(|e| format!("Trigger move error: {}", e))?;
+    let puzzle_board = original_board.make_move_new(trigger);
+
+    // The solution moves start at index 1
+    let solution_moves = if moves.len() >= 2 { &moves[1..] } else { &[] };
+
+    // Determine side to move AFTER the trigger
+    let solver_is_white = puzzle_board.side_to_move() == Color::White;
+
+    // Build FEN
+    let fen = board_to_pgn_fen(&puzzle_board)?;
+
+    // Build headers
+    let mut pgn = String::new();
+    pgn.push_str("[Event \"Chess Puzzle\"]\n");
+    pgn.push_str(&format!(
+        "[Site \"https://lichess.org/training/{}\"]\n",
+        puzzle.puzzle_id
+    ));
+    pgn.push_str(&format!("[Date \"{}\"]\n", date));
+    pgn.push_str("[Round \"-\"]\n");
+    pgn.push_str(&format!(
+        "[White \"{}\"]\n",
+        if solver_is_white {
+            "Player"
+        } else {
+            "Opponent"
+        }
+    ));
+    pgn.push_str(&format!(
+        "[Black \"{}\"]\n",
+        if solver_is_white {
+            "Opponent"
+        } else {
+            "Player"
+        }
+    ));
+    pgn.push_str("[Result \"*\"]\n");
+    pgn.push_str(&format!("[GameID \"{}\"]\n", puzzle.game_url));
+    pgn.push_str(&format!("[FEN \"{}\"]\n", fen));
+    pgn.push_str("[SetUp \"1\"]\n");
+    if !puzzle.opening.is_empty() {
+        pgn.push_str(&format!("[Opening \"{}\"]\n", puzzle.opening));
+    }
+    pgn.push_str(&format!("[PuzzleRating \"{}\"]\n", puzzle.rating));
+    pgn.push_str(&format!(
+        "[PuzzleRatingDeviation \"{}\"]\n",
+        puzzle.rating_deviation
+    ));
+    pgn.push_str(&format!("[PuzzlePopularity \"{}\"]\n", puzzle.popularity));
+    pgn.push_str(&format!("[PuzzleNbPlays \"{}\"]\n", puzzle.nb_plays));
+    pgn.push_str(&format!("[PuzzleThemes \"{}\"]\n", puzzle.themes));
+    pgn.push('\n');
+
+    // Build move text
+    let mut board = puzzle_board;
+    let mut move_number: usize = 1;
+    let mut move_text = String::new();
+    let mut first_move = true;
+
+    for uci_move in solution_moves {
+        let chess_move = parse_legal_uci_move(&board, uci_move)
+            .map_err(|e| format!("Solution move error: {}", e))?;
+        let san = move_to_standard_san(&board, chess_move)?;
+
+        if board.side_to_move() == Color::White {
+            if !move_text.is_empty() {
+                move_text.push(' ');
+            }
+            move_text.push_str(&format!("{}. ", move_number));
+        } else if first_move {
+            move_text.push_str(&format!("{}... ", move_number));
+        } else {
+            move_text.push(' ');
+        }
+
+        move_text.push_str(&san);
+
+        board = board.make_move_new(chess_move);
+
+        if board.side_to_move() == Color::White {
+            move_number += 1;
+        }
+        first_move = false;
+    }
+
+    if move_text.is_empty() {
+        pgn.push_str("*\n");
+    } else {
+        move_text.push_str(" *\n");
+        pgn.push_str(&move_text);
+    }
+
+    Ok(pgn)
+}
+
+/// Build the full PGN content for multiple puzzles.
+fn build_pgn_content(
+    puzzles: &[config::Puzzle],
+    date: &str,
+) -> Result<String, String> {
+    let mut content = String::new();
+    for (i, puzzle) in puzzles.iter().enumerate() {
+        let game = build_pgn_game(puzzle, date)?;
+        content.push_str(&game);
+        if i + 1 < puzzles.len() {
+            content.push('\n');
+        }
+    }
+    Ok(content)
+}
+
+// ─── Public API ────────────────────────────────────────────────────────────
+
+pub fn to_pgn(puzzles: &[config::Puzzle], _lang: &lang::Language, path: String) {
+    let date = chrono::Local::now().format("%Y.%m.%d").to_string();
+    match build_pgn_content(puzzles, &date) {
+        Ok(content) => {
+            if let Err(e) = std::fs::write(&path, &content) {
+                eprintln!("Error writing PGN file '{}': {}", path, e);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error building PGN content: {}", e);
+        }
+    }
+}
+
+// ─── PDF (unchanged) ───────────────────────────────────────────────────────
+
 pub fn to_pdf(puzzles: &[config::Puzzle], number_of_pages: i32, lang: &lang::Language, path: String) {
 
     // Create a document object and add the font and font descriptor to it
@@ -310,89 +651,741 @@ fn gen_diagram_operations(index: usize, puzzle: &config::Puzzle, start_x:i32, st
     ops
 }
 
-pub fn to_pgn(puzzles: &[config::Puzzle], lang: &lang::Language, path: String) {
-    let mut pgn_content = String::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for puzzle in puzzles.iter() {
-        // Start with a board from the FEN
-        let mut board = Board::from_str(&puzzle.fen).unwrap();
+    const FIXTURE: &str = include_str!("../tests/fixtures/lichess_puzzles_sample.csv");
 
-        // Add PGN headers
-        pgn_content.push_str("[Event \"Chess Puzzle\"]\n");
-        pgn_content.push_str(&format!("[Site \"https://lichess.org/training/{}\"]\n", puzzle.puzzle_id));
-        pgn_content.push_str(&format!("[Date \"{}\"]\n", chrono::Local::now().format("%Y.%m.%d")));
-        pgn_content.push_str(&format!("[White \"{}\"]\n", if board.side_to_move() == Color::White { "Player" } else { "Opponent" }));
-        pgn_content.push_str(&format!("[Black \"{}\"]\n", if board.side_to_move() == Color::Black { "Player" } else { "Opponent" }));
-        pgn_content.push_str("[Result \"*\"]\n");
-        pgn_content.push_str(&format!("[GameID \"{}\"]\n", puzzle.game_url));
-        pgn_content.push_str(&format!("[FEN \"{}\"]\n", puzzle.fen));
-        pgn_content.push_str("[SetUp \"1\"]\n");
-        if !puzzle.opening.is_empty() {
-            pgn_content.push_str(&format!("[Opening \"{}\"]\n", puzzle.opening));
-        }
-        // Add puzzle details
-        pgn_content.push_str(&format!("[PuzzleRating \"{}\"]\n", puzzle.rating));
-        pgn_content.push_str(&format!("[PuzzleRatingDeviation \"{}\"]\n", puzzle.rating_deviation));
-        pgn_content.push_str(&format!("[PuzzlePopularity \"{}\"]\n", puzzle.popularity));
-        pgn_content.push_str(&format!("[PuzzleNbPlays \"{}\"]\n", puzzle.nb_plays));
-        pgn_content.push_str(&format!("[PuzzleThemes \"{}\"]\n", puzzle.themes));
-
-        // Start the move list
-        let puzzle_moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
-        let mut move_number = 1;
-        let mut is_white_to_move = board.side_to_move() == Color::White;
-
-        // Process the first move (opponent's move that sets up the puzzle)
-        let first_move = puzzle_moves[0];
-        let movement = ChessMove::new(
-            Square::from_str(&String::from(&first_move[..2])).unwrap(),
-            Square::from_str(&String::from(&first_move[2..4])).unwrap(), 
-            PuzzleTab::check_promotion(first_move)
-        );
-
-        let san_move = config::coord_to_san(&board, String::from(first_move), lang).unwrap();
-
-        if is_white_to_move {
-            pgn_content.push_str(&format!("{}. {}", move_number, san_move));
-        } else {
-            pgn_content.push_str(&format!("{}... {}", move_number, san_move));
-            move_number += 1;
-        }
-
-        // Apply the move to the board
-        board = board.make_move_new(movement);
-        is_white_to_move = !is_white_to_move;
-
-        // Process the rest of the moves (the actual puzzle solution)
-        for chess_move in puzzle_moves.iter().skip(1) {
-            if is_white_to_move {
-                pgn_content.push_str(&format!(" {}. ", move_number));
-            } else {
-                pgn_content.push(' ');
-            }
-
-            let san_move = config::coord_to_san(&board, String::from(*chess_move), lang).unwrap();
-            pgn_content.push_str(&san_move);
-
-            // Apply the move to the board
-            let movement = ChessMove::new(
-                Square::from_str(&String::from(&chess_move[..2])).unwrap(),
-                Square::from_str(&String::from(&chess_move[2..4])).unwrap(), 
-                PuzzleTab::check_promotion(chess_move)
-            );
-            board = board.make_move_new(movement);
-
-            if !is_white_to_move {
-                move_number += 1;
-            }
-            is_white_to_move = !is_white_to_move;
-        }
-
-        // End the game with a result
-        pgn_content.push_str(" *\n\n");
+    fn read_fixture_puzzles() -> Vec<config::Puzzle> {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(FIXTURE.as_bytes());
+        reader
+            .deserialize::<config::Puzzle>()
+            .map(|r| r.expect("fixture row should deserialize"))
+            .collect()
     }
 
-    // Write to file
-    std::fs::write(path, pgn_content).expect("Unable to write PGN file");
-}
+    fn fixture_puzzle_00010() -> config::Puzzle {
+        let puzzles = read_fixture_puzzles();
+        puzzles.into_iter().find(|p| p.puzzle_id == "00010").expect("fixture must contain puzzle 00010")
+    }
 
+    // ── parse_legal_uci_move ──
+
+    #[test]
+    fn test_parse_legal_uci_move_valid() {
+        let board = Board::default();
+        let mv = parse_legal_uci_move(&board, "e2e4").unwrap();
+        assert_eq!(mv.get_source(), Square::E2);
+        assert_eq!(mv.get_dest(), Square::E4);
+    }
+
+    #[test]
+    fn test_parse_legal_uci_move_illegal() {
+        let board = Board::default();
+        let result = parse_legal_uci_move(&board, "e2e5");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_legal_uci_move_invalid_square() {
+        let board = Board::default();
+        let result = parse_legal_uci_move(&board, "z9z9");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_legal_uci_move_wrong_length() {
+        let board = Board::default();
+        let result = parse_legal_uci_move(&board, "e2");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_legal_uci_move_with_promotion() {
+        let board = Board::from_str("8/4P3/8/8/8/8/8/4K2k w - - 0 1").unwrap();
+        let mv = parse_legal_uci_move(&board, "e7e8q").unwrap();
+        assert_eq!(mv.get_promotion(), Some(Piece::Queen));
+    }
+
+    // ── move_to_standard_san ──
+
+    #[test]
+    fn test_san_pawn() {
+        let board = Board::default();
+        let mv = ChessMove::new(Square::E2, Square::E4, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "e4");
+    }
+
+    #[test]
+    fn test_san_pawn_short() {
+        let board = Board::default();
+        let mv = ChessMove::new(Square::E2, Square::E3, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "e3");
+    }
+
+    #[test]
+    fn test_san_piece() {
+        let board = Board::default();
+        let mv = ChessMove::new(Square::G1, Square::F3, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "Nf3");
+    }
+
+    #[test]
+    fn test_san_bishop() {
+        // Italian Game position where Bc4 is legal (e2 pawn moved to e4)
+        let board = Board::from_str("r1bqkbnr/pppppppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3").unwrap();
+        let mv = ChessMove::new(Square::F1, Square::C4, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "Bc4");
+    }
+
+    #[test]
+    fn test_san_castling_kingside() {
+        let board = Board::from_str("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let mv = ChessMove::new(Square::E1, Square::G1, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "O-O");
+    }
+
+    #[test]
+    fn test_san_castling_queenside() {
+        let board = Board::from_str("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let mv = ChessMove::new(Square::E1, Square::C1, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "O-O-O");
+    }
+
+    #[test]
+    fn test_san_castling_with_check() {
+        // White O-O places rook on f1, giving check to black king on f8
+        let board = Board::from_str("5k2/8/8/8/8/8/8/4K2R w K - 0 1").unwrap();
+        let mv = ChessMove::new(Square::E1, Square::G1, None);
+        assert!(board.legal(mv));
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "O-O+");
+        // from_san doesn't support + suffix; roundtrip via O-O
+        let mv_back = ChessMove::from_san(&board, "O-O").unwrap();
+        assert_eq!(mv_back, mv);
+    }
+
+    #[test]
+    fn test_san_capture() {
+        let board = Board::from_str("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").unwrap();
+        let mv = ChessMove::new(Square::D7, Square::D5, None);
+        let _san = move_to_standard_san(&board, mv).unwrap();
+        // d5 is not a capture from d7
+        let board2 = Board::from_str("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2").unwrap();
+        let mv2 = ChessMove::new(Square::D7, Square::D5, None);
+        let san2 = move_to_standard_san(&board2, mv2).unwrap();
+        assert_eq!(san2, "d5");
+    }
+
+    #[test]
+    fn test_san_pawn_capture() {
+        // Create a position where exd5 is a pawn capture
+        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2").unwrap();
+        let mv = ChessMove::new(Square::E4, Square::D5, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "exd5");
+    }
+
+    #[test]
+    fn test_san_en_passant() {
+        // White pawn on e5, black pawn just played d7d5
+        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3").unwrap();
+        let mv = ChessMove::new(Square::E5, Square::D6, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "exd6");
+    }
+
+    #[test]
+    fn test_san_promotion() {
+        let board = Board::from_str("8/4P3/8/8/8/8/8/4K2k w - - 0 1").unwrap();
+        let mv = ChessMove::new(Square::E7, Square::E8, Some(Piece::Queen));
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "e8=Q");
+    }
+
+    #[test]
+    fn test_san_promotion_capture() {
+        let board = Board::from_str("3r3k/4P3/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let mv = ChessMove::new(Square::E7, Square::D8, Some(Piece::Queen));
+        let san = move_to_standard_san(&board, mv).unwrap();
+        // After exd8=Q, the queen on d8 attacks g8 (check)
+        assert_eq!(san, "exd8=Q+");
+    }
+
+    #[test]
+    fn test_san_check() {
+        // Position where Bxf7+ gives check (Italian Game)
+        let board = Board::from_str("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4").unwrap();
+        let mv = ChessMove::new(Square::C4, Square::F7, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert!(san.ends_with('+'), "Expected check, got: {}", san);
+    }
+
+    #[test]
+    fn test_san_checkmate() {
+        // Scholar's mate position
+        let board = Board::from_str("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4").unwrap();
+        let mv = ChessMove::new(Square::H5, Square::F7, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert!(san.ends_with('#'), "Expected checkmate, got: {}", san);
+    }
+
+    #[test]
+    fn test_san_disambiguation_file() {
+        // Two rooks on a2 and c2 that can both go to b2
+        let board = Board::from_str("4k3/8/8/8/8/8/R1R5/4K3 w - - 0 1").unwrap();
+        let mv = ChessMove::new(Square::A2, Square::B2, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "Rab2");
+    }
+
+    #[test]
+    fn test_san_disambiguation_rank() {
+        // Two rooks on a1 and a3 (same file), both can go to a2
+        let board = Board::from_str("4k3/8/8/8/8/R7/8/R3K3 w - - 0 1").unwrap();
+        let mv = ChessMove::new(Square::A1, Square::A2, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "R1a2");
+    }
+
+    #[test]
+    fn test_san_disambiguation_different_file_and_rank() {
+        // Rook A on a1, Rook B on c3, destination c1 — different file AND rank
+        let board = Board::from_str("4k3/8/8/8/8/2R5/8/R3K3 w - - 0 1").unwrap();
+        let mv = ChessMove::new(Square::A1, Square::C1, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "Rac1");
+        // Roundtrip
+        let mv_back = ChessMove::from_san(&board, "Rac1").unwrap();
+        assert_eq!(mv_back, mv);
+    }
+
+    #[test]
+    fn test_san_disambiguation_both_file_and_rank() {
+        // Knight on b1, same-file alternative on b3, same-rank alternative on f1, dest d2
+        let board = Board::from_str("4k3/8/8/8/8/1N6/8/1N2KN2 w - - 0 1").unwrap();
+        let mv = ChessMove::new(Square::B1, Square::D2, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "Nb1d2");
+        // Roundtrip (from_san may not support both-file-and-rank, so just verify via SAN)
+        let mv_back = ChessMove::from_san(&board, &san).unwrap();
+        assert_eq!(mv_back, mv);
+    }
+
+    #[test]
+    fn test_san_from_san_roundtrip_pawn() {
+        let board = Board::default();
+        let san = "e4";
+        let mv = ChessMove::from_san(&board, san).unwrap();
+        assert_eq!(mv.get_source(), Square::E2);
+        assert_eq!(mv.get_dest(), Square::E4);
+    }
+
+    #[test]
+    fn test_san_from_san_roundtrip_piece() {
+        let board = Board::default();
+        let san = "Nf3";
+        let mv = ChessMove::from_san(&board, san).unwrap();
+        assert_eq!(mv.get_source(), Square::G1);
+        assert_eq!(mv.get_dest(), Square::F3);
+    }
+
+    #[test]
+    fn test_san_from_san_roundtrip_castling() {
+        let board = Board::from_str("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let san = "O-O";
+        let mv = ChessMove::from_san(&board, san).unwrap();
+        assert_eq!(mv.get_source(), Square::E1);
+        assert_eq!(mv.get_dest(), Square::G1);
+    }
+
+    #[test]
+    fn test_san_from_san_roundtrip_castling_queenside() {
+        let board = Board::from_str("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let san = "O-O-O";
+        let mv = ChessMove::from_san(&board, san).unwrap();
+        assert_eq!(mv.get_source(), Square::E1);
+        assert_eq!(mv.get_dest(), Square::C1);
+    }
+
+    // ── board_to_pgn_fen ──
+
+    #[test]
+    fn test_board_to_pgn_fen_basic() {
+        let board = Board::default();
+        let fen = board_to_pgn_fen(&board).unwrap();
+        assert_eq!(fen, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    }
+
+    #[test]
+    fn test_board_to_pgn_fen_after_trigger() {
+        let puzzle = fixture_puzzle_00010();
+        let original_board = Board::from_str(&puzzle.fen).unwrap();
+        let trigger = parse_legal_uci_move(&original_board, "f3g5").unwrap();
+        let puzzle_board = original_board.make_move_new(trigger);
+        let fen = board_to_pgn_fen(&puzzle_board).unwrap();
+        assert!(fen.ends_with(" 0 1"), "FEN must end with ' 0 1': {}", fen);
+        assert_ne!(fen, puzzle.fen, "Exported FEN must differ from original");
+    }
+
+    #[test]
+    fn test_board_to_pgn_fen_en_passant_target_square() {
+        // Position where a pawn double-pushed and an opposing pawn can capture en passant.
+        // After ...d5, white pawn on e5 can capture en passant on d6.
+        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3").unwrap();
+        let fen = board_to_pgn_fen(&board).unwrap();
+        let ep_field = fen.split_whitespace().nth(3).unwrap();
+        assert_eq!(ep_field, "d6", "En passant target should be d6, got: {}", ep_field);
+    }
+
+    // ── build_pgn_game ──
+
+    #[test]
+    fn test_build_pgn_game_00010() {
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+
+        // Check headers
+        assert!(pgn.contains("[SetUp \"1\"]"));
+        assert!(pgn.contains("[FEN \""));
+        assert!(pgn.contains("[Event \"Chess Puzzle\"]"));
+        assert!(pgn.contains(&format!("[Site \"https://lichess.org/training/{}\"]", puzzle.puzzle_id)));
+        assert!(pgn.contains("[Result \"*\"]"));
+
+        // After trigger (f3g5), it's Black's turn
+        // So White="Opponent", Black="Player"
+        assert!(pgn.contains("[White \"Opponent\"]"));
+        assert!(pgn.contains("[Black \"Player\"]"));
+
+        // Check move text starts with 1...
+        assert!(pgn.contains("1... "), "Move text should start with '1...' for Black to move");
+
+        // Check trigger is NOT in move text
+        let trigger_san = {
+            let original_board = Board::from_str(&puzzle.fen).unwrap();
+            let trigger = parse_legal_uci_move(&original_board, "f3g5").unwrap();
+            move_to_standard_san(&original_board, trigger).unwrap()
+        };
+        let move_section = pgn.split("\n\n").last().unwrap_or("");
+        assert!(!move_section.contains(&trigger_san), "Trigger SAN '{}' must not appear in move text", trigger_san);
+
+        // Check result
+        assert!(pgn.ends_with("*\n"));
+    }
+
+    #[test]
+    fn test_build_pgn_game_trigger_absent_from_solution() {
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+        let move_text = pgn.split("\n\n").last().unwrap_or("");
+
+        // The trigger move is Nf3-g5 = Ng5 (knight from f3 to g5)
+        // After applying it, the solution starts with e7e6 = e6
+        // Verify "Ng5" does not appear in move text
+        assert!(!move_text.contains("Ng5"), "Trigger move must not be in solution");
+    }
+
+    #[test]
+    fn test_build_pgn_game_fen_after_trigger() {
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+
+        // Extract FEN from PGN
+        let fen_line = pgn.lines().find(|l| l.starts_with("[FEN ")).unwrap();
+        let fen = fen_line.split('"').nth(1).unwrap();
+
+        // Parse it
+        let exported_board = Board::from_str(fen).unwrap();
+
+        // Compute expected: original + trigger
+        let original_board = Board::from_str(&puzzle.fen).unwrap();
+        let trigger = parse_legal_uci_move(&original_board, "f3g5").unwrap();
+        let expected_board = original_board.make_move_new(trigger);
+
+        assert_eq!(exported_board, expected_board, "Exported FEN must match board after trigger");
+    }
+
+    #[test]
+    fn test_build_pgn_game_move_sequence_parses() {
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+
+        // Extract FEN
+        let fen_line = pgn.lines().find(|l| l.starts_with("[FEN ")).unwrap();
+        let fen = fen_line.split('"').nth(1).unwrap();
+        let mut board = Board::from_str(fen).unwrap();
+
+        // Extract move text (after the blank line)
+        let move_text = pgn.split("\n\n").last().unwrap_or("");
+
+        // Parse SAN tokens, ignoring move numbers and result
+        let tokens: Vec<&str> = move_text
+            .split_whitespace()
+            .filter(|t| !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "...")
+            .collect();
+
+        // Expected UCI solution moves (excluding trigger)
+        let all_moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
+        let expected_uci: Vec<&str> = all_moves[1..].to_vec();
+
+        assert_eq!(tokens.len(), expected_uci.len(), "SAN token count must match solution move count");
+
+        for (san, uci) in tokens.iter().zip(expected_uci.iter()) {
+            // Parse SAN with from_san
+            let mv_from_san = ChessMove::from_san(&board, san)
+                .unwrap_or_else(|e| panic!("Failed to parse SAN '{}': {:?}", san, e));
+
+            // Parse UCI
+            let mv_from_uci = ChessMove::from_str(uci)
+                .unwrap_or_else(|e| panic!("Failed to parse UCI '{}': {:?}", uci, e));
+
+            assert_eq!(mv_from_san, mv_from_uci, "SAN '{}' must equal UCI '{}'", san, uci);
+
+            board = board.make_move_new(mv_from_san);
+        }
+    }
+
+    #[test]
+    fn test_build_pgn_game_moves_navigable_from_fen() {
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+
+        let fen_line = pgn.lines().find(|l| l.starts_with("[FEN ")).unwrap();
+        let fen = fen_line.split('"').nth(1).unwrap();
+        let mut board = Board::from_str(fen).unwrap();
+
+        let move_text = pgn.split("\n\n").last().unwrap_or("");
+        let tokens: Vec<&str> = move_text
+            .split_whitespace()
+            .filter(|t| !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "...")
+            .collect();
+
+        // Every SAN must parse and be legal
+        for san in &tokens {
+            let mv = ChessMove::from_san(&board, san)
+                .unwrap_or_else(|e| panic!("SAN '{}' not parseable: {:?}", san, e));
+            assert!(board.legal(mv), "SAN '{}' is not legal on current board", san);
+            board = board.make_move_new(mv);
+        }
+    }
+
+    // ── build_pgn_content ──
+
+    #[test]
+    fn test_build_pgn_content_multiple_puzzles() {
+        let puzzles = read_fixture_puzzles();
+        let content = build_pgn_content(&puzzles, "2026.09.03").unwrap();
+        // Should contain games separated by blank lines
+        let game_count = content.matches("[Event \"Chess Puzzle\"]").count();
+        assert_eq!(game_count, puzzles.len());
+    }
+
+    // ── Error handling ──
+
+    #[test]
+    fn test_build_pgn_game_empty_moves() {
+        let puzzle = config::Puzzle {
+            puzzle_id: "test".to_string(),
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
+            moves: "".to_string(),
+            rating: 0,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: String::new(),
+            game_url: String::new(),
+            opening: String::new(),
+        };
+        let result = build_pgn_game(&puzzle, "2026.09.03");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_pgn_game_invalid_fen() {
+        let puzzle = config::Puzzle {
+            puzzle_id: "test".to_string(),
+            fen: "not-a-fen".to_string(),
+            moves: "e2e4".to_string(),
+            rating: 0,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: String::new(),
+            game_url: String::new(),
+            opening: String::new(),
+        };
+        let result = build_pgn_game(&puzzle, "2026.09.03");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_pgn_game_illegal_trigger() {
+        let puzzle = config::Puzzle {
+            puzzle_id: "test".to_string(),
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
+            moves: "e2e5 e7e5".to_string(), // e2e5 is illegal
+            rating: 0,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: String::new(),
+            game_url: String::new(),
+            opening: String::new(),
+        };
+        let result = build_pgn_game(&puzzle, "2026.09.03");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_pgn_game_only_trigger_no_solution() {
+        let puzzle = config::Puzzle {
+            puzzle_id: "test".to_string(),
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
+            moves: "e2e4".to_string(), // only trigger, no solution
+            rating: 0,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: String::new(),
+            game_url: String::new(),
+            opening: String::new(),
+        };
+        let result = build_pgn_game(&puzzle, "2026.09.03");
+        // Single-move puzzles produce a valid PGN with just * as result
+        assert!(result.is_ok());
+        let pgn = result.unwrap();
+        assert!(pgn.contains("[SetUp \"1\"]"));
+        assert!(pgn.contains("[FEN \""));
+        assert!(pgn.ends_with("*\n"));
+    }
+
+    // ── Language independence ──
+
+    #[test]
+    fn test_pgn_builder_does_not_use_lang() {
+        // The build_pgn_game function does not take a lang parameter,
+        // proving it's language-independent.
+        // We simply verify it compiles and produces correct SAN.
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+        // Standard SAN letters, not localized
+        assert!(pgn.contains("Nf7") || pgn.contains("e6"),
+            "PGN should contain standard SAN notation");
+        // No Spanish/French piece names
+        assert!(!pgn.contains("Cf"), "PGN must not contain localized piece names");
+        assert!(!pgn.contains("Td"), "PGN must not contain localized piece names");
+    }
+
+    // ── Side tags after trigger ──
+
+    #[test]
+    fn test_side_tags_black_to_move_after_trigger() {
+        let puzzle = fixture_puzzle_00010();
+        // After trigger (f3g5), Black to move
+        // So White="Opponent", Black="Player"
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+        assert!(pgn.contains("[White \"Opponent\"]"));
+        assert!(pgn.contains("[Black \"Player\"]"));
+    }
+
+    #[test]
+    fn test_side_tags_white_to_move_after_trigger() {
+        // Black triggers (Ra8-a7), leaving White to move
+        let puzzle = config::Puzzle {
+            puzzle_id: "test_w".to_string(),
+            fen: "r3k3/8/8/8/8/8/8/4K3 b - - 0 1".to_string(),
+            moves: "a8a7 e1e2".to_string(),
+            rating: 0,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: String::new(),
+            game_url: String::new(),
+            opening: String::new(),
+        };
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+        // After Ra7, White to move -> White="Player", Black="Opponent"
+        assert!(pgn.contains("[White \"Player\"]"));
+        assert!(pgn.contains("[Black \"Opponent\"]"));
+        // Move text must start with white move
+        let move_text = pgn.split("\n\n").last().unwrap_or("");
+        assert!(move_text.starts_with("1. Ke2"), "Move text should start with '1. Ke2', got: {}", move_text);
+    }
+
+    // ── FEN correctness ──
+
+    #[test]
+    fn test_exported_fen_is_normalized_0_1() {
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+        let fen_line = pgn.lines().find(|l| l.starts_with("[FEN ")).unwrap();
+        let fen = fen_line.split('"').nth(1).unwrap();
+        assert!(fen.ends_with(" 0 1"), "FEN must end with ' 0 1': {}", fen);
+    }
+
+    #[test]
+    fn test_exported_fen_differs_from_original() {
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+        let fen_line = pgn.lines().find(|l| l.starts_with("[FEN ")).unwrap();
+        let fen = fen_line.split('"').nth(1).unwrap();
+        assert_ne!(fen, puzzle.fen, "Exported FEN must differ from original puzzle FEN");
+    }
+
+    // ── Full fixture validation ──
+
+    #[test]
+    fn test_fixture_00010_full_validation() {
+        let puzzle = fixture_puzzle_00010();
+        let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
+
+        // Parse FEN
+        let fen_line = pgn.lines().find(|l| l.starts_with("[FEN ")).unwrap();
+        let fen = fen_line.split('"').nth(1).unwrap();
+        let mut board = Board::from_str(fen).unwrap();
+
+        // Verify FEN matches board after trigger
+        let original_board = Board::from_str(&puzzle.fen).unwrap();
+        let trigger = parse_legal_uci_move(&original_board, "f3g5").unwrap();
+        let expected_board = original_board.make_move_new(trigger);
+        assert_eq!(board, expected_board);
+
+        // Parse and validate all solution moves
+        let move_text = pgn.split("\n\n").last().unwrap_or("");
+        let tokens: Vec<&str> = move_text
+            .split_whitespace()
+            .filter(|t| !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "...")
+            .collect();
+
+        let all_moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
+        let expected_uci: Vec<&str> = all_moves[1..].to_vec();
+
+        assert_eq!(tokens.len(), expected_uci.len());
+
+        for (san, uci) in tokens.iter().zip(expected_uci.iter()) {
+            let mv_san = ChessMove::from_san(&board, san).expect(&format!("Failed to parse SAN: {}", san));
+            let mv_uci = ChessMove::from_str(uci).expect(&format!("Failed to parse UCI: {}", uci));
+            assert_eq!(mv_san, mv_uci, "SAN/UCI mismatch: {} vs {}", san, uci);
+            assert!(board.legal(mv_san));
+            board = board.make_move_new(mv_san);
+        }
+
+        // Verify move text structure
+        assert!(move_text.starts_with("1... "), "Should start with '1...' for Black");
+        assert!(move_text.trim_end().ends_with("*"), "Should end with '*'");
+    }
+
+    // ── to_pgn file write test ──
+
+    #[test]
+    fn test_to_pgn_writes_file_correctly() {
+        let puzzles = read_fixture_puzzles();
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join(format!("cms014_sample_{}.pgn", std::process::id()));
+
+        to_pgn(&puzzles, &lang::Language::English, path.to_str().unwrap().to_string());
+
+        let content = std::fs::read_to_string(&path).expect("PGN file should exist");
+        assert!(content.contains("[SetUp \"1\"]"));
+        assert!(content.contains("[FEN \""));
+        assert!(content.contains("1... ") || content.contains("1. "), "Should have move text");
+
+        // Clean up
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Existing tests preserved ──
+
+    #[test]
+    fn test_san_check_produces_plus() {
+        // Rook on f2 can go to f8 giving check to king on e8
+        let board = Board::from_str("4k3/8/8/8/8/8/5R2/4K3 w - - 0 1").unwrap();
+        let mv = ChessMove::new(Square::F2, Square::F8, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert!(san.ends_with('+'), "Expected check '+', got: {}", san);
+    }
+
+    #[test]
+    fn test_san_checkmate_produces_hash() {
+        // Back rank mate
+        let board = Board::from_str("6k1/5ppp/8/8/8/8/8/R3K2R w KQ - 0 1").unwrap();
+        let mv = ChessMove::new(Square::A1, Square::A8, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert!(san.ends_with('#'), "Expected checkmate '#', got: {}", san);
+    }
+
+    #[test]
+    fn test_san_pawn_capture_no_promotion() {
+        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2").unwrap();
+        let mv = ChessMove::new(Square::E4, Square::D5, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "exd5");
+    }
+
+    #[test]
+    fn test_san_piece_capture_check() {
+        // Bxf7+ in Italian Game
+        let board = Board::from_str("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4").unwrap();
+        let mv = ChessMove::new(Square::C4, Square::F7, None);
+        let san = move_to_standard_san(&board, mv).unwrap();
+        assert_eq!(san, "Bxf7+");
+        assert!(san.contains('x'));
+        // Roundtrip
+        let mv_back = ChessMove::from_san(&board, "Bxf7+").unwrap();
+        assert_eq!(mv_back, mv);
+    }
+
+    #[test]
+    fn generate_sample_pgn_for_review() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_review");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("cms014_chessbase_sample.pgn");
+
+        // Game 1: fixture 00010 (Black to move after trigger)
+        let puzzle_00010 = fixture_puzzle_00010();
+        let game1 = build_pgn_game(&puzzle_00010, "2026.09.03").unwrap();
+
+        // Game 2: controlled White-to-move puzzle
+        let puzzle_white = config::Puzzle {
+            puzzle_id: "test_w".to_string(),
+            fen: "r3k3/8/8/8/8/8/8/4K3 b - - 0 1".to_string(),
+            moves: "a8a7 e1e2".to_string(),
+            rating: 1500,
+            rating_deviation: 70,
+            popularity: 90,
+            nb_plays: 5000,
+            themes: "king move".to_string(),
+            game_url: "https://lichess.org/training/test_w".to_string(),
+            opening: String::new(),
+        };
+        let game2 = build_pgn_game(&puzzle_white, "2026.09.03").unwrap();
+
+        let mut content = game1;
+        content.push('\n');
+        content.push_str(&game2);
+        std::fs::write(&path, &content).expect("Failed to write PGN");
+
+        let read_back = std::fs::read_to_string(&path).expect("PGN file should exist");
+        let game_count = read_back.matches("[Event \"Chess Puzzle\"]").count();
+        assert_eq!(game_count, 2, "Sample must contain exactly 2 games");
+        assert!(read_back.contains("[SetUp \"1\"]"));
+        assert!(read_back.contains("[FEN \""));
+        assert!(read_back.contains("[Round \"-\"]"));
+        // Game 2 must start with 1. Ke2
+        assert!(read_back.contains("1. Ke2"));
+    }
+}
