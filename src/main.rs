@@ -1329,6 +1329,6 @@ fn main() -> iced::Result {
         .theme(OfflinePuzzles::theme)
         .subscription(OfflinePuzzles::subscription)
         .window(window_settings)
-        .title("Offline Chess Puzzles")
+        .title("Chess Material Studio")
         .run()
 }
