@@ -2,4 +2,3 @@
 /puzzles/lichess_db_puzzle.csv
 .vscode/
 ocp.db
-Cargo.lock
