@@ -1,5 +1,5 @@
 [package]
-name = "offline-chess-puzzles"
+name = "chess-material-studio"
 version = "2.5.2"
 authors = ["brianch <brianch@users.noreply.github.com>"]
 edition = "2024"

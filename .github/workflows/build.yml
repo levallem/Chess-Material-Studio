@@ -29,16 +29,16 @@ jobs:
       - name: Prepare directory to upload as an artifact
         run: |
           mkdir zip
-          mkdir zip/offline-chess-puzzles
-          cp -R pieces zip/offline-chess-puzzles/
-          cp -R puzzles zip/offline-chess-puzzles/
-          cp -R translations zip/offline-chess-puzzles/
-          cp -R font zip/offline-chess-puzzles/
-          cp *.ogg zip/offline-chess-puzzles/
-          cp settings.json zip/offline-chess-puzzles/
-          cp LICENSE zip/offline-chess-puzzles/
-          cp README.md zip/offline-chess-puzzles/
-          cp target/release/offline-chess-puzzles zip/offline-chess-puzzles/
+          mkdir zip/chess-material-studio
+          cp -R pieces zip/chess-material-studio/
+          cp -R puzzles zip/chess-material-studio/
+          cp -R translations zip/chess-material-studio/
+          cp -R font zip/chess-material-studio/
+          cp *.ogg zip/chess-material-studio/
+          cp settings.json zip/chess-material-studio/
+          cp LICENSE zip/chess-material-studio/
+          cp README.md zip/chess-material-studio/
+          cp target/release/chess-material-studio zip/chess-material-studio/
       - uses: actions/upload-artifact@v6
         with:
           name: linux-release-bin
@@ -57,16 +57,16 @@ jobs:
       - name: Prepare directory to upload as an artifact
         run: |
           mkdir zip
-          mkdir zip/offline-chess-puzzles
-          cp -R pieces zip/offline-chess-puzzles/
-          cp -R puzzles zip/offline-chess-puzzles/
-          cp -R translations zip/offline-chess-puzzles/
-          cp -R font zip/offline-chess-puzzles/
-          cp *.ogg zip/offline-chess-puzzles/
-          cp settings.json zip/offline-chess-puzzles/
-          cp LICENSE zip/offline-chess-puzzles/
-          cp README.md zip/offline-chess-puzzles/
-          cp target/release/offline-chess-puzzles zip/offline-chess-puzzles/
+          mkdir zip/chess-material-studio
+          cp -R pieces zip/chess-material-studio/
+          cp -R puzzles zip/chess-material-studio/
+          cp -R translations zip/chess-material-studio/
+          cp -R font zip/chess-material-studio/
+          cp *.ogg zip/chess-material-studio/
+          cp settings.json zip/chess-material-studio/
+          cp LICENSE zip/chess-material-studio/
+          cp README.md zip/chess-material-studio/
+          cp target/release/chess-material-studio zip/chess-material-studio/
       - uses: actions/upload-artifact@v6
         with:
           name: macos-release-bin
@@ -93,16 +93,16 @@ jobs:
       - name: Prepare directory to upload as an artifact
         run: |
           mkdir zip
-          mkdir zip/offline-chess-puzzles
-          cp -R pieces zip/offline-chess-puzzles/
-          cp -R puzzles zip/offline-chess-puzzles/
-          cp -R translations zip/offline-chess-puzzles/
-          cp -R font zip/offline-chess-puzzles/
-          cp *.ogg zip/offline-chess-puzzles/
-          cp settings.json zip/offline-chess-puzzles/
-          cp LICENSE zip/offline-chess-puzzles/
-          cp README.md zip/offline-chess-puzzles/
-          cp target/release/offline-chess-puzzles.exe zip/offline-chess-puzzles/
+          mkdir zip/chess-material-studio
+          cp -R pieces zip/chess-material-studio/
+          cp -R puzzles zip/chess-material-studio/
+          cp -R translations zip/chess-material-studio/
+          cp -R font zip/chess-material-studio/
+          cp *.ogg zip/chess-material-studio/
+          cp settings.json zip/chess-material-studio/
+          cp LICENSE zip/chess-material-studio/
+          cp README.md zip/chess-material-studio/
+          cp target/release/chess-material-studio.exe zip/chess-material-studio/
       - uses: actions/upload-artifact@v6
         with:
           name: windows-release
@@ -129,16 +129,16 @@ jobs:
       - name: Prepare directory to upload as an artifact
         run: |
           mkdir zip
-          mkdir zip/offline-chess-puzzles
-          cp -R pieces zip/offline-chess-puzzles/
-          cp -R puzzles zip/offline-chess-puzzles/
-          cp -R translations zip/offline-chess-puzzles/
-          cp -R font zip/offline-chess-puzzles/
-          cp *.ogg zip/offline-chess-puzzles/
-          cp settings.json zip/offline-chess-puzzles/
-          cp LICENSE zip/offline-chess-puzzles/
-          cp README.md zip/offline-chess-puzzles/
-          cp target/i686-pc-windows-msvc/release/offline-chess-puzzles.exe zip/offline-chess-puzzles/
+          mkdir zip/chess-material-studio
+          cp -R pieces zip/chess-material-studio/
+          cp -R puzzles zip/chess-material-studio/
+          cp -R translations zip/chess-material-studio/
+          cp -R font zip/chess-material-studio/
+          cp *.ogg zip/chess-material-studio/
+          cp settings.json zip/chess-material-studio/
+          cp LICENSE zip/chess-material-studio/
+          cp README.md zip/chess-material-studio/
+          cp target/i686-pc-windows-msvc/release/chess-material-studio.exe zip/chess-material-studio/
       - uses: actions/upload-artifact@v6
         with:
           name: windows-release-i686

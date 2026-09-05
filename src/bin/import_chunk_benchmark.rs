@@ -11,10 +11,10 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 
-use offline_chess_puzzles::puzzle_import::{
+use chess_material_studio::puzzle_import::{
     import_puzzles_from_reader_chunked_limited, puzzle_source_key_from_file, MIGRATIONS,
 };
-use offline_chess_puzzles::schema;
+use chess_material_studio::schema;
 
 const CHUNK_SIZES: &[usize] = &[
     1_000,

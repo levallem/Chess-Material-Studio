@@ -9,8 +9,8 @@ use std::time::Instant;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 
-use offline_chess_puzzles::puzzle_search::{search_puzzles, PuzzleSearchFilters, SearchSide};
-use offline_chess_puzzles::schema;
+use chess_material_studio::puzzle_search::{search_puzzles, PuzzleSearchFilters, SearchSide};
+use chess_material_studio::schema;
 
 const MAX_RESULT_LIMIT: usize = 10_000;
 const MAX_REPEAT: usize = 20;

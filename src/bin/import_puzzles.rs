@@ -4,7 +4,7 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 
-use offline_chess_puzzles::puzzle_import::{
+use chess_material_studio::puzzle_import::{
     self, MIGRATIONS, PuzzleFileImportResult,
 };
 
@@ -317,7 +317,7 @@ fn run_migrations(conn: &mut SqliteConnection) -> Result<(), String> {
 }
 
 fn row_count(conn: &mut SqliteConnection) -> Result<i64, String> {
-    use offline_chess_puzzles::schema::puzzles;
+    use chess_material_studio::schema::puzzles;
     puzzles::table
         .count()
         .get_result::<i64>(conn)
@@ -325,7 +325,7 @@ fn row_count(conn: &mut SqliteConnection) -> Result<i64, String> {
 }
 
 fn checkpoint_value(conn: &mut SqliteConnection, source_key: &str) -> Result<i64, String> {
-    use offline_chess_puzzles::schema::puzzle_import_progress;
+    use chess_material_studio::schema::puzzle_import_progress;
     puzzle_import_progress::table
         .filter(puzzle_import_progress::dsl::source_key.eq(source_key))
         .select(puzzle_import_progress::dsl::completed_rows)
@@ -337,7 +337,7 @@ fn checkpoint_value(conn: &mut SqliteConnection, source_key: &str) -> Result<i64
 
 /// Count the number of distinct source_keys in puzzle_import_progress.
 fn checkpoint_count(conn: &mut SqliteConnection) -> Result<i64, String> {
-    use offline_chess_puzzles::schema::puzzle_import_progress;
+    use chess_material_studio::schema::puzzle_import_progress;
     puzzle_import_progress::table
         .count()
         .get_result::<i64>(conn)
@@ -348,7 +348,7 @@ fn checkpoint_count(conn: &mut SqliteConnection) -> Result<i64, String> {
 ///
 /// Precondition: exactly one row exists (caller must verify via `checkpoint_count`).
 fn single_checkpoint_source_key(conn: &mut SqliteConnection) -> Result<String, String> {
-    use offline_chess_puzzles::schema::puzzle_import_progress;
+    use chess_material_studio::schema::puzzle_import_progress;
     puzzle_import_progress::table
         .select(puzzle_import_progress::dsl::source_key)
         .first::<String>(conn)
@@ -1070,11 +1070,11 @@ mod tests {
         let fake_key = "cms-source-v1:999999:0000000000000000";
 
         // Manually insert a checkpoint with wrong key
-        diesel::insert_into(offline_chess_puzzles::schema::puzzle_import_progress::table)
+        diesel::insert_into(chess_material_studio::schema::puzzle_import_progress::table)
             .values((
-                offline_chess_puzzles::schema::puzzle_import_progress::dsl::source_key
+                chess_material_studio::schema::puzzle_import_progress::dsl::source_key
                     .eq(fake_key),
-                offline_chess_puzzles::schema::puzzle_import_progress::dsl::completed_rows
+                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows
                     .eq(4i64),
             ))
             .execute(&mut conn)
@@ -1103,21 +1103,21 @@ mod tests {
         let mut conn = setup_test_db();
 
         // Insert two different source_keys
-        diesel::insert_into(offline_chess_puzzles::schema::puzzle_import_progress::table)
+        diesel::insert_into(chess_material_studio::schema::puzzle_import_progress::table)
             .values((
-                offline_chess_puzzles::schema::puzzle_import_progress::dsl::source_key
+                chess_material_studio::schema::puzzle_import_progress::dsl::source_key
                     .eq("key-alpha"),
-                offline_chess_puzzles::schema::puzzle_import_progress::dsl::completed_rows
+                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows
                     .eq(2i64),
             ))
             .execute(&mut conn)
             .expect("insert alpha");
 
-        diesel::insert_into(offline_chess_puzzles::schema::puzzle_import_progress::table)
+        diesel::insert_into(chess_material_studio::schema::puzzle_import_progress::table)
             .values((
-                offline_chess_puzzles::schema::puzzle_import_progress::dsl::source_key
+                chess_material_studio::schema::puzzle_import_progress::dsl::source_key
                     .eq("key-beta"),
-                offline_chess_puzzles::schema::puzzle_import_progress::dsl::completed_rows
+                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows
                     .eq(3i64),
             ))
             .execute(&mut conn)

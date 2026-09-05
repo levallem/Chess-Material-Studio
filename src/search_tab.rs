@@ -237,7 +237,7 @@ pub struct SearchTab {
 }
 
 fn adapt_sqlite_puzzle(
-    puzzle: offline_chess_puzzles::models::Puzzle,
+    puzzle: chess_material_studio::models::Puzzle,
 ) -> config::Puzzle {
     config::Puzzle {
         puzzle_id: puzzle.puzzle_id,
@@ -374,16 +374,16 @@ fn search_sqlite_from_path(
     };
 
     let side = if opening_tag.is_none() {
-        offline_chess_puzzles::puzzle_search::SearchSide::Any
+        chess_material_studio::puzzle_search::SearchSide::Any
     } else {
         match op_side {
-            None | Some(OpeningSide::Any) => offline_chess_puzzles::puzzle_search::SearchSide::Any,
-            Some(OpeningSide::White) => offline_chess_puzzles::puzzle_search::SearchSide::White,
-            Some(OpeningSide::Black) => offline_chess_puzzles::puzzle_search::SearchSide::Black,
+            None | Some(OpeningSide::Any) => chess_material_studio::puzzle_search::SearchSide::Any,
+            Some(OpeningSide::White) => chess_material_studio::puzzle_search::SearchSide::White,
+            Some(OpeningSide::Black) => chess_material_studio::puzzle_search::SearchSide::Black,
         }
     };
 
-    let filters = offline_chess_puzzles::puzzle_search::PuzzleSearchFilters {
+    let filters = chess_material_studio::puzzle_search::PuzzleSearchFilters {
         min_rating,
         max_rating,
         min_popularity,
@@ -393,7 +393,7 @@ fn search_sqlite_from_path(
         limit: result_limit,
     };
 
-    let results = offline_chess_puzzles::puzzle_search::search_puzzles(&mut conn, &filters)?;
+    let results = chess_material_studio::puzzle_search::search_puzzles(&mut conn, &filters)?;
     Ok(results.into_iter().map(adapt_sqlite_puzzle).collect())
 }
 
@@ -695,7 +695,7 @@ impl Tab for SearchTab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use offline_chess_puzzles::puzzle_import::MIGRATIONS;
+    use chess_material_studio::puzzle_import::MIGRATIONS;
     use diesel_migrations::MigrationHarness;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -718,7 +718,7 @@ mod tests {
             .expect("Failed to open test database");
         conn.run_pending_migrations(MIGRATIONS)
             .expect("Failed to run migrations");
-        offline_chess_puzzles::puzzle_import::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
+        chess_material_studio::puzzle_import::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
             .expect("fixture import should succeed");
         drop(conn);
         db_path
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn test_adapt_sqlite_puzzle_all_fields() {
-        let lib_puzzle = offline_chess_puzzles::models::Puzzle {
+        let lib_puzzle = chess_material_studio::models::Puzzle {
             puzzle_id: "test_001".to_string(),
             fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1".to_string(),
             moves: "e7e5".to_string(),
