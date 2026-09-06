@@ -32,21 +32,73 @@ pub enum PieceTheme {
 }
 
 impl PieceTheme {
-    pub const ALL: [PieceTheme; 13] = [
+    pub const ALL: [PieceTheme; 3] = [
         PieceTheme::Cburnett,
         PieceTheme::Alpha,
-        PieceTheme::Merida,
-        PieceTheme::California,
-        PieceTheme::Cardinal,
-        PieceTheme::Governor,
-        PieceTheme::Dubrovny,
-        PieceTheme::Gioco,
-        PieceTheme::Icpieces,
-        PieceTheme::Maestro,
-        PieceTheme::Staunty,
-        PieceTheme::Tatiana,
         PieceTheme::FontAlpha,
     ];
+
+    pub fn normalize(self) -> Self {
+        match self {
+            Self::California
+            | Self::Cardinal
+            | Self::Governor
+            | Self::Dubrovny
+            | Self::Gioco
+            | Self::Icpieces
+            | Self::Maestro
+            | Self::Staunty
+            | Self::Tatiana
+            | Self::Merida => Self::Cburnett,
+            retained => retained,
+        }
+    }
+}
+
+#[cfg(test)]
+mod piece_theme_tests {
+    use super::PieceTheme;
+
+    #[test]
+    fn retained_piece_themes_remain_available_and_unchanged() {
+        for theme in [
+            PieceTheme::Cburnett,
+            PieceTheme::Alpha,
+            PieceTheme::FontAlpha,
+        ] {
+            assert_eq!(theme.normalize(), theme);
+        }
+    }
+
+    #[test]
+    fn retired_piece_themes_normalize_to_cburnett() {
+        for theme in [
+            PieceTheme::California,
+            PieceTheme::Cardinal,
+            PieceTheme::Governor,
+            PieceTheme::Dubrovny,
+            PieceTheme::Gioco,
+            PieceTheme::Icpieces,
+            PieceTheme::Maestro,
+            PieceTheme::Staunty,
+            PieceTheme::Tatiana,
+            PieceTheme::Merida,
+        ] {
+            assert_eq!(theme.normalize(), PieceTheme::Cburnett);
+        }
+    }
+
+    #[test]
+    fn available_piece_themes_only_lists_retained_themes() {
+        assert_eq!(
+            PieceTheme::ALL,
+            [
+                PieceTheme::Cburnett,
+                PieceTheme::Alpha,
+                PieceTheme::FontAlpha,
+            ]
+        );
+    }
 }
 
 impl std::fmt::Display for PieceTheme {

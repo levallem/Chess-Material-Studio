@@ -111,7 +111,7 @@ pub fn load_config() -> OfflinePuzzlesConfig {
     match file {
         Ok(file) => {
             let reader = std::io::BufReader::new(file);
-            let config_json = serde_json::from_reader(reader);
+            let config_json = deserialize_config(reader);
             match config_json {
                 Ok(cfg) => config = cfg,
                 Err(_) => config = OfflinePuzzlesConfig::default()
@@ -119,6 +119,12 @@ pub fn load_config() -> OfflinePuzzlesConfig {
         } Err(_) => config = OfflinePuzzlesConfig::default()
     }
     config
+}
+
+fn deserialize_config(reader: impl std::io::Read) -> serde_json::Result<OfflinePuzzlesConfig> {
+    let mut config: OfflinePuzzlesConfig = serde_json::from_reader(reader)?;
+    config.piece_theme = config.piece_theme.normalize();
+    Ok(config)
 }
 
 fn piece_localized(lang: &lang::Language, piece: &str) -> String {
@@ -399,6 +405,20 @@ mod tests {
     fn test_default_puzzle_sqlite_location_is_none() {
         let config = OfflinePuzzlesConfig::default();
         assert_eq!(config.puzzle_sqlite_location, None);
+    }
+
+    #[test]
+    fn deserializing_config_normalizes_retired_piece_themes_only() {
+        let mut config_json = serde_json::to_value(OfflinePuzzlesConfig::default())
+            .expect("default config should serialize");
+        config_json["piece_theme"] = serde_json::json!("Tatiana");
+        config_json["engine_limit"] = serde_json::json!("nodes 42");
+
+        let config = deserialize_config(config_json.to_string().as_bytes())
+            .expect("persisted config should deserialize");
+
+        assert_eq!(config.piece_theme, styles::PieceTheme::Cburnett);
+        assert_eq!(config.engine_limit, "nodes 42");
     }
 
     fn tmp_path(name: &str) -> std::path::PathBuf {
