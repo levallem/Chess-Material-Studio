@@ -2,3 +2,6 @@
 /puzzles/lichess_db_puzzle.csv
 .vscode/
 ocp.db
+
+# Local Pi runtime state
+.atl/
