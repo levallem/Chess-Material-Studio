@@ -23,7 +23,18 @@ pub enum SettingsMessage {
     ChangeSearchResultLimit(String),
     ChangeEnginePath(String),
     SearchEnginePressed,
+    SelectPuzzleSqlitePressed,
+    PuzzleSqliteFileChosen(Option<std::path::PathBuf>),
+    UseCsvPuzzles,
     ChangePressed
+}
+
+fn with_puzzle_sqlite_location(
+    mut config: config::OfflinePuzzlesConfig,
+    puzzle_sqlite_location: Option<String>,
+) -> config::OfflinePuzzlesConfig {
+    config.puzzle_sqlite_location = puzzle_sqlite_location;
+    config
 }
 
 pub struct SettingsTab {
@@ -97,6 +108,29 @@ impl SettingsTab {
             SettingsMessage::SearchEnginePressed => {
                 Task::perform(Self::open_engine_exe(), Message::EngineFileChosen)
             }
+            SettingsMessage::SelectPuzzleSqlitePressed => {
+                Task::perform(Self::open_puzzle_sqlite_db(), |path| {
+                    Message::Settings(SettingsMessage::PuzzleSqliteFileChosen(path))
+                })
+            }
+            SettingsMessage::PuzzleSqliteFileChosen(Some(path)) => {
+                match chess_material_studio::puzzle_search::validate_puzzle_sqlite_db(&path) {
+                    Ok(()) => self.save_puzzle_sqlite_location(Some(path.display().to_string())),
+                    Err(error) => {
+                        self.settings_status = format!(
+                            "{}: {}",
+                            lang::tr(&self.lang.lang, "puzzle_sqlite_invalid"),
+                            error
+                        );
+                    }
+                }
+                Task::none()
+            }
+            SettingsMessage::PuzzleSqliteFileChosen(None) => Task::none(),
+            SettingsMessage::UseCsvPuzzles => {
+                self.save_puzzle_sqlite_location(None);
+                Task::none()
+            }
             SettingsMessage::ChangeSearchResultLimit(value) => {
                 if value.is_empty() {
                     self.search_results_limit_value = String::from("0");
@@ -131,45 +165,13 @@ impl SettingsTab {
                 Task::none()
             },
             SettingsMessage::ChangePressed => {
-                let engine_path = if self.engine_path.is_empty() {
-                    None
-                } else {
-                    Some(self.engine_path.clone())
-                };
-                let config = config::OfflinePuzzlesConfig {
-                    engine_path,
-                    engine_limit: self.saved_configs.engine_limit.clone(),
-                    window_width: self.window_width,
-                    window_height: self.window_height,
-                    maximized: self.maximized,
-                    puzzle_db_location: String::from(&self.puzzle_db_location_value),
-                    piece_theme: self.piece_theme,
-                    search_results_limit: self.search_results_limit_value.parse().unwrap(),
-                    play_sound: self.play_sound,
-                    auto_load_next: self.auto_load_next,
-                    flip_board: self.flip_board,
-                    show_coordinates: self.show_coordinates,
-                    board_theme: self.board_theme,
-                    lang: self.lang.lang,
-                    export_pgs: self.export_pgs.parse().unwrap(),
-                    last_min_rating: self.saved_configs.last_min_rating,
-                    last_max_rating: self.saved_configs.last_max_rating,
-                    last_min_popularity: self.saved_configs.last_min_popularity,
-                    last_theme: self.saved_configs.last_theme,
-                    last_opening: self.saved_configs.last_opening,
-                    last_variation: self.saved_configs.last_variation.clone(),
-                    last_opening_side: self.saved_configs.last_opening_side,
-                    puzzle_sqlite_location: self.saved_configs.puzzle_sqlite_location.clone(),
-                };
-                let file = std::fs::File::create(SETTINGS_FILE);
-                match file {
-                    Ok(file) => {
-                        if serde_json::to_writer_pretty(file, &config).is_ok() {
-                            self.settings_status = lang::tr(&self.lang.lang, "settings_saved");
-                        } else {
-                            self.settings_status = lang::tr(&self.lang.lang, "error_saving");
-                        }
-                    } Err(_) => self.settings_status = lang::tr(&self.lang.lang, "error_reading_config")
+                let config = self.current_config();
+                match Self::persist_config(&config) {
+                    Ok(()) => {
+                        self.saved_configs = config;
+                        self.settings_status = lang::tr(&self.lang.lang, "settings_saved");
+                    }
+                    Err(status_key) => self.settings_status = lang::tr(&self.lang.lang, status_key),
                 }
                 Task::none()
             }
@@ -179,6 +181,63 @@ impl SettingsTab {
     async fn open_engine_exe() -> Option<String> {
         let engine_exe = AsyncFileDialog::new().pick_file().await;
         engine_exe.map(|engine_path| engine_path.path().display().to_string())
+    }
+
+    async fn open_puzzle_sqlite_db() -> Option<std::path::PathBuf> {
+        AsyncFileDialog::new()
+            .pick_file()
+            .await
+            .map(|file| file.path().to_path_buf())
+    }
+
+    fn current_config(&self) -> config::OfflinePuzzlesConfig {
+        let engine_path = (!self.engine_path.is_empty()).then(|| self.engine_path.clone());
+        config::OfflinePuzzlesConfig {
+            engine_path,
+            engine_limit: self.saved_configs.engine_limit.clone(),
+            window_width: self.window_width,
+            window_height: self.window_height,
+            maximized: self.maximized,
+            puzzle_db_location: self.puzzle_db_location_value.clone(),
+            piece_theme: self.piece_theme,
+            search_results_limit: self.search_results_limit_value.parse().unwrap(),
+            play_sound: self.play_sound,
+            auto_load_next: self.auto_load_next,
+            flip_board: self.flip_board,
+            show_coordinates: self.show_coordinates,
+            board_theme: self.board_theme,
+            lang: self.lang.lang,
+            export_pgs: self.export_pgs.parse().unwrap(),
+            last_min_rating: self.saved_configs.last_min_rating,
+            last_max_rating: self.saved_configs.last_max_rating,
+            last_min_popularity: self.saved_configs.last_min_popularity,
+            last_theme: self.saved_configs.last_theme,
+            last_opening: self.saved_configs.last_opening,
+            last_variation: self.saved_configs.last_variation.clone(),
+            last_opening_side: self.saved_configs.last_opening_side,
+            puzzle_sqlite_location: self.saved_configs.puzzle_sqlite_location.clone(),
+        }
+    }
+
+    fn persist_config(config: &config::OfflinePuzzlesConfig) -> Result<(), &'static str> {
+        let file = std::fs::File::create(SETTINGS_FILE).map_err(|_| "error_reading_config")?;
+        serde_json::to_writer_pretty(file, config).map_err(|_| "error_saving")
+    }
+
+    fn save_puzzle_sqlite_location(&mut self, puzzle_sqlite_location: Option<String>) {
+        let config = with_puzzle_sqlite_location(config::load_config(), puzzle_sqlite_location);
+        match Self::persist_config(&config) {
+            Ok(()) => {
+                let status_key = if config.puzzle_sqlite_location.is_some() {
+                    "puzzle_sqlite_selected"
+                } else {
+                    "csv_puzzles_selected"
+                };
+                self.saved_configs = config;
+                self.settings_status = lang::tr(&self.lang.lang, status_key);
+            }
+            Err(status_key) => self.settings_status = lang::tr(&self.lang.lang, status_key),
+        }
     }
 
     pub fn save_window_size(&self) {
@@ -212,6 +271,31 @@ impl SettingsTab {
         config.show_coordinates = coords;
         config.engine_path = engine;
         Some(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn puzzle_sqlite_location_update_preserves_unrelated_persisted_config() {
+        let mut persisted = config::OfflinePuzzlesConfig::default();
+        persisted.engine_limit = "nodes 123".into();
+        persisted.puzzle_db_location = "custom-puzzles.csv".into();
+        persisted.last_min_rating = 1234;
+        persisted.last_max_rating = 2345;
+
+        let updated = with_puzzle_sqlite_location(persisted, Some("puzzles.sqlite".into()));
+
+        assert_eq!(
+            updated.puzzle_sqlite_location.as_deref(),
+            Some("puzzles.sqlite")
+        );
+        assert_eq!(updated.engine_limit, "nodes 123");
+        assert_eq!(updated.puzzle_db_location, "custom-puzzles.csv");
+        assert_eq!(updated.last_min_rating, 1234);
+        assert_eq!(updated.last_max_rating, 2345);
     }
 }
 
@@ -290,6 +374,15 @@ impl Tab for SettingsTab {
                     &self.engine_path,
                 ).on_input(SettingsMessage::ChangeEnginePath).width(200),
                 Button::new(Text::new(lang::tr(&self.lang.lang, "select"))).on_press(SettingsMessage::SearchEnginePressed).style(btn_style_simple),
+            ],
+            Text::new(lang::tr(&self.lang.lang, "puzzle_sqlite_db")),
+            row![
+                Button::new(Text::new(lang::tr(&self.lang.lang, "select")))
+                    .on_press(SettingsMessage::SelectPuzzleSqlitePressed)
+                    .style(btn_style_simple),
+                Button::new(Text::new(lang::tr(&self.lang.lang, "use_csv_puzzles")))
+                    .on_press(SettingsMessage::UseCsvPuzzles)
+                    .style(btn_style_simple),
             ],
             Button::new(Text::new(lang::tr(&self.lang.lang, "save"))).padding(5).on_press(SettingsMessage::ChangePressed).style(btn_style_simple),
             Text::new(&self.settings_status).align_y(alignment::Vertical::Bottom),

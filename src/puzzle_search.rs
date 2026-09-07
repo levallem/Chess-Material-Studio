@@ -31,6 +31,82 @@ pub struct PuzzleSearchFilters {
     pub limit: usize,
 }
 
+#[derive(QueryableByName)]
+struct PuzzleSchemaColumn {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    r#type: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    notnull: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    pk: i32,
+}
+
+const PUZZLES_SCHEMA: [(&str, &str, i32, i32); 10] = [
+    ("puzzle_id", "TEXT", 1, 1),
+    ("fen", "TEXT", 1, 0),
+    ("moves", "TEXT", 1, 0),
+    ("rating", "INTEGER", 1, 0),
+    ("rating_deviation", "INTEGER", 1, 0),
+    ("popularity", "INTEGER", 1, 0),
+    ("nb_plays", "INTEGER", 1, 0),
+    ("themes", "TEXT", 1, 0),
+    ("game_url", "TEXT", 1, 0),
+    ("opening_tags", "TEXT", 1, 0),
+];
+
+pub fn validate_puzzle_sqlite_db(path: &std::path::Path) -> Result<(), String> {
+    validate_puzzle_sqlite_db_with_project_database(path, std::path::Path::new("ocp.db"))
+}
+
+fn validate_puzzle_sqlite_db_with_project_database(
+    path: &std::path::Path,
+    project_database: &std::path::Path,
+) -> Result<(), String> {
+    if path.file_name().is_some_and(|name| name == "ocp.db")
+        || matches!(
+            (path.canonicalize(), project_database.canonicalize()),
+            (Ok(selected), Ok(project_database)) if selected == project_database
+        )
+    {
+        return Err("ocp.db cannot be used as a puzzle database".into());
+    }
+
+    let metadata =
+        std::fs::metadata(path).map_err(|e| format!("database file cannot be read: {}", e))?;
+    if !metadata.is_file() {
+        return Err("database path is not a file".into());
+    }
+
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| "database path is not valid UTF-8".to_string())?;
+    let mut conn = SqliteConnection::establish(path_str)
+        .map_err(|e| format!("cannot open SQLite database: {}", e))?;
+    let columns = diesel::sql_query("PRAGMA table_info(puzzles)")
+        .load::<PuzzleSchemaColumn>(&mut conn)
+        .map_err(|e| format!("cannot inspect puzzle database schema: {}", e))?;
+
+    if columns.len() != PUZZLES_SCHEMA.len()
+        || columns
+            .iter()
+            .zip(PUZZLES_SCHEMA)
+            .any(|(column, expected)| {
+                (
+                    column.name.as_str(),
+                    column.r#type.as_str(),
+                    column.notnull,
+                    column.pk,
+                ) != expected
+            })
+    {
+        return Err("database does not have the expected puzzles schema".into());
+    }
+
+    Ok(())
+}
+
 pub fn search_puzzles(
     conn: &mut SqliteConnection,
     filters: &PuzzleSearchFilters,
@@ -428,5 +504,145 @@ mod tests {
         let mut got = ids(&results);
         got.sort();
         assert_eq!(got, vec!["B", "C"], "Black side excludes only lowercase 'black'");
+    }
+
+    static TEMP_DB_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    struct TempPuzzleDb {
+        path: std::path::PathBuf,
+        directory: Option<std::path::PathBuf>,
+    }
+
+    impl TempPuzzleDb {
+        fn new(label: &str) -> Self {
+            Self {
+                path: unique_temp_db_path(label, ".sqlite"),
+                directory: None,
+            }
+        }
+
+        fn ocp_db(label: &str) -> Self {
+            let directory = unique_temp_db_path(label, "");
+            std::fs::create_dir(&directory).expect("test directory should be created");
+            Self {
+                path: directory.join("ocp.db"),
+                directory: Some(directory),
+            }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempPuzzleDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            if let Some(directory) = &self.directory {
+                let _ = std::fs::remove_dir(directory);
+            }
+        }
+    }
+
+    fn unique_temp_db_path(label: &str, suffix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after UNIX epoch")
+            .as_nanos();
+        let sequence = TEMP_DB_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cms-puzzle-db-validation-{label}-{}-{nanos}-{sequence}{suffix}",
+            std::process::id()
+        ))
+    }
+
+    fn create_puzzle_db(path: &std::path::Path) {
+        let mut conn =
+            SqliteConnection::establish(path.to_str().unwrap()).expect("test database should open");
+        conn.run_pending_migrations(MIGRATIONS)
+            .expect("test database schema should migrate");
+    }
+
+    #[test]
+    fn test_validate_puzzle_sqlite_db_accepts_valid_db() {
+        let database = TempPuzzleDb::new("valid");
+        create_puzzle_db(database.path());
+        {
+            let mut conn = SqliteConnection::establish(database.path().to_str().unwrap())
+                .expect("test database should reopen");
+            crate::puzzle_import::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes())
+                .expect("test puzzle should import");
+        }
+
+        validate_puzzle_sqlite_db(database.path())
+            .expect("valid puzzle database should pass validation");
+    }
+
+    #[test]
+    fn test_validate_puzzle_sqlite_db_accepts_valid_empty_db() {
+        let database = TempPuzzleDb::new("empty");
+        create_puzzle_db(database.path());
+
+        validate_puzzle_sqlite_db(database.path())
+            .expect("valid empty puzzle database should pass validation");
+    }
+
+    #[test]
+    fn test_validate_puzzle_sqlite_db_rejects_missing_file() {
+        let database = TempPuzzleDb::new("missing");
+        assert!(validate_puzzle_sqlite_db(database.path()).is_err());
+    }
+
+    #[test]
+    fn test_validate_puzzle_sqlite_db_rejects_non_sqlite_file() {
+        let database = TempPuzzleDb::new("non-sqlite");
+        std::fs::write(database.path(), b"not a SQLite database")
+            .expect("test file should be written");
+
+        assert!(validate_puzzle_sqlite_db(database.path()).is_err());
+    }
+
+    #[test]
+    fn test_validate_puzzle_sqlite_db_rejects_missing_schema() {
+        let database = TempPuzzleDb::new("missing-schema");
+        {
+            let mut conn = SqliteConnection::establish(database.path().to_str().unwrap())
+                .expect("test database should open");
+            diesel::sql_query("CREATE TABLE puzzles (puzzle_id TEXT NOT NULL PRIMARY KEY)")
+                .execute(&mut conn)
+                .expect("incomplete schema should be created");
+        }
+
+        assert!(validate_puzzle_sqlite_db(database.path()).is_err());
+    }
+
+    #[test]
+    fn test_validate_puzzle_sqlite_db_rejects_ocp_db_basename() {
+        let database = TempPuzzleDb::ocp_db("ocp-basename");
+        create_puzzle_db(database.path());
+
+        assert!(validate_puzzle_sqlite_db(database.path()).is_err());
+    }
+
+    #[test]
+    fn test_validate_puzzle_sqlite_db_rejects_project_database_equivalent_path() {
+        let project_db = TempPuzzleDb::new("project-database");
+        create_puzzle_db(project_db.path());
+        let equivalent_path = project_db
+            .path()
+            .parent()
+            .expect("temporary database should have a parent")
+            .join(".")
+            .join(
+                project_db
+                    .path()
+                    .file_name()
+                    .expect("temporary database should have a name"),
+            );
+
+        assert!(
+            validate_puzzle_sqlite_db_with_project_database(&equivalent_path, project_db.path(),)
+                .is_err()
+        );
     }
 }
