@@ -1,17 +1,28 @@
 use diesel::prelude::*;
-use diesel::sql_types::{Integer, Text};
+use diesel::sql_types::{Integer, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
+use diesel::Connection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub const PROJECT_APPLICATION_ID: &str = "chess-material-studio-project";
-pub const PROJECT_SCHEMA_VERSION: i32 = 1;
+pub const PROJECT_SCHEMA_VERSION: i32 = 2;
 pub const PROJECT_MIGRATIONS: EmbeddedMigrations = embed_migrations!("project_migrations");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectMetadata {
     pub project_name: String,
     pub schema_version: i32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectChapter {
+    pub id: i32,
+    pub name: String,
+    pub position: i32,
+    pub target_puzzle_count: Option<i32>,
     pub created_at: String,
 }
 
@@ -27,10 +38,34 @@ struct ProjectMetadataRow {
     created_at: String,
 }
 
-pub fn create_project(path: &Path, project_name: &str) -> Result<ProjectMetadata, String> {
-    if project_name.trim().is_empty() {
-        return Err("project name cannot be empty".into());
+#[derive(QueryableByName)]
+struct ProjectChapterRow {
+    #[diesel(sql_type = Integer)]
+    id: i32,
+    #[diesel(sql_type = Text)]
+    name: String,
+    #[diesel(sql_type = Integer)]
+    position: i32,
+    #[diesel(sql_type = Nullable<Integer>)]
+    target_puzzle_count: Option<i32>,
+    #[diesel(sql_type = Text)]
+    created_at: String,
+}
+
+impl From<ProjectChapterRow> for ProjectChapter {
+    fn from(row: ProjectChapterRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            position: row.position,
+            target_puzzle_count: row.target_puzzle_count,
+            created_at: row.created_at,
+        }
     }
+}
+
+pub fn create_project(path: &Path, project_name: &str) -> Result<ProjectMetadata, String> {
+    validate_name(project_name, "project name")?;
 
     match std::fs::symlink_metadata(path) {
         Ok(_) => return Err("project file already exists".into()),
@@ -74,6 +109,111 @@ pub fn create_project(path: &Path, project_name: &str) -> Result<ProjectMetadata
 }
 
 pub fn open_project(path: &Path) -> Result<ProjectMetadata, String> {
+    let mut connection = open_validated_project_connection(path)?;
+    let row = read_project_metadata(&mut connection)?;
+    Ok(project_metadata_from_row(&row))
+}
+
+pub fn create_chapter(
+    path: &Path,
+    name: &str,
+    target_puzzle_count: Option<i32>,
+) -> Result<ProjectChapter, String> {
+    validate_name(name, "chapter name")?;
+    validate_target_puzzle_count(target_puzzle_count)?;
+
+    let mut connection = open_validated_project_connection(path)?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    diesel::sql_query(
+        "INSERT INTO chapters (name, position, target_puzzle_count, created_at) \
+         VALUES (?, (SELECT COALESCE(MAX(position), 0) + 1 FROM chapters), ?, ?)",
+    )
+    .bind::<Text, _>(name)
+    .bind::<Nullable<Integer>, _>(target_puzzle_count)
+    .bind::<Text, _>(&created_at)
+    .execute(&mut connection)
+    .map_err(|error| format!("cannot create chapter: {error}"))?;
+
+    read_last_inserted_chapter(&mut connection)
+}
+
+pub fn list_chapters(path: &Path) -> Result<Vec<ProjectChapter>, String> {
+    let mut connection = open_validated_project_connection(path)?;
+    list_chapters_from_connection(&mut connection)
+}
+
+pub fn rename_chapter(path: &Path, chapter_id: i32, name: &str) -> Result<(), String> {
+    validate_name(name, "chapter name")?;
+
+    let mut connection = open_validated_project_connection(path)?;
+    let updated = diesel::sql_query("UPDATE chapters SET name = ? WHERE id = ?")
+        .bind::<Text, _>(name)
+        .bind::<Integer, _>(chapter_id)
+        .execute(&mut connection)
+        .map_err(|error| format!("cannot rename chapter: {error}"))?;
+    if updated == 0 {
+        return Err("chapter not found".into());
+    }
+    Ok(())
+}
+
+pub fn set_chapter_target(
+    path: &Path,
+    chapter_id: i32,
+    target_puzzle_count: Option<i32>,
+) -> Result<(), String> {
+    validate_target_puzzle_count(target_puzzle_count)?;
+
+    let mut connection = open_validated_project_connection(path)?;
+    let updated = diesel::sql_query("UPDATE chapters SET target_puzzle_count = ? WHERE id = ?")
+        .bind::<Nullable<Integer>, _>(target_puzzle_count)
+        .bind::<Integer, _>(chapter_id)
+        .execute(&mut connection)
+        .map_err(|error| format!("cannot update chapter target: {error}"))?;
+    if updated == 0 {
+        return Err("chapter not found".into());
+    }
+    Ok(())
+}
+
+pub fn reorder_chapters(path: &Path, ordered_ids: &[i32]) -> Result<(), String> {
+    let mut connection = open_validated_project_connection(path)?;
+    let existing_chapters = list_chapters_from_connection(&mut connection)?;
+    validate_chapter_order(&existing_chapters, ordered_ids)?;
+    let chapter_count = i32::try_from(existing_chapters.len())
+        .map_err(|_| "too many chapters to reorder".to_string())?;
+    let maximum_position = existing_chapters
+        .iter()
+        .map(|chapter| chapter.position)
+        .max()
+        .unwrap_or(0);
+    let temporary_start = maximum_position
+        .checked_add(1)
+        .ok_or_else(|| "chapter positions cannot be staged safely".to_string())?;
+    maximum_position
+        .checked_add(chapter_count)
+        .ok_or_else(|| "chapter positions cannot be staged safely".to_string())?;
+
+    connection
+        .transaction::<(), diesel::result::Error, _>(|connection| {
+            for (index, chapter) in existing_chapters.iter().enumerate() {
+                diesel::sql_query("UPDATE chapters SET position = ? WHERE id = ?")
+                    .bind::<Integer, _>(temporary_start + i32::try_from(index).unwrap())
+                    .bind::<Integer, _>(chapter.id)
+                    .execute(connection)?;
+            }
+            for (index, chapter_id) in ordered_ids.iter().enumerate() {
+                diesel::sql_query("UPDATE chapters SET position = ? WHERE id = ?")
+                    .bind::<Integer, _>(i32::try_from(index + 1).unwrap())
+                    .bind::<Integer, _>(chapter_id)
+                    .execute(connection)?;
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("cannot reorder chapters: {error}"))
+}
+
+fn open_validated_project_connection(path: &Path) -> Result<SqliteConnection, String> {
     let file_metadata =
         std::fs::metadata(path).map_err(|error| format!("project file cannot be read: {error}"))?;
     if !file_metadata.is_file() {
@@ -83,34 +223,119 @@ pub fn open_project(path: &Path) -> Result<ProjectMetadata, String> {
     let path_string = project_path_string(path)?;
     let mut connection = SqliteConnection::establish(&path_string)
         .map_err(|error| format!("cannot open SQLite project: {error}"))?;
-    let rows = diesel::sql_query(
-        "SELECT application_id, schema_version, project_name, created_at \
-         FROM project_metadata WHERE id = 1",
-    )
-    .load::<ProjectMetadataRow>(&mut connection)
-    .map_err(|error| format!("cannot read project metadata: {error}"))?;
-
-    let [row] = rows.as_slice() else {
-        return Err("project metadata is missing or invalid".into());
-    };
+    let row = read_project_metadata(&mut connection)?;
     if row.application_id != PROJECT_APPLICATION_ID {
         return Err("SQLite file is not a Chess Material Studio project".into());
     }
-    if row.schema_version != PROJECT_SCHEMA_VERSION {
+    if row.project_name.trim().is_empty() || row.created_at.trim().is_empty() {
+        return Err("project metadata is missing required values".into());
+    }
+    if row.schema_version > PROJECT_SCHEMA_VERSION {
         return Err(format!(
             "unsupported project schema version: {}",
             row.schema_version
         ));
     }
-    if row.project_name.trim().is_empty() || row.created_at.trim().is_empty() {
-        return Err("project metadata is missing required values".into());
+    if row.schema_version < PROJECT_SCHEMA_VERSION {
+        if row.schema_version != 1 {
+            return Err(format!(
+                "unsupported project schema version: {}",
+                row.schema_version
+            ));
+        }
+        connection
+            .run_pending_migrations(PROJECT_MIGRATIONS)
+            .map_err(|error| format!("cannot upgrade project migrations: {error}"))?;
+        diesel::sql_query("UPDATE project_metadata SET schema_version = ? WHERE id = 1")
+            .bind::<Integer, _>(PROJECT_SCHEMA_VERSION)
+            .execute(&mut connection)
+            .map_err(|error| format!("cannot update project schema version: {error}"))?;
     }
 
-    Ok(ProjectMetadata {
+    Ok(connection)
+}
+
+fn read_project_metadata(connection: &mut SqliteConnection) -> Result<ProjectMetadataRow, String> {
+    let rows = diesel::sql_query(
+        "SELECT application_id, schema_version, project_name, created_at \
+         FROM project_metadata WHERE id = 1",
+    )
+    .load::<ProjectMetadataRow>(connection)
+    .map_err(|error| format!("cannot read project metadata: {error}"))?;
+    let [row] = rows.as_slice() else {
+        return Err("project metadata is missing or invalid".into());
+    };
+    Ok(ProjectMetadataRow {
+        application_id: row.application_id.clone(),
+        schema_version: row.schema_version,
+        project_name: row.project_name.clone(),
+        created_at: row.created_at.clone(),
+    })
+}
+
+fn project_metadata_from_row(row: &ProjectMetadataRow) -> ProjectMetadata {
+    ProjectMetadata {
         project_name: row.project_name.clone(),
         schema_version: row.schema_version,
         created_at: row.created_at.clone(),
-    })
+    }
+}
+
+fn read_last_inserted_chapter(connection: &mut SqliteConnection) -> Result<ProjectChapter, String> {
+    diesel::sql_query(
+        "SELECT id, name, position, target_puzzle_count, created_at \
+         FROM chapters WHERE id = last_insert_rowid()",
+    )
+    .get_result::<ProjectChapterRow>(connection)
+    .map(ProjectChapter::from)
+    .map_err(|error| format!("cannot read created chapter: {error}"))
+}
+
+fn list_chapters_from_connection(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<ProjectChapter>, String> {
+    diesel::sql_query(
+        "SELECT id, name, position, target_puzzle_count, created_at \
+         FROM chapters ORDER BY position ASC",
+    )
+    .load::<ProjectChapterRow>(connection)
+    .map(|rows| rows.into_iter().map(ProjectChapter::from).collect())
+    .map_err(|error| format!("cannot list chapters: {error}"))
+}
+
+fn validate_name(name: &str, field: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err(format!("{field} cannot be empty"));
+    }
+    Ok(())
+}
+
+fn validate_target_puzzle_count(target_puzzle_count: Option<i32>) -> Result<(), String> {
+    if target_puzzle_count.is_some_and(|target| target <= 0) {
+        return Err("target puzzle count must be greater than zero".into());
+    }
+    Ok(())
+}
+
+fn validate_chapter_order(
+    existing_chapters: &[ProjectChapter],
+    ordered_ids: &[i32],
+) -> Result<(), String> {
+    let existing_ids: HashSet<i32> = existing_chapters.iter().map(|chapter| chapter.id).collect();
+    let ordered_id_set: HashSet<i32> = ordered_ids.iter().copied().collect();
+    if ordered_id_set.len() != ordered_ids.len() {
+        return Err("chapter order contains duplicate IDs".into());
+    }
+    if ordered_ids
+        .iter()
+        .any(|chapter_id| !existing_ids.contains(chapter_id))
+    {
+        return Err("chapter order contains an unknown ID".into());
+    }
+    if ordered_id_set.len() != existing_ids.len() {
+        return Err("chapter order is missing an existing ID".into());
+    }
+    Ok(())
 }
 
 fn project_path_string(path: &Path) -> Result<&str, String> {
@@ -137,7 +362,7 @@ mod tests {
             let sequence = TEMP_PROJECT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("target")
-                .join("cms_023a_tests")
+                .join("cms_023b_tests")
                 .join(format!("{label}-{}-{sequence}", std::process::id()));
             std::fs::create_dir_all(&directory).expect("test directory should be created");
             Self {
@@ -148,6 +373,10 @@ mod tests {
 
         fn path(&self) -> &Path {
             &self.path
+        }
+
+        fn connection(&self) -> SqliteConnection {
+            SqliteConnection::establish(self.path().to_str().unwrap()).unwrap()
         }
     }
 
@@ -194,14 +423,14 @@ mod tests {
     }
 
     #[test]
-    fn project_schema_version_starts_at_one() {
+    fn project_schema_version_starts_at_two() {
         let project = TempProjectDb::new("schema-version");
 
         assert_eq!(
             create_project(project.path(), "Versión inicial")
                 .unwrap()
                 .schema_version,
-            1
+            2
         );
     }
 
@@ -257,6 +486,12 @@ mod tests {
         }
 
         assert!(open_project(project.path()).is_err());
+        let mut connection = project.connection();
+        let tables = table_names(&mut connection);
+        assert!(tables.contains("unrelated_data"));
+        assert!(!tables.contains("project_metadata"));
+        assert!(!tables.contains("chapters"));
+        assert!(!tables.contains("__diesel_schema_migrations"));
     }
 
     #[test]
@@ -275,36 +510,277 @@ mod tests {
     fn project_migrations_are_isolated_from_normal_migrations() {
         let project = TempProjectDb::new("migration-isolation");
         create_project(project.path(), "Migraciones aisladas").unwrap();
-        let mut connection = SqliteConnection::establish(project.path().to_str().unwrap()).unwrap();
-
-        let tables: HashSet<String> =
-            diesel::sql_query("SELECT name FROM sqlite_master WHERE type = 'table'")
-                .load::<TableName>(&mut connection)
-                .unwrap()
-                .into_iter()
-                .map(|table| table.name)
-                .collect();
+        let mut connection = project.connection();
+        let tables = table_names(&mut connection);
         assert!(tables.contains("project_metadata"));
+        assert!(tables.contains("chapters"));
         assert!(!tables.contains("favs"));
         assert!(!tables.contains("puzzles"));
         assert!(!tables.contains("puzzle_import_progress"));
 
-        if tables.contains("__diesel_schema_migrations") {
-            let migration_versions: HashSet<String> =
-                diesel::sql_query("SELECT version FROM __diesel_schema_migrations")
-                    .load::<MigrationVersion>(&mut connection)
-                    .unwrap()
-                    .into_iter()
-                    .map(|migration| migration.version)
-                    .collect();
+        assert_eq!(
+            migration_versions(&mut connection),
+            ["20260908000000".to_string(), "20260908010000".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
 
-            assert!(
-                migration_versions.contains("20260908000000"),
-                "versions: {migration_versions:?}"
-            );
-            for normal_migration in ["20230511035750", "20260827000000", "20260831000000"] {
-                assert!(!migration_versions.contains(normal_migration));
-            }
+    #[test]
+    fn opening_a_valid_v1_project_upgrades_it_to_version_two() {
+        let project = TempProjectDb::new("upgrade-v1");
+        create_valid_v1_project(&project);
+
+        assert_eq!(open_project(project.path()).unwrap().schema_version, 2);
+        let mut connection = project.connection();
+        assert!(table_names(&mut connection).contains("chapters"));
+        assert_eq!(
+            migration_versions(&mut connection),
+            ["20260908000000".to_string(), "20260908010000".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn opening_a_future_project_version_rejects_without_modifying_it() {
+        let project = create_test_project("future-version");
+        let mut connection = project.connection();
+        diesel::sql_query("UPDATE project_metadata SET schema_version = 3")
+            .execute(&mut connection)
+            .unwrap();
+        let migration_versions_before = migration_versions(&mut connection);
+
+        assert!(open_project(project.path()).is_err());
+
+        let metadata = read_project_metadata(&mut connection).unwrap();
+        assert_eq!(metadata.schema_version, 3);
+        assert_eq!(
+            migration_versions(&mut connection),
+            migration_versions_before
+        );
+    }
+
+    #[test]
+    fn opening_a_v1_shaped_non_cms_database_does_not_migrate_it() {
+        let project = TempProjectDb::new("wrong-v1-identity");
+        create_v1_project_with_application_id(&project, "other-app");
+
+        assert!(open_project(project.path()).is_err());
+
+        let mut connection = project.connection();
+        assert!(!table_names(&mut connection).contains("chapters"));
+        let metadata = read_project_metadata(&mut connection).unwrap();
+        assert_eq!(metadata.application_id, "other-app");
+        assert_eq!(metadata.schema_version, 1);
+        assert_eq!(
+            migration_versions(&mut connection),
+            ["20260908000000".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn creating_chapters_uses_one_based_insertion_order() {
+        let project = create_test_project("chapter-insertion");
+        let first = create_chapter(project.path(), "Pieza colgante", None).unwrap();
+        let second = create_chapter(project.path(), "Ataque doble", Some(20)).unwrap();
+
+        assert_eq!(first.position, 1);
+        assert_eq!(second.position, 2);
+        assert_eq!(second.target_puzzle_count, Some(20));
+        assert_eq!(
+            chapter_names(&list_chapters(project.path()).unwrap()),
+            ["Pieza colgante", "Ataque doble"]
+        );
+    }
+
+    #[test]
+    fn chapter_names_and_targets_are_validated() {
+        let project = create_test_project("chapter-validation");
+        for name in ["", "   ", "\t\n"] {
+            assert!(create_chapter(project.path(), name, None).is_err());
         }
+        let chapter = create_chapter(project.path(), "Válido", None).unwrap();
+        for name in ["", "   ", "\t\n"] {
+            assert!(rename_chapter(project.path(), chapter.id, name).is_err());
+        }
+        for target in [Some(0), Some(-1)] {
+            assert!(create_chapter(project.path(), "Inválido", target).is_err());
+            assert!(set_chapter_target(project.path(), chapter.id, target).is_err());
+        }
+    }
+
+    #[test]
+    fn chapter_target_none_and_updates_persist_after_reopening() {
+        let project = create_test_project("chapter-target-persist");
+        let chapter = create_chapter(project.path(), "Ataque doble", Some(20)).unwrap();
+
+        set_chapter_target(project.path(), chapter.id, None).unwrap();
+        assert_eq!(
+            list_chapters(project.path()).unwrap()[0].target_puzzle_count,
+            None
+        );
+        set_chapter_target(project.path(), chapter.id, Some(13)).unwrap();
+        rename_chapter(project.path(), chapter.id, "Ataque doble renovado").unwrap();
+        open_project(project.path()).unwrap();
+
+        let reopened = &list_chapters(project.path()).unwrap()[0];
+        assert_eq!(reopened.name, "Ataque doble renovado");
+        assert_eq!(reopened.target_puzzle_count, Some(13));
+    }
+
+    #[test]
+    fn creating_a_chapter_preserves_created_at_when_listed() {
+        let project = create_test_project("chapter-created-at");
+        let chapter = create_chapter(project.path(), "Persistencia", None).unwrap();
+
+        let listed = list_chapters(project.path()).unwrap();
+        assert_eq!(listed[0].id, chapter.id);
+        assert_eq!(listed[0].created_at, chapter.created_at);
+    }
+
+    #[test]
+    fn rename_and_target_reject_unknown_ids_without_changes() {
+        let project = create_test_project("unknown-update-id");
+        create_chapter(project.path(), "Original", Some(10)).unwrap();
+        let before = list_chapters(project.path()).unwrap();
+
+        assert!(rename_chapter(project.path(), 999, "No existe").is_err());
+        assert!(set_chapter_target(project.path(), 999, None).is_err());
+
+        assert_eq!(list_chapters(project.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn reordering_chapters_persists_contiguous_positions() {
+        let project = create_test_project("reorder-persist");
+        let first = create_chapter(project.path(), "Primero", None).unwrap();
+        let second = create_chapter(project.path(), "Segundo", None).unwrap();
+        let third = create_chapter(project.path(), "Tercero", None).unwrap();
+
+        reorder_chapters(project.path(), &[third.id, first.id, second.id]).unwrap();
+        open_project(project.path()).unwrap();
+        let chapters = list_chapters(project.path()).unwrap();
+
+        assert_eq!(chapter_names(&chapters), ["Tercero", "Primero", "Segundo"]);
+        assert_eq!(
+            chapters
+                .iter()
+                .map(|chapter| chapter.position)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn reordering_sparse_positions_uses_collision_free_staging() {
+        let project = create_test_project("reorder-sparse");
+        let first = create_chapter(project.path(), "Primero", None).unwrap();
+        let second = create_chapter(project.path(), "Segundo", None).unwrap();
+        let third = create_chapter(project.path(), "Tercero", None).unwrap();
+        let mut connection = project.connection();
+        diesel::sql_query("UPDATE chapters SET position = 7 WHERE id = ?")
+            .bind::<Integer, _>(third.id)
+            .execute(&mut connection)
+            .unwrap();
+        diesel::sql_query("UPDATE chapters SET position = 3 WHERE id = ?")
+            .bind::<Integer, _>(second.id)
+            .execute(&mut connection)
+            .unwrap();
+
+        reorder_chapters(project.path(), &[third.id, first.id, second.id]).unwrap();
+
+        let chapters = list_chapters(project.path()).unwrap();
+        assert_eq!(chapter_names(&chapters), ["Tercero", "Primero", "Segundo"]);
+        assert_eq!(
+            chapters
+                .iter()
+                .map(|chapter| chapter.position)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn reorder_rejects_duplicate_unknown_and_missing_ids_without_changes() {
+        let project = create_test_project("reorder-validation");
+        let first = create_chapter(project.path(), "Primero", None).unwrap();
+        let second = create_chapter(project.path(), "Segundo", None).unwrap();
+        let before = list_chapters(project.path()).unwrap();
+
+        assert!(reorder_chapters(project.path(), &[first.id, first.id]).is_err());
+        assert!(reorder_chapters(project.path(), &[first.id, 999]).is_err());
+        assert!(reorder_chapters(project.path(), &[first.id]).is_err());
+        assert_eq!(list_chapters(project.path()).unwrap(), before);
+        assert_ne!(first.id, second.id);
+    }
+
+    fn create_test_project(label: &str) -> TempProjectDb {
+        let project = TempProjectDb::new(label);
+        create_project(project.path(), "Proyecto de prueba").unwrap();
+        project
+    }
+
+    fn create_valid_v1_project(project: &TempProjectDb) {
+        create_v1_project_with_application_id(project, PROJECT_APPLICATION_ID);
+    }
+
+    fn create_v1_project_with_application_id(project: &TempProjectDb, application_id: &str) {
+        let mut connection = project.connection();
+        diesel::sql_query(
+            "CREATE TABLE project_metadata (\
+             id INTEGER PRIMARY KEY CHECK (id = 1), \
+             application_id TEXT NOT NULL, \
+             schema_version INTEGER NOT NULL CHECK (schema_version >= 1), \
+             project_name TEXT NOT NULL, \
+             created_at TEXT NOT NULL)",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "CREATE TABLE __diesel_schema_migrations (\
+             version VARCHAR(50) PRIMARY KEY NOT NULL, \
+             run_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO __diesel_schema_migrations (version) VALUES ('20260908000000')",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO project_metadata \
+             (id, application_id, schema_version, project_name, created_at) \
+             VALUES (1, ?, 1, 'Proyecto v1', '2026-09-08T00:00:00Z')",
+        )
+        .bind::<Text, _>(application_id)
+        .execute(&mut connection)
+        .unwrap();
+    }
+
+    fn chapter_names(chapters: &[ProjectChapter]) -> Vec<&str> {
+        chapters
+            .iter()
+            .map(|chapter| chapter.name.as_str())
+            .collect()
+    }
+
+    fn table_names(connection: &mut SqliteConnection) -> HashSet<String> {
+        diesel::sql_query("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .load::<TableName>(connection)
+            .unwrap()
+            .into_iter()
+            .map(|table| table.name)
+            .collect()
+    }
+
+    fn migration_versions(connection: &mut SqliteConnection) -> HashSet<String> {
+        diesel::sql_query("SELECT version FROM __diesel_schema_migrations")
+            .load::<MigrationVersion>(connection)
+            .unwrap()
+            .into_iter()
+            .map(|migration| migration.version)
+            .collect()
     }
 }
