@@ -11,8 +11,47 @@ macro_rules! rgb {
     };
 }
 
-pub const SELECTED_LIGHT_SQUARE: iced::Color = rgb!(205, 210, 106);
-pub const SELECTED_DARK_SQUARE: iced::Color = rgb!(170, 162, 58);
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InterfaceTheme {
+    #[default]
+    Light,
+    Dark,
+}
+
+impl InterfaceTheme {
+    pub const ALL: [InterfaceTheme; 2] = [InterfaceTheme::Light, InterfaceTheme::Dark];
+
+    pub fn palette(self) -> Palette {
+        match self {
+            // Keep the historical default UI palette for existing installations.
+            Self::Light => Palette {
+                background: Color::WHITE,
+                text: Color::BLACK,
+                primary: rgb!(235.0, 249.0, 255),
+                success: rgb!(110.0, 174.0, 213.0),
+                danger: Color::BLACK,
+                warning: Color::BLACK,
+            },
+            Self::Dark => Palette {
+                background: rgb!(32, 33, 36),
+                text: rgb!(232, 234, 237),
+                primary: rgb!(48, 49, 52),
+                success: rgb!(95, 99, 104),
+                danger: rgb!(95, 99, 104),
+                warning: rgb!(95, 99, 104),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for InterfaceTheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        })
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum PieceTheme {
@@ -147,24 +186,24 @@ pub enum BoardTheme {
 }
 
 impl BoardTheme {
-    pub fn palette(&self) -> OCPPalette {
+    pub fn board_palette(&self) -> BoardPalette {
         match self {
-            Self::Blue => OCPPalette::BLUE,
-            Self::Green => OCPPalette::GREEN,
-            Self::Brown => OCPPalette::BROWN,
-            Self::Purple => OCPPalette::PURPLE,
-            Self::Red => OCPPalette::RED,
-            Self::Grey => OCPPalette::GREY,
-            Self::MonochromeGrey => OCPPalette::MONOCHROME_GREY,
-            Self::BlueDark => OCPPalette::BLUE_DARK,
-            Self::GreenDark => OCPPalette::GREEN_DARK,
-            Self::BrownDark => OCPPalette::BROWN_DARK,
-            Self::PurpleDark => OCPPalette::PURPLE_DARK,
-            Self::RedDark => OCPPalette::RED_DARK,
-            Self::GreyDark => OCPPalette::GREY_DARK,
-            Self::MonochromeGreyDark => OCPPalette::MONOCHROME_GREY_DARK,
-            Self::Trans => OCPPalette::TRANS,
-            Self::Enby => OCPPalette::ENBY,
+            Self::Blue => BoardPalette::BLUE,
+            Self::Green => BoardPalette::GREEN,
+            Self::Brown => BoardPalette::BROWN,
+            Self::Purple => BoardPalette::PURPLE,
+            Self::Red => BoardPalette::RED,
+            Self::Grey => BoardPalette::GREY,
+            Self::MonochromeGrey => BoardPalette::MONOCHROME_GREY,
+            Self::BlueDark => BoardPalette::BLUE_DARK,
+            Self::GreenDark => BoardPalette::GREEN_DARK,
+            Self::BrownDark => BoardPalette::BROWN_DARK,
+            Self::PurpleDark => BoardPalette::PURPLE_DARK,
+            Self::RedDark => BoardPalette::RED_DARK,
+            Self::GreyDark => BoardPalette::GREY_DARK,
+            Self::MonochromeGreyDark => BoardPalette::MONOCHROME_GREY_DARK,
+            Self::Trans => BoardPalette::TRANS,
+            Self::Enby => BoardPalette::ENBY,
         }
     }
     pub const ALL: [BoardTheme; 16] = [
@@ -214,44 +253,68 @@ impl std::fmt::Display for BoardTheme {
     }
 }
 
+#[cfg(test)]
+mod interface_theme_tests {
+    use super::{BoardTheme, InterfaceTheme};
+
+    #[test]
+    fn light_and_dark_interface_palettes_are_distinct() {
+        let light = InterfaceTheme::Light.palette();
+        let dark = InterfaceTheme::Dark.palette();
+
+        assert_ne!(light.background, dark.background);
+        assert_ne!(light.text, dark.text);
+        assert_ne!(light.primary, dark.primary);
+    }
+
+    #[test]
+    fn interface_theme_does_not_change_board_square_palette() {
+        let before = BoardTheme::Blue.board_palette();
+        let _light = InterfaceTheme::Light.palette();
+        let _dark = InterfaceTheme::Dark.palette();
+        let after = BoardTheme::Blue.board_palette();
+
+        assert_eq!(before.light_square, after.light_square);
+        assert_eq!(before.dark_square, after.dark_square);
+        assert_eq!(before.selected_light_square, after.selected_light_square);
+        assert_eq!(before.selected_dark_square, after.selected_dark_square);
+    }
+}
+
 pub type ChessBtn = fn(&iced::Theme, iced::widget::button::Status) -> button::Style;
 pub fn btn_style_simple(theme: &iced::Theme, status: button::Status) -> button::Style {
     let palette = theme.extended_palette();
-    match status {          
-        button::Status::Disabled => {
-            button::Style {
-                background: Some(iced::Background::Color(palette.background.stronger.color)),
-                text_color: rgb!(45., 45., 45.),
-                border: Border {
-                    color: palette.primary.base.color,
-                    width: 1.,
-                    radius: 0.3.into(),
-                },
-                ..Default::default()
-            }
-        } button::Status::Hovered => {
-            button::Style {
-                background: Some(iced::Background::Color(palette.success.strong.color)),
-                text_color: rgb!(255., 255., 255.),
-                border: Border {
-                    color: palette.primary.weak.color,
-                    width: 1.,
-                    radius: 0.3.into(),
-                },
-                ..Default::default()
-            }
-        } _ => {
-            button::Style {
-                background: Some(iced::Background::Color(palette.primary.base.color)),
-                text_color: rgb!(45., 45., 45.),
-                border: Border {
-                    color: palette.success.strong.color,
-                    width: 1.,
-                    radius: 0.3.into(),
-                },
-                ..Default::default()
-            }
-        }
+    match status {
+        button::Status::Disabled => button::Style {
+            background: Some(iced::Background::Color(palette.background.stronger.color)),
+            text_color: palette.background.stronger.text,
+            border: Border {
+                color: palette.primary.base.color,
+                width: 1.,
+                radius: 0.3.into(),
+            },
+            ..Default::default()
+        },
+        button::Status::Hovered => button::Style {
+            background: Some(iced::Background::Color(palette.success.strong.color)),
+            text_color: palette.success.strong.text,
+            border: Border {
+                color: palette.primary.weak.color,
+                width: 1.,
+                radius: 0.3.into(),
+            },
+            ..Default::default()
+        },
+        _ => button::Style {
+            background: Some(iced::Background::Color(palette.primary.base.color)),
+            text_color: palette.primary.base.text,
+            border: Border {
+                color: palette.success.strong.color,
+                width: 1.,
+                radius: 0.3.into(),
+            },
+            ..Default::default()
+        },
     }
 }
 
@@ -273,26 +336,6 @@ pub fn btn_style_dark_square(theme: &iced::Theme, _status: iced::widget::button:
     }
 }
 
-pub fn btn_style_selected_light_square(_theme: &iced::Theme, _status: iced::widget::button::Status) -> button::Style {
-    //let palette = theme.extended_palette();
-    button::Style {
-        //background: Some(iced::Background::Color(palette.primary.strong.color)),
-        background: Some(iced::Background::Color(SELECTED_LIGHT_SQUARE)),
-        text_color: rgb!(45., 45., 45.),
-        ..Default::default()
-    }
-}
-
-pub fn btn_style_selected_dark_square(_theme: &iced::Theme, _status: iced::widget::button::Status) -> button::Style {
-    //let palette = theme.extended_palette();
-    button::Style {
-        //background: Some(iced::Background::Color(palette.success.weak.color)),
-        background: Some(iced::Background::Color(SELECTED_DARK_SQUARE)),
-        text_color: rgb!(45., 45., 45.),
-        ..Default::default()
-    }
-}
-
 pub fn btn_style_paper(_theme: &iced::Theme, _status: iced::widget::button::Status) -> button::Style {
     //let palette = theme.palette();
     button::Style {
@@ -304,6 +347,37 @@ pub fn btn_style_paper(_theme: &iced::Theme, _status: iced::widget::button::Stat
             radius: 0.0.into(),
         },
         ..Default::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardSquareStyle {
+    Light,
+    Dark,
+    SelectedLight,
+    SelectedDark,
+    Paper,
+}
+
+pub fn board_button_style(
+    board_theme: BoardTheme,
+    square_style: BoardSquareStyle,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, _status| {
+        let palette = board_theme.board_palette();
+        let background = match square_style {
+            BoardSquareStyle::Light => palette.light_square,
+            BoardSquareStyle::Dark => palette.dark_square,
+            BoardSquareStyle::SelectedLight => palette.selected_light_square,
+            BoardSquareStyle::SelectedDark => palette.selected_dark_square,
+            BoardSquareStyle::Paper => rgb!(245., 245., 245.),
+        };
+
+        button::Style {
+            background: Some(iced::Background::Color(background)),
+            text_color: rgb!(45., 45., 45.),
+            ..Default::default()
+        }
     }
 }
 
@@ -403,45 +477,6 @@ pub fn slider_style(theme: &iced::Theme, status: slider::Status) -> slider::Styl
     }
 }
 
-pub type ChessboardContainer = fn(&iced::Theme) -> container::Style;
-pub fn container_style_light_square(theme: &iced::Theme) -> container::Style {
-    let palette = theme.palette();
-    container::Style {
-        background: Some(iced::Background::Color(palette.primary)),
-        text_color: Some(rgb!(45., 45., 45.)),
-        ..Default::default()
-    }
-}
-
-pub fn container_style_dark_square(theme: &iced::Theme) -> container::Style {
-    let palette = theme.palette();
-    container::Style {
-        background: Some(iced::Background::Color(palette.success)),
-        text_color: Some(rgb!(45., 45., 45.)),
-        ..Default::default()
-    }
-}
-
-pub fn container_style_selected_light_square(_theme: &iced::Theme) -> container::Style {
-    //let palette = theme.extended_palette();
-    container::Style {
-        //background: Some(iced::Background::Color(palette.primary.strong.color)),
-        background: Some(iced::Background::Color(SELECTED_LIGHT_SQUARE)),
-        text_color: Some(rgb!(45., 45., 45.)),
-        ..Default::default()
-    }
-}
-
-pub fn container_style_selected_dark_square(_theme: &iced::Theme) -> container::Style {
-    //let palette = theme.extended_palette();
-    container::Style {
-        //background: Some(iced::Background::Color(palette.success.weak.color)),
-        background: Some(iced::Background::Color(SELECTED_DARK_SQUARE)),
-        text_color: Some(rgb!(45., 45., 45.)),
-        ..Default::default()
-    }
-}
-
 pub fn _container_style_paper(_theme: &iced::Theme) -> container::Style {
     //let palette = theme.palette();
     container::Style {
@@ -453,6 +488,28 @@ pub fn _container_style_paper(_theme: &iced::Theme) -> container::Style {
             radius: 0.0.into(),
         },
         ..Default::default()
+    }
+}
+
+pub fn board_container_style(
+    board_theme: BoardTheme,
+    square_style: BoardSquareStyle,
+) -> impl Fn(&iced::Theme) -> container::Style {
+    move |_theme| {
+        let palette = board_theme.board_palette();
+        let background = match square_style {
+            BoardSquareStyle::Light => palette.light_square,
+            BoardSquareStyle::Dark => palette.dark_square,
+            BoardSquareStyle::SelectedLight => palette.selected_light_square,
+            BoardSquareStyle::SelectedDark => palette.selected_dark_square,
+            BoardSquareStyle::Paper => rgb!(245., 245., 245.),
+        };
+
+        container::Style {
+            background: Some(iced::Background::Color(background)),
+            text_color: Some(rgb!(45., 45., 45.)),
+            ..Default::default()
+        }
     }
 }
 
@@ -502,22 +559,19 @@ pub fn pick_list_style(theme: &iced::Theme, status: iced::widget::pick_list::Sta
     let palette = theme.extended_palette();
 
     let (bg, text) = match status {
-        pick_list::Status::Hovered => {
-            (palette.success.strong.color, rgb!(255, 255, 255))
-        } _ => {
-            (palette.primary.base.color, palette.danger.base.color)
-        }
+        pick_list::Status::Hovered => (palette.success.strong.color, palette.success.strong.text),
+        _ => (palette.primary.base.color, palette.primary.base.text),
     };
     pick_list::Style {
-        text_color: text,//palette.danger.base.color,
+        text_color: text, //palette.danger.base.color,
         placeholder_color: palette.success.weak.color,
         handle_color: palette.success.strong.color,
         background: iced::Background::Color(bg),
         border: Border {
             color: palette.success.strong.color,
             width: 1.,
-            radius:  0.3.into(),
-        }
+            radius: 0.3.into(),
+        },
     }
 }
 
@@ -529,202 +583,121 @@ pub fn menu_style(theme: &iced::Theme) -> menu::Style {
         border: Border {
             color: palette.success.strong.color,
             width: 1.,
-            radius:  0.3.into(),
+            radius: 0.3.into(),
         },
         selected_background: iced::Background::Color(palette.success.base.color),
-        selected_text_color: iced::Color::WHITE,
-        text_color: rgb!(45., 45., 45.),
+        selected_text_color: palette.success.base.text,
+        text_color: palette.primary.base.text,
         shadow: iced::Shadow::default(),
     }
 }
 
-/// Offline Chess Puzzles Palette
+/// Board-square colors, intentionally independent from the application UI palette.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct OCPPalette {
-    pub container_bg: Color,
-    pub simple_text: Color,
-    pub label_selected: Color,
+pub struct BoardPalette {
     pub light_square: Color,
     pub dark_square: Color,
     pub selected_light_square: Color,
     pub selected_dark_square: Color,
-    pub tab_label: Color,
 }
 
-impl From<OCPPalette> for Palette {
-    fn from(val: OCPPalette) -> Self {
-        Palette {
-            background: val.container_bg,
-            text: val.simple_text,
-            primary: val.light_square,
-            success: val.dark_square,
-            danger: val.tab_label,
-            warning: val.tab_label,
-        }
-    }
-}
-
-impl OCPPalette {
+impl BoardPalette {
     pub const BLUE: Self = Self {
-        container_bg: Color::WHITE,
         light_square: rgb!(235.0, 249.0, 255),
         dark_square: rgb!(110.0, 174.0, 213.0),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
 
     pub const BLUE_DARK: Self = Self {
-        container_bg: rgb!(70., 99., 117.),
         light_square: rgb!(235.0, 249.0, 255),
         dark_square: rgb!(110.0, 174.0, 213.0),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::WHITE,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const RED: Self = Self {
-        container_bg: Color::WHITE,
         light_square: rgb!(249.0, 234.0, 246),
         dark_square: rgb!(230.0, 133.0, 141.0),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
 
     pub const RED_DARK: Self = Self {
-        container_bg: rgb!(98.0, 64.0, 64.0),
         light_square: rgb!(249.0, 234.0, 246),
         dark_square: rgb!(230.0, 133.0, 141.0),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::WHITE,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const GREEN_DARK: Self = Self {
-        container_bg: rgb!(87., 99., 76.),
         light_square: rgb!(238.0, 240.0, 203.0),
         dark_square: rgb!(136.0, 161.0, 111.0),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::WHITE,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const BROWN_DARK: Self = Self {
-        container_bg: rgb!(116., 99., 86.),
         light_square: rgb!(241., 221., 186.),
         dark_square: rgb!(186., 142., 107.),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::WHITE,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const PURPLE_DARK: Self = Self {
-        container_bg: rgb!(89., 77., 101.),
         light_square: rgb!(233., 223., 242.),
         dark_square: rgb!(162., 136., 188.),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::WHITE,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const MONOCHROME_GREY_DARK: Self = Self {
-        container_bg: rgb!(90., 90., 90.),
         light_square: rgb!(235., 235., 235.),
         dark_square: rgb!(155., 155., 155.),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::WHITE,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const GREY_DARK: Self = Self {
-        container_bg: rgb!(71., 86., 92.),
         light_square: rgb!(222., 227., 230.),
         dark_square: rgb!(140., 162., 173.),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::WHITE,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const GREEN: Self = Self {
-        container_bg: Color::WHITE,
         light_square: rgb!(238.0, 240.0, 203.0),
         dark_square: rgb!(136.0, 161.0, 111.0),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const BROWN: Self = Self {
-        container_bg: Color::WHITE,
         light_square: rgb!(241., 221., 186.),
         dark_square: rgb!(186., 142., 107.),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const PURPLE: Self = Self {
-        container_bg: Color::WHITE,
         light_square: rgb!(233., 223., 242.),
         dark_square: rgb!(162., 136., 188.),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const MONOCHROME_GREY: Self = Self {
-        container_bg: Color::WHITE,
         light_square: rgb!(235., 235., 235.),
         dark_square: rgb!(155., 155., 155.),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const GREY: Self = Self {
-        container_bg: Color::WHITE,
         light_square: rgb!(222., 227., 230.),
         dark_square: rgb!(140., 162., 173.),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const TRANS: Self = Self {
-        container_bg: rgb!(154.0, 223.0, 250.0),
         light_square: rgb!(252.0, 252.0, 252.0),
         dark_square: rgb!(245.0, 183.0, 195.0),
         selected_light_square: rgb!(205, 210, 106),
         selected_dark_square: rgb!(170, 162, 58),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
     pub const ENBY: Self = Self {
-        container_bg: rgb!(142.0, 101.0, 161.0),
         light_square: rgb!(246.0, 246.0, 246.0),
         dark_square: rgb!(211.0, 192.0, 80.0),
         selected_light_square: rgb!(172.0, 131.0, 191.0),
         selected_dark_square: rgb!(132.0, 91.0, 151.0),
-        simple_text: Color::BLACK,
-        label_selected: Color::WHITE,
-        tab_label: Color::BLACK,
     };
 }

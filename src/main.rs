@@ -878,6 +878,7 @@ impl OfflinePuzzles {
                     self.last_move_to,
                     self.hint_square,
                     self.settings_tab.saved_configs.piece_theme,
+                    self.settings_tab.board_theme,
                     &self.puzzle_status,
                     is_fav,
                     has_more_puzzles,
@@ -969,7 +970,10 @@ impl OfflinePuzzles {
     }
 
     fn theme(&self) -> iced::Theme {
-        iced::Theme::custom(String::from("Theme"), self.settings_tab.board_theme.palette().into())
+        iced::Theme::custom(
+            String::from("Theme"),
+            self.settings_tab.interface_theme.palette(),
+        )
     }
 }
 
@@ -1006,6 +1010,7 @@ fn gen_view<'a>(
     last_move_to: Option<Square>,
     hint_square: Option<Square>,
     piece_theme: styles::PieceTheme,
+    board_theme: styles::BoardTheme,
     puzzle_status: &'a str,
     is_fav: bool,
     has_more_puzzles: bool,
@@ -1088,12 +1093,18 @@ fn gen_view<'a>(
                     hint_square == Some(pos)
                 } else {
                     from_square == Some(pos)
-                };
+            };
             if font {
-                let square_style: styles::ChessBtn = if selected {
-                    styles::btn_style_light_square
+                let square_style = if selected {
+                    styles::board_button_style(
+                        board_theme,
+                        styles::BoardSquareStyle::Light,
+                    )
                 } else {
-                    styles::btn_style_paper
+                    styles::board_button_style(
+                        board_theme,
+                        styles::BoardSquareStyle::Paper,
+                    )
                 };
 
                 if let Some(piece) = piece {
@@ -1140,24 +1151,48 @@ fn gen_view<'a>(
                 .style(square_style)
                 );
             } else {
-                let square_style: styles::ChessBtn;
-                let container_style: styles::ChessboardContainer;
+                let square_style;
+                let container_style;
 
                 if light_square {
                     if selected {
-                        square_style = styles::btn_style_selected_light_square;
-                        container_style = styles::container_style_selected_light_square;
+                        square_style = styles::board_button_style(
+                            board_theme,
+                            styles::BoardSquareStyle::SelectedLight,
+                        );
+                        container_style = styles::board_container_style(
+                            board_theme,
+                            styles::BoardSquareStyle::SelectedLight,
+                        );
                     } else {
-                        square_style = styles::btn_style_light_square;
-                        container_style = styles::container_style_light_square;
+                        square_style = styles::board_button_style(
+                            board_theme,
+                            styles::BoardSquareStyle::Light,
+                        );
+                        container_style = styles::board_container_style(
+                            board_theme,
+                            styles::BoardSquareStyle::Light,
+                        );
                     }
                 } else {
                     if selected {
-                        square_style = styles::btn_style_selected_dark_square;
-                        container_style = styles::container_style_selected_dark_square;
+                        square_style = styles::board_button_style(
+                            board_theme,
+                            styles::BoardSquareStyle::SelectedDark,
+                        );
+                        container_style = styles::board_container_style(
+                            board_theme,
+                            styles::BoardSquareStyle::SelectedDark,
+                        );
                     } else {
-                        square_style = styles::btn_style_dark_square;
-                        container_style = styles::container_style_dark_square;
+                        square_style = styles::board_button_style(
+                            board_theme,
+                            styles::BoardSquareStyle::Dark,
+                        );
+                        container_style = styles::board_container_style(
+                            board_theme,
+                            styles::BoardSquareStyle::Dark,
+                        );
                     }
                 }
 

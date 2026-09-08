@@ -69,6 +69,7 @@ promotion_piece = Choix de la promotion:
 #============================================================
 piece_theme = Jeu de pièces:
 board_theme = Thème de l'échiquier:
+interface_appearance = Apparence de l'interface:
 language = Langue:
 english = Anglais
 french = Français

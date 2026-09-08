@@ -67,6 +67,7 @@ promotion_piece = Promotion piece:
 #============================================================
 piece_theme = Piece Theme:
 board_theme = Board Theme:
+interface_appearance = Interface appearance:
 language = Language:
 english = English
 french = French

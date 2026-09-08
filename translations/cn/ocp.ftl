@@ -71,6 +71,7 @@ promotion_piece = 升变棋子:
 
 piece_theme = 棋子主题:
 board_theme = 棋盘主题:
+interface_appearance = 界面外观:
 language = 语言:
 english = 英语
 french = 法语

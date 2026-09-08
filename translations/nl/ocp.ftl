@@ -67,6 +67,7 @@ promotion_piece = Promoveerstuk:
 #============================================================
 piece_theme = Stukkenstijl:
 board_theme = Bordstijl:
+interface_appearance = Interfaceweergave:
 language = Taal:
 english = Engels
 french = Frans

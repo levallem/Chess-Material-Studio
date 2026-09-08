@@ -67,6 +67,7 @@ promotion_piece = Peça para promoção:
 #============================================================
 piece_theme = Tema de peças:
 board_theme = Tema do tabuleiro:
+interface_appearance = Aparência da interface:
 language = Idioma:
 english = Inglês
 french = Francês

@@ -17,6 +17,7 @@ pub enum SettingsMessage {
     CheckShowCoords(bool),
     SelectPieceTheme(styles::PieceTheme),
     SelectBoardTheme(styles::BoardTheme),
+    SelectInterfaceTheme(styles::InterfaceTheme),
     SelectLanguage(PickListWrapper<lang::Language>),
     ChangePDFExportPgs(String),
     ChangePuzzleDbLocation(String),
@@ -59,6 +60,7 @@ pub struct SettingsTab {
     pub maximized: bool,
     pub piece_theme: styles::PieceTheme,
     pub board_theme: styles::BoardTheme,
+    pub interface_theme: styles::InterfaceTheme,
     pub lang: PickListWrapper<lang::Language>,
     pub export_pgs: String,
     theme: styles::BoardTheme,
@@ -83,6 +85,7 @@ impl SettingsTab {
             maximized: config::SETTINGS.maximized,
             piece_theme: config::SETTINGS.piece_theme,
             board_theme: config::SETTINGS.board_theme,
+            interface_theme: config::SETTINGS.interface_theme,
             lang: PickListWrapper::new_lang(config::SETTINGS.lang, config::SETTINGS.lang),
             export_pgs: config::SETTINGS.export_pgs.to_string(),
             theme: styles::BoardTheme::Blue,
@@ -106,6 +109,16 @@ impl SettingsTab {
             SettingsMessage::SelectBoardTheme(value) => {
                 self.board_theme = value;
                 Task::perform(SettingsTab::send_changes(self.play_sound, self.auto_load_next, self.flip_board, self.show_coordinates, self.piece_theme, self.theme, self.engine_path.clone(), self.lang.lang), Message::ChangeSettings)
+            }
+            SettingsMessage::SelectInterfaceTheme(value) => {
+                self.interface_theme = value;
+                let mut config = config::load_config();
+                config.interface_theme = value;
+                match Self::persist_config(&config) {
+                    Ok(()) => self.saved_configs = config,
+                    Err(status_key) => self.settings_status = lang::tr(&self.lang.lang, status_key),
+                }
+                Task::none()
             }
             SettingsMessage::SelectLanguage(value) => {
                 self.lang = value;
@@ -236,6 +249,7 @@ impl SettingsTab {
             flip_board: self.flip_board,
             show_coordinates: self.show_coordinates,
             board_theme: self.board_theme,
+            interface_theme: self.interface_theme,
             lang: self.lang.lang,
             export_pgs: self.export_pgs.parse().unwrap(),
             last_min_rating: self.saved_configs.last_min_rating,
@@ -494,6 +508,14 @@ impl Tab for SettingsTab {
                     &styles::BoardTheme::ALL[..],
                     Some(self.board_theme),
                     SettingsMessage::SelectBoardTheme
+                ).style(styles::pick_list_style).menu_style(styles::menu_style)
+            ].spacing(5).align_y(Alignment::Center),
+            row![
+                Text::new(lang::tr(&self.lang.lang, "interface_appearance")),
+                PickList::new(
+                    &styles::InterfaceTheme::ALL[..],
+                    Some(self.interface_theme),
+                    SettingsMessage::SelectInterfaceTheme
                 ).style(styles::pick_list_style).menu_style(styles::menu_style)
             ].spacing(5).align_y(Alignment::Center),
             row![

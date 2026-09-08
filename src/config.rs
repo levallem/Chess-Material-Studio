@@ -55,6 +55,8 @@ pub struct OfflinePuzzlesConfig {
     pub flip_board: bool,
     pub show_coordinates: bool,
     pub board_theme: styles::BoardTheme,
+    #[serde(default)]
+    pub interface_theme: styles::InterfaceTheme,
     pub lang: lang::Language,
     pub export_pgs: i32,
     pub last_min_rating: i32,
@@ -84,6 +86,7 @@ impl ::std::default::Default for OfflinePuzzlesConfig {
             flip_board: false,
             show_coordinates: false,
             board_theme: styles::BoardTheme::default(),
+            interface_theme: styles::InterfaceTheme::default(),
             lang: lang::Language::English,
             export_pgs: 50,
             last_min_rating: 0,
@@ -399,6 +402,27 @@ mod tests {
             config.puzzle_sqlite_location.is_none(),
             "puzzle_sqlite_location should be None when absent from JSON"
         );
+        assert_eq!(
+            config.interface_theme,
+            styles::InterfaceTheme::Light,
+            "existing settings without an interface theme must keep the light appearance"
+        );
+    }
+
+    #[test]
+    fn interface_theme_round_trips_without_changing_board_theme() {
+        let config = OfflinePuzzlesConfig {
+            board_theme: styles::BoardTheme::Blue,
+            interface_theme: styles::InterfaceTheme::Dark,
+            ..OfflinePuzzlesConfig::default()
+        };
+
+        let serialized = serde_json::to_string(&config).expect("configuration should serialize");
+        let restored = deserialize_config(serialized.as_bytes())
+            .expect("serialized configuration should deserialize");
+
+        assert_eq!(restored.interface_theme, styles::InterfaceTheme::Dark);
+        assert_eq!(restored.board_theme, styles::BoardTheme::Blue);
     }
 
     #[test]
