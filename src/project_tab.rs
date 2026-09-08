@@ -5,11 +5,13 @@ use rfd::AsyncFileDialog;
 use std::path::{Path, PathBuf};
 
 use chess_material_studio::project::{
-    ProjectChapter, ProjectMetadata, create_chapter, create_project, list_chapters,
-    list_selected_puzzles_for_chapter, open_project,
+    ProjectChapter, ProjectMetadata, ProjectPuzzleDecision, clear_puzzle_decision, create_chapter,
+    create_project, find_selected_puzzle_chapter, get_puzzle_decision, list_chapters,
+    list_selected_puzzles_for_chapter, open_project, set_puzzle_decision,
 };
 
 use crate::lang;
+use crate::models::Puzzle;
 use crate::styles::btn_style_simple;
 use crate::{Message, Tab};
 
@@ -19,6 +21,35 @@ struct ActiveProject {
     metadata: ProjectMetadata,
     chapters: Vec<ProjectChapter>,
     active_chapter_id: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PuzzleReviewContext {
+    path: PathBuf,
+    chapter_id: i32,
+    chapter_name: String,
+    puzzle_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CachedPuzzleReviewDecision {
+    Loaded(Option<ProjectPuzzleDecision>),
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedPuzzleReview {
+    context: PuzzleReviewContext,
+    decision: CachedPuzzleReviewDecision,
+    status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PuzzleReviewView {
+    pub chapter_name: String,
+    pub decision: Option<ProjectPuzzleDecision>,
+    pub decision_loaded: bool,
+    pub status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +75,7 @@ pub struct ProjectTab {
     chapter_name: String,
     target_puzzle_count: String,
     status: String,
+    review_cache: Option<CachedPuzzleReview>,
 }
 
 impl ProjectTab {
@@ -56,6 +88,7 @@ impl ProjectTab {
             chapter_name: String::new(),
             target_puzzle_count: String::new(),
             status: String::new(),
+            review_cache: None,
         }
     }
 
@@ -94,6 +127,7 @@ impl ProjectTab {
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
                 self.status.clear();
+                self.clear_puzzle_review_cache();
                 Task::none()
             }
             ProjectMessage::ChapterNameChanged(value) => {
@@ -161,6 +195,7 @@ impl ProjectTab {
         {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
+                self.clear_puzzle_review_cache();
                 self.project_name.clear();
                 self.new_project_path = None;
                 self.status.clear();
@@ -175,6 +210,7 @@ impl ProjectTab {
         {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
+                self.clear_puzzle_review_cache();
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
                 self.status.clear();
@@ -212,6 +248,7 @@ impl ProjectTab {
         ) {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
+                self.clear_puzzle_review_cache();
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
                 self.status.clear();
@@ -232,6 +269,7 @@ impl ProjectTab {
         {
             active_project.active_chapter_id = Some(chapter_id);
             self.status.clear();
+            self.clear_puzzle_review_cache();
         }
     }
 
@@ -254,6 +292,120 @@ impl ProjectTab {
         list_selected_puzzles_for_chapter(&active_project.path, chapter_id)
             .map(|puzzles| Some(puzzles.len()))
     }
+
+    pub fn refresh_puzzle_review(&mut self, puzzle: Option<&Puzzle>) {
+        let Some(puzzle) = puzzle else {
+            self.clear_puzzle_review_cache();
+            return;
+        };
+        let Some(context) = self.puzzle_review_context(puzzle) else {
+            self.clear_puzzle_review_cache();
+            return;
+        };
+        if self.review_cache.as_ref().is_some_and(|cache| cache.context == context) {
+            return;
+        }
+        self.load_puzzle_review(context, false);
+    }
+
+    pub fn set_puzzle_review(&mut self, puzzle: &Puzzle, decision: ProjectPuzzleDecision) {
+        let Some(context) = self.puzzle_review_context(puzzle) else {
+            self.clear_puzzle_review_cache();
+            return;
+        };
+        let stored_puzzle = project_puzzle(puzzle);
+        match set_puzzle_decision(&context.path, context.chapter_id, &stored_puzzle, decision) {
+            Ok(()) => self.review_cache = Some(CachedPuzzleReview {
+                context,
+                decision: CachedPuzzleReviewDecision::Loaded(Some(decision)),
+                status: String::new(),
+            }),
+            Err(error) if decision == ProjectPuzzleDecision::Selected && error == "puzzle is already selected in another chapter" => {
+                self.set_duplicate_selection_status(&context, puzzle, error);
+            }
+            Err(error) => self.load_puzzle_review_after_error(context, error),
+        }
+    }
+
+    pub fn clear_puzzle_review(&mut self, puzzle: &Puzzle) {
+        let Some(context) = self.puzzle_review_context(puzzle) else {
+            self.clear_puzzle_review_cache();
+            return;
+        };
+        match clear_puzzle_decision(&context.path, context.chapter_id, &puzzle.puzzle_id) {
+            Ok(()) => self.review_cache = Some(CachedPuzzleReview {
+                context,
+                decision: CachedPuzzleReviewDecision::Loaded(None),
+                status: String::new(),
+            }),
+            Err(error) => self.load_puzzle_review_after_error(context, error),
+        }
+    }
+
+    pub fn review_view(&self) -> Option<PuzzleReviewView> {
+        let cache = self.review_cache.as_ref()?;
+        let (decision, decision_loaded) = match cache.decision {
+            CachedPuzzleReviewDecision::Loaded(decision) => (decision, true),
+            CachedPuzzleReviewDecision::Unavailable => (None, false),
+        };
+        Some(PuzzleReviewView { chapter_name: cache.context.chapter_name.clone(), decision, decision_loaded, status: cache.status.clone() })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_review_puzzle_id(&self) -> Option<&str> {
+        self.review_cache
+            .as_ref()
+            .map(|cache| cache.context.puzzle_id.as_str())
+    }
+
+    fn puzzle_review_context(&self, puzzle: &Puzzle) -> Option<PuzzleReviewContext> {
+        let active_project = self.active_project.as_ref()?;
+        let chapter_id = active_project.active_chapter_id?;
+        let chapter = active_project.chapters.iter().find(|chapter| chapter.id == chapter_id)?;
+        Some(PuzzleReviewContext { path: active_project.path.clone(), chapter_id, chapter_name: chapter.name.clone(), puzzle_id: puzzle.puzzle_id.clone() })
+    }
+
+    fn load_puzzle_review(&mut self, context: PuzzleReviewContext, preserve_on_error: bool) {
+        match get_puzzle_decision(&context.path, context.chapter_id, &context.puzzle_id) {
+            Ok(decision) => self.review_cache = Some(CachedPuzzleReview { context, decision: CachedPuzzleReviewDecision::Loaded(decision), status: String::new() }),
+            Err(error) => {
+                let error_status = self.review_error_status(&error);
+                let preserves_current_context = preserve_on_error && self.review_cache.as_ref().is_some_and(|cache| cache.context == context);
+                if preserves_current_context {
+                    if let Some(cache) = self.review_cache.as_mut() { cache.status = error_status; }
+                } else {
+                    self.review_cache = Some(CachedPuzzleReview { context, decision: CachedPuzzleReviewDecision::Unavailable, status: error_status });
+                }
+            }
+        }
+    }
+
+    fn load_puzzle_review_after_error(&mut self, context: PuzzleReviewContext, error: String) {
+        self.load_puzzle_review(context, true);
+        let error_status = self.review_error_status(&error);
+        if let Some(cache) = self.review_cache.as_mut() {
+            if cache.status.is_empty() { cache.status = error_status; }
+        }
+    }
+
+    fn set_duplicate_selection_status(&mut self, context: &PuzzleReviewContext, puzzle: &Puzzle, error: String) {
+        let status = match find_selected_puzzle_chapter(&context.path, &puzzle.puzzle_id) {
+            Ok(Some(chapter)) => format!("{}: {}", lang::tr(&self.lang, "already_selected_in_chapter"), chapter.name),
+            Ok(None) | Err(_) => self.review_error_status(&error),
+        };
+        if let Some(cache) = self.review_cache.as_mut() && cache.context == *context {
+            cache.status = status;
+        } else {
+            self.load_puzzle_review(context.clone(), false);
+            if let Some(cache) = self.review_cache.as_mut() { cache.status = status; }
+        }
+    }
+
+    fn review_error_status(&self, error: &str) -> String {
+        format!("{}: {error}", lang::tr(&self.lang, "review_error"))
+    }
+
+    fn clear_puzzle_review_cache(&mut self) { self.review_cache = None; }
 }
 
 fn load_active_project(path: PathBuf, metadata: ProjectMetadata) -> Result<ActiveProject, String> {
@@ -264,6 +416,14 @@ fn load_active_project(path: PathBuf, metadata: ProjectMetadata) -> Result<Activ
         active_chapter_id: chapters.first().map(|chapter| chapter.id),
         chapters,
     })
+}
+
+fn project_puzzle(puzzle: &Puzzle) -> chess_material_studio::models::Puzzle {
+    chess_material_studio::models::Puzzle {
+        puzzle_id: puzzle.puzzle_id.clone(), fen: puzzle.fen.clone(), moves: puzzle.moves.clone(),
+        rating: puzzle.rating, rating_deviation: puzzle.rating_deviation, popularity: puzzle.popularity,
+        nb_plays: puzzle.nb_plays, themes: puzzle.themes.clone(), game_url: puzzle.game_url.clone(), opening: puzzle.opening.clone(),
+    }
 }
 
 fn is_cms_project_path(path: &Path) -> bool {
@@ -436,7 +596,6 @@ impl ProjectTab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chess_material_studio::models::Puzzle;
     use chess_material_studio::project::{ProjectPuzzleDecision, set_puzzle_decision};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -583,7 +742,7 @@ mod tests {
         set_puzzle_decision(
             &project.path,
             chapter.id,
-            &sample_puzzle(),
+            &project_puzzle(&sample_puzzle()),
             ProjectPuzzleDecision::Selected,
         )
         .unwrap();
@@ -594,8 +753,185 @@ mod tests {
     }
 
     #[test]
+    fn puzzle_adapter_preserves_every_persistent_snapshot_field() {
+        let puzzle = Puzzle {
+            puzzle_id: "adapter-id".into(),
+            fen: "8/8/8/8/8/8/8/K6k w - - 0 1".into(),
+            moves: "a1a2 h1h2".into(),
+            rating: 1734,
+            rating_deviation: 87,
+            popularity: 42,
+            nb_plays: 1_234,
+            themes: "hangingPiece short".into(),
+            game_url: "https://lichess.org/adapter-game".into(),
+            opening: "C20".into(),
+        };
+
+        let persistent = project_puzzle(&puzzle);
+
+        assert_eq!(persistent.puzzle_id, puzzle.puzzle_id);
+        assert_eq!(persistent.fen, puzzle.fen);
+        assert_eq!(persistent.moves, puzzle.moves);
+        assert_eq!(persistent.rating, puzzle.rating);
+        assert_eq!(persistent.rating_deviation, puzzle.rating_deviation);
+        assert_eq!(persistent.popularity, puzzle.popularity);
+        assert_eq!(persistent.nb_plays, puzzle.nb_plays);
+        assert_eq!(persistent.themes, puzzle.themes);
+        assert_eq!(persistent.game_url, puzzle.game_url);
+        assert_eq!(persistent.opening, puzzle.opening);
+    }
+
+    #[test]
+    fn puzzle_review_context_requires_an_open_project_and_active_chapter() {
+        let puzzle = sample_puzzle();
+        let mut tab = ProjectTab::new();
+        tab.refresh_puzzle_review(Some(&puzzle));
+        assert!(tab.review_view().is_none());
+
+        let project = TempProjectDb::new("review-context");
+        create_project(&project.path, "Contexto").unwrap();
+        tab.open_project_path(&project.path);
+        tab.refresh_puzzle_review(Some(&puzzle));
+        assert!(tab.review_view().is_none());
+
+        create_chapter(&project.path, "Capítulo", None).unwrap();
+        tab.open_project_path(&project.path);
+        tab.refresh_puzzle_review(Some(&puzzle));
+        assert_eq!(tab.review_view().unwrap().decision, None);
+    }
+
+    #[test]
+    fn puzzle_review_actions_persist_and_refresh_the_cached_decision() {
+        let project = TempProjectDb::new("review-actions");
+        create_project(&project.path, "Acciones").unwrap();
+        let chapter = create_chapter(&project.path, "Pieza colgante", None).unwrap();
+        let puzzle = sample_puzzle();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.refresh_puzzle_review(Some(&puzzle));
+
+        assert_eq!(tab.review_view().unwrap().decision, None);
+        tab.set_puzzle_review(&puzzle, ProjectPuzzleDecision::Selected);
+        assert_eq!(tab.review_view().unwrap().decision, Some(ProjectPuzzleDecision::Selected));
+        assert_eq!(tab.selected_count().unwrap(), Some(1));
+        assert_eq!(chess_material_studio::project::get_puzzle_decision(&project.path, chapter.id, &puzzle.puzzle_id).unwrap(), Some(ProjectPuzzleDecision::Selected));
+        tab.set_puzzle_review(&puzzle, ProjectPuzzleDecision::Discarded);
+        assert_eq!(tab.review_view().unwrap().decision, Some(ProjectPuzzleDecision::Discarded));
+        assert_eq!(tab.selected_count().unwrap(), Some(0));
+        tab.clear_puzzle_review(&puzzle);
+        assert_eq!(tab.review_view().unwrap().decision, None);
+        assert_eq!(tab.selected_count().unwrap(), Some(0));
+        assert_eq!(chess_material_studio::project::get_puzzle_decision(&project.path, chapter.id, &puzzle.puzzle_id).unwrap(), None);
+    }
+
+    #[test]
+    fn switching_chapters_and_puzzles_refreshes_the_review_cache() {
+        let project = TempProjectDb::new("review-switching");
+        create_project(&project.path, "Cambios").unwrap();
+        let first = create_chapter(&project.path, "Primero", None).unwrap();
+        let second = create_chapter(&project.path, "Segundo", None).unwrap();
+        let first_puzzle = sample_puzzle();
+        let mut second_puzzle = sample_puzzle();
+        second_puzzle.puzzle_id = "cms-023e-second".into();
+        set_puzzle_decision(&project.path, first.id, &project_puzzle(&first_puzzle), ProjectPuzzleDecision::Selected).unwrap();
+        set_puzzle_decision(&project.path, second.id, &project_puzzle(&first_puzzle), ProjectPuzzleDecision::Discarded).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.refresh_puzzle_review(Some(&first_puzzle));
+        assert_eq!(tab.review_view().unwrap().decision, Some(ProjectPuzzleDecision::Selected));
+        tab.select_chapter(second.id);
+        tab.refresh_puzzle_review(Some(&first_puzzle));
+        assert_eq!(tab.review_view().unwrap().decision, Some(ProjectPuzzleDecision::Discarded));
+        tab.refresh_puzzle_review(Some(&second_puzzle));
+        assert_eq!(tab.review_view().unwrap().decision, None);
+    }
+
+    #[test]
+    fn duplicate_selection_keeps_the_existing_review_and_names_the_selected_chapter() {
+        let project = TempProjectDb::new("review-duplicate");
+        create_project(&project.path, "Duplicados").unwrap();
+        let first = create_chapter(&project.path, "Ataque doble", None).unwrap();
+        let second = create_chapter(&project.path, "Pieza colgante", None).unwrap();
+        let puzzle = sample_puzzle();
+        set_puzzle_decision(&project.path, first.id, &project_puzzle(&puzzle), ProjectPuzzleDecision::Selected).unwrap();
+        set_puzzle_decision(&project.path, second.id, &project_puzzle(&puzzle), ProjectPuzzleDecision::Discarded).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.select_chapter(second.id);
+        tab.refresh_puzzle_review(Some(&puzzle));
+        tab.set_puzzle_review(&puzzle, ProjectPuzzleDecision::Selected);
+
+        let view = tab.review_view().unwrap();
+        assert_eq!(view.decision, Some(ProjectPuzzleDecision::Discarded));
+        assert!(view.status.contains("Ataque doble"));
+        assert_eq!(chess_material_studio::project::get_puzzle_decision(&project.path, second.id, &puzzle.puzzle_id).unwrap(), Some(ProjectPuzzleDecision::Discarded));
+    }
+
+    #[test]
+    fn closing_a_project_clears_the_review_cache() {
+        let project = TempProjectDb::new("review-close");
+        create_project(&project.path, "Cerrar").unwrap();
+        create_chapter(&project.path, "Capítulo", None).unwrap();
+        let puzzle = sample_puzzle();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.refresh_puzzle_review(Some(&puzzle));
+        assert!(tab.review_view().is_some());
+        let _ = tab.update(ProjectMessage::CloseProject);
+        assert!(tab.review_view().is_none());
+    }
+
+    #[test]
+    fn opening_another_project_invalidates_the_previous_review_cache() {
+        let first_project = TempProjectDb::new("review-project-switch-first");
+        create_project(&first_project.path, "Primero").unwrap();
+        let first_chapter = create_chapter(&first_project.path, "Capítulo primero", None).unwrap();
+        let second_project = TempProjectDb::new("review-project-switch-second");
+        create_project(&second_project.path, "Segundo").unwrap();
+        let second_chapter = create_chapter(&second_project.path, "Capítulo segundo", None).unwrap();
+        let puzzle = sample_puzzle();
+        set_puzzle_decision(
+            &first_project.path,
+            first_chapter.id,
+            &project_puzzle(&puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &second_project.path,
+            second_chapter.id,
+            &project_puzzle(&puzzle),
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&first_project.path);
+        tab.refresh_puzzle_review(Some(&puzzle));
+        assert_eq!(
+            tab.review_view().unwrap().decision,
+            Some(ProjectPuzzleDecision::Selected)
+        );
+        assert_eq!(tab.cached_review_puzzle_id(), Some(puzzle.puzzle_id.as_str()));
+
+        tab.open_project_path(&second_project.path);
+
+        let active = tab.active_project.as_ref().unwrap();
+        assert_eq!(active.path, second_project.path);
+        assert_eq!(active.active_chapter_id, Some(second_chapter.id));
+        assert!(tab.review_view().is_none());
+        assert_eq!(tab.cached_review_puzzle_id(), None);
+
+        tab.refresh_puzzle_review(Some(&puzzle));
+
+        let view = tab.review_view().unwrap();
+        assert_eq!(view.chapter_name, "Capítulo segundo");
+        assert_eq!(view.decision, Some(ProjectPuzzleDecision::Discarded));
+        assert_eq!(tab.cached_review_puzzle_id(), Some(puzzle.puzzle_id.as_str()));
+    }
+
+    #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 23] = [
+        const PROJECT_KEYS: [&str; 32] = [
             "project",
             "new_project",
             "project_name",
@@ -619,6 +955,15 @@ mod tests {
             "chapter_name_required",
             "no_project_open",
             "no_active_chapter",
+            "review_status",
+            "unreviewed",
+            "discarded",
+            "select_puzzle",
+            "discard_puzzle",
+            "clear_review",
+            "already_selected_in_chapter",
+            "review_error",
+            "review_unavailable",
         ];
 
         for language in lang::Language::ALL {

@@ -71,6 +71,15 @@ project_file_extension_required = Os arquivos de projeto devem terminar em .cms.
 chapter_name_required = O nome do capítulo não pode estar vazio.
 no_project_open = Nenhum projeto está aberto.
 no_active_chapter = Nenhum capítulo ativo.
+review_status = Status da revisão
+unreviewed = Não revisado
+select_puzzle = Selecionar problema
+discard_puzzle = Descartar problema
+clear_review = Limpar revisão
+discarded = Descartado
+already_selected_in_chapter = Já selecionado em
+review_error = Erro de revisão
+review_unavailable = Indisponível
 
 #Search Tab
 lichess_db = Banco de Dados do Lichess

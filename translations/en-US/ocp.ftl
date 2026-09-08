@@ -71,6 +71,15 @@ project_file_extension_required = Project files must end in .cms.sqlite.
 chapter_name_required = Chapter name cannot be empty.
 no_project_open = No project is open.
 no_active_chapter = No active chapter.
+review_status = Review status
+unreviewed = Unreviewed
+select_puzzle = Select puzzle
+discard_puzzle = Discard puzzle
+clear_review = Clear review
+discarded = Discarded
+already_selected_in_chapter = Already selected in
+review_error = Review error
+review_unavailable = Unavailable
 
 #Search Tab
 lichess_db = Lichess DB

@@ -74,6 +74,15 @@ project_file_extension_required = 项目文件必须以 .cms.sqlite 结尾。
 chapter_name_required = 章节名称不能为空。
 no_project_open = 未打开项目。
 no_active_chapter = 没有当前章节。
+review_status = 审核状态
+unreviewed = 未审核
+select_puzzle = 选择谜题
+discard_puzzle = 丢弃谜题
+clear_review = 清除审核
+discarded = 已丢弃
+already_selected_in_chapter = 已在此章节中选择
+review_error = 审核错误
+review_unavailable = 不可用
 
 # 搜索标签页
 

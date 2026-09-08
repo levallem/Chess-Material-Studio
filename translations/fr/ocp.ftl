@@ -73,6 +73,15 @@ project_file_extension_required = Les fichiers de projet doivent se terminer par
 chapter_name_required = Le nom du chapitre ne peut pas être vide.
 no_project_open = Aucun projet n’est ouvert.
 no_active_chapter = Aucun chapitre actif.
+review_status = État de révision
+unreviewed = Non révisé
+select_puzzle = Sélectionner le puzzle
+discard_puzzle = Écarter le puzzle
+clear_review = Effacer la révision
+discarded = Écarté
+already_selected_in_chapter = Déjà sélectionné dans
+review_error = Erreur de révision
+review_unavailable = Indisponible
 
 #Search Tab
 lichess_db = BdD Lichess

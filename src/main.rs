@@ -23,6 +23,7 @@ use rfd::AsyncFileDialog;
 
 use iced_aw::{TabLabel, Tabs};
 use chess::{Board, BoardStatus, ChessMove, Color, File, Game, Piece, Rank, Square, ALL_SQUARES};
+use chess_material_studio::project::ProjectPuzzleDecision;
 
 use rodio::{MixerDeviceSink, DeviceSinkBuilder};
 
@@ -44,7 +45,7 @@ mod puzzles;
 use puzzles::{PuzzleMessage, PuzzleTab, GameStatus};
 
 mod project_tab;
-use project_tab::{ProjectMessage, ProjectTab};
+use project_tab::{ProjectMessage, ProjectTab, PuzzleReviewView};
 
 use crate::styles::btn_style_simple;
 
@@ -131,6 +132,8 @@ pub enum Message {
     PuzzleSqliteSourceSelected,
     PuzzleInputIndexChange(String),
     JumpToPuzzle,
+    SetPuzzleReview(ProjectPuzzleDecision),
+    ClearPuzzleReview,
 }
 
 struct SoundPlayback {
@@ -418,6 +421,7 @@ impl OfflinePuzzles {
                             self.analysis_history = vec![self.board];
                             self.puzzle_tab.current_puzzle_move = 1;
                             self.puzzle_tab.game_status = GameStatus::NoPuzzles;
+                            self.refresh_current_puzzle_review();
                         } else {
                             self.puzzle_tab.game_status = GameStatus::PuzzleEnded;
                         }
@@ -486,6 +490,18 @@ impl OfflinePuzzles {
         self.puzzle_tab.current_puzzle_fen = san_correct_ep(self.board.to_string());
         self.puzzle_tab.game_status = GameStatus::Playing;
         self.game_mode = config::GameMode::Puzzle;
+        self.refresh_current_puzzle_review();
+    }
+
+    fn current_reviewable_puzzle(&self) -> Option<&config::Puzzle> {
+        (self.puzzle_tab.game_status != GameStatus::NoPuzzles)
+            .then(|| self.puzzle_tab.puzzles.get(self.puzzle_tab.current_puzzle))
+            .flatten()
+    }
+
+    fn refresh_current_puzzle_review(&mut self) {
+        let puzzle = self.current_reviewable_puzzle().cloned();
+        self.project_tab.refresh_puzzle_review(puzzle.as_ref());
     }
 
     fn inc_puzzle_counter(&mut self) {
@@ -540,7 +556,9 @@ impl OfflinePuzzles {
             } (_, Message::Settings(message)) => {
                 self.settings_tab.update(message)
             } (_, Message::Project(message)) => {
-                self.project_tab.update(message)
+                let task = self.project_tab.update(message);
+                self.refresh_current_puzzle_review();
+                task
             } (_, Message::PuzzleSqliteSourceSelected) => {
                 self.has_db = config::puzzle_source_exists(&self.settings_tab.saved_configs);
                 Task::none()
@@ -618,6 +636,7 @@ impl OfflinePuzzles {
                     self.puzzle_tab.game_status = GameStatus::NoPuzzles;
                     self.puzzle_status = lang::tr(&self.lang, "no_puzzle_found");
                 }
+                self.refresh_current_puzzle_review();
                 Task::none()
             } (_, Message::ChangeSettings(message)) => {
                 if let Some(settings) = message {
@@ -651,6 +670,16 @@ impl OfflinePuzzles {
                         self.puzzle_tab.current_puzzle = index - 1;
                 }
                 self.load_puzzle(false);
+                Task::none()
+            } (_, Message::SetPuzzleReview(decision)) => {
+                if let Some(puzzle) = self.current_reviewable_puzzle().cloned() {
+                    self.project_tab.set_puzzle_review(&puzzle, decision);
+                }
+                Task::none()
+            } (_, Message::ClearPuzzleReview) => {
+                if let Some(puzzle) = self.current_reviewable_puzzle().cloned() {
+                    self.project_tab.clear_puzzle_review(&puzzle);
+                }
                 Task::none()
             } (_, Message::ScreenshotCreated(screenshot)) => {
                 Task::perform(screenshot_save_dialog(screenshot), Message::SaveScreenshot)
@@ -875,6 +904,9 @@ impl OfflinePuzzles {
             } else {
                 db::is_favorite(&self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle].puzzle_id)
             };
+            let puzzle_review = self
+                .current_reviewable_puzzle()
+                .and_then(|_| self.project_tab.review_view());
             let resp = responsive(move |size| {
                 gen_view(
                     self.game_mode,
@@ -898,6 +930,7 @@ impl OfflinePuzzles {
                     self.puzzle_tab.puzzles.len(),
                     self.puzzle_tab.current_puzzle_move,
                     self.puzzle_tab.game_status,
+                    puzzle_review.clone(),
                     &self.active_tab,
                     &self.engine_eval,
                     &self.engine_move,
@@ -992,6 +1025,79 @@ impl OfflinePuzzles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chess_material_studio::models::Puzzle as PersistentPuzzle;
+    use chess_material_studio::project::{create_chapter, create_project, set_puzzle_decision};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_PROJECT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TempProjectDb {
+        path: PathBuf,
+        directory: PathBuf,
+    }
+
+    impl TempProjectDb {
+        fn new(label: &str) -> Self {
+            let sequence = TEMP_PROJECT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("cms_023e_main_tests")
+                .join(format!("{label}-{}-{sequence}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("test directory should be created");
+            Self {
+                path: directory.join("project.cms.sqlite"),
+                directory,
+            }
+        }
+    }
+
+    impl Drop for TempProjectDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir(&self.directory);
+        }
+    }
+
+    fn navigation_puzzle(id: &str) -> config::Puzzle {
+        config::Puzzle {
+            puzzle_id: id.into(),
+            fen: "8/8/8/8/8/8/8/K6k w - - 0 1".into(),
+            moves: "a1a2".into(),
+            rating: 1500,
+            rating_deviation: 80,
+            popularity: 50,
+            nb_plays: 10,
+            themes: "hangingPiece".into(),
+            game_url: "https://lichess.org/game".into(),
+            opening: String::new(),
+        }
+    }
+
+    fn persistent_puzzle(puzzle: &config::Puzzle) -> PersistentPuzzle {
+        PersistentPuzzle {
+            puzzle_id: puzzle.puzzle_id.clone(),
+            fen: puzzle.fen.clone(),
+            moves: puzzle.moves.clone(),
+            rating: puzzle.rating,
+            rating_deviation: puzzle.rating_deviation,
+            popularity: puzzle.popularity,
+            nb_plays: puzzle.nb_plays,
+            themes: puzzle.themes.clone(),
+            game_url: puzzle.game_url.clone(),
+            opening: puzzle.opening.clone(),
+        }
+    }
+
+    fn assert_current_review(
+        app: &OfflinePuzzles,
+        puzzle_id: &str,
+        decision: ProjectPuzzleDecision,
+    ) {
+        assert_eq!(app.current_reviewable_puzzle().unwrap().puzzle_id, puzzle_id);
+        assert_eq!(app.project_tab.cached_review_puzzle_id(), Some(puzzle_id));
+        assert_eq!(app.project_tab.review_view().unwrap().decision, Some(decision));
+    }
 
     #[test]
     fn unavailable_puzzle_source_keeps_startup_in_missing_source_state() {
@@ -1002,6 +1108,71 @@ mod tests {
         };
 
         assert!(!config::puzzle_source_exists(&config));
+    }
+
+    #[test]
+    fn no_puzzle_state_is_not_reviewable_or_actionable() {
+        let mut app = OfflinePuzzles::new(false);
+        app.puzzle_tab.puzzles = vec![config::Puzzle::default()];
+        app.puzzle_tab.current_puzzle = 0;
+        app.puzzle_tab.game_status = GameStatus::NoPuzzles;
+
+        assert!(app.current_reviewable_puzzle().is_none());
+        let _ = app.update(Message::SetPuzzleReview(ProjectPuzzleDecision::Selected));
+        let _ = app.update(Message::ClearPuzzleReview);
+
+        assert!(app.project_tab.review_view().is_none());
+    }
+
+    #[test]
+    fn previous_next_and_jump_refresh_the_review_for_the_current_puzzle() {
+        let project = TempProjectDb::new("review-navigation");
+        create_project(&project.path, "Navegación").unwrap();
+        let chapter = create_chapter(&project.path, "Capítulo", None).unwrap();
+        let puzzles = vec![
+            navigation_puzzle("cms-023e-first"),
+            navigation_puzzle("cms-023e-second"),
+            navigation_puzzle("cms-023e-third"),
+        ];
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &persistent_puzzle(&puzzles[0]),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &persistent_puzzle(&puzzles[1]),
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &persistent_puzzle(&puzzles[2]),
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
+        app.puzzle_tab.puzzles = puzzles;
+        app.puzzle_tab.current_puzzle = 0;
+        app.load_puzzle(false);
+        assert_current_review(&app, "cms-023e-first", ProjectPuzzleDecision::Selected);
+
+        let _ = app.update(Message::ShowNextPuzzle);
+        assert_current_review(&app, "cms-023e-second", ProjectPuzzleDecision::Discarded);
+
+        let _ = app.update(Message::ShowPreviousPuzzle);
+        assert_current_review(&app, "cms-023e-first", ProjectPuzzleDecision::Selected);
+
+        let _ = app.update(Message::PuzzleInputIndexChange("3".into()));
+        let _ = app.update(Message::JumpToPuzzle);
+        assert_current_review(&app, "cms-023e-third", ProjectPuzzleDecision::Discarded);
     }
 }
 
@@ -1032,6 +1203,7 @@ fn gen_view<'a>(
     total_puzzles: usize,
     current_puzzle_move: usize,
     game_status: GameStatus,
+    puzzle_review: Option<PuzzleReviewView>,
     active_tab: &TabId,
     engine_eval: &str,
     engine_move: &str,
@@ -1058,19 +1230,11 @@ fn gen_view<'a>(
 
     let is_white = (current_puzzle_side == Color::White) ^ flip_board;
 
-    //Reserve more space below the board if we'll show the engine eval
-    let board_height =
-        if engine_eval.is_empty() {
-            if show_coordinates {
-                (size.height - 145.) / 8.
-            } else {
-                (size.height - 135.) / 8.
-            }
-        } else if show_coordinates {
-            (size.height - 175.) / 8.
-        } else {
-            (size.height - 165.) / 8.
-        };
+    let board_controls_height = 135.
+        + if show_coordinates { 10. } else { 0. }
+        + if engine_eval.is_empty() { 0. } else { 30. }
+        + if puzzle_review.is_some() { 55. } else { 0. };
+    let board_height = (size.height - board_controls_height) / 8.;
 
     let ranks;
     let files;
@@ -1360,6 +1524,35 @@ fn gen_view<'a>(
     ].spacing(10).align_y(Alignment::Center);
 
     board_col = board_col.push(Text::new(puzzle_status)).push(game_mode_row).push(navigation_row).push(pagination_row);
+    if let Some(review) = puzzle_review {
+        let review_status = if review.decision_loaded {
+            match review.decision {
+                Some(ProjectPuzzleDecision::Selected) => lang::tr(lang, "selected"),
+                Some(ProjectPuzzleDecision::Discarded) => lang::tr(lang, "discarded"),
+                None => lang::tr(lang, "unreviewed"),
+            }
+        } else {
+            lang::tr(lang, "review_unavailable")
+        };
+        let mut select_button = Button::new(Text::new(lang::tr(lang, "select_puzzle"))).style(btn_style_simple);
+        let mut discard_button = Button::new(Text::new(lang::tr(lang, "discard_puzzle"))).style(btn_style_simple);
+        let mut clear_button = Button::new(Text::new(lang::tr(lang, "clear_review"))).style(btn_style_simple);
+        if review.decision_loaded && review.decision != Some(ProjectPuzzleDecision::Selected) {
+            select_button = select_button.on_press(Message::SetPuzzleReview(ProjectPuzzleDecision::Selected));
+        }
+        if review.decision_loaded && review.decision != Some(ProjectPuzzleDecision::Discarded) {
+            discard_button = discard_button.on_press(Message::SetPuzzleReview(ProjectPuzzleDecision::Discarded));
+        }
+        if review.decision_loaded && review.decision.is_some() {
+            clear_button = clear_button.on_press(Message::ClearPuzzleReview);
+        }
+        board_col = board_col.push(
+            Column::new().spacing(5)
+                .push(Text::new(format!("{}: {}   {}: {}", lang::tr(lang, "active_chapter"), review.chapter_name, lang::tr(lang, "review_status"), review_status)))
+                .push(Row::new().spacing(10).push(select_button).push(discard_button).push(clear_button))
+                .push(Text::new(review.status))
+        );
+    }
     if !engine_eval.is_empty() {
         board_col = board_col.push(
             row![

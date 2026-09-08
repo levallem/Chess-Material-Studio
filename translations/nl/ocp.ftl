@@ -71,6 +71,15 @@ project_file_extension_required = Projectbestanden moeten eindigen op .cms.sqlit
 chapter_name_required = Hoofdstuknaam mag niet leeg zijn.
 no_project_open = Er is geen project geopend.
 no_active_chapter = Geen actief hoofdstuk.
+review_status = Beoordelingsstatus
+unreviewed = Niet beoordeeld
+select_puzzle = Puzzel selecteren
+discard_puzzle = Puzzel verwerpen
+clear_review = Beoordeling wissen
+discarded = Verworpen
+already_selected_in_chapter = Al geselecteerd in
+review_error = Beoordelingsfout
+review_unavailable = Niet beschikbaar
 
 #Search Tab
 lichess_db = Lichess DB
