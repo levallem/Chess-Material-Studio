@@ -37,6 +37,21 @@ fn with_puzzle_sqlite_location(
     config
 }
 
+fn puzzle_sqlite_config_for_file_choice(
+    persisted_config: config::OfflinePuzzlesConfig,
+    selected_path: Option<&std::path::Path>,
+) -> Result<Option<config::OfflinePuzzlesConfig>, String> {
+    let Some(path) = selected_path else {
+        return Ok(None);
+    };
+
+    chess_material_studio::puzzle_search::validate_puzzle_sqlite_db(path)?;
+    Ok(Some(with_puzzle_sqlite_location(
+        persisted_config,
+        Some(path.display().to_string()),
+    )))
+}
+
 pub struct SettingsTab {
     pub engine_path: String,
     pub window_width: f32,
@@ -114,8 +129,12 @@ impl SettingsTab {
                 })
             }
             SettingsMessage::PuzzleSqliteFileChosen(Some(path)) => {
-                match chess_material_studio::puzzle_search::validate_puzzle_sqlite_db(&path) {
-                    Ok(()) => self.save_puzzle_sqlite_location(Some(path.display().to_string())),
+                match puzzle_sqlite_config_for_file_choice(config::load_config(), Some(&path)) {
+                    Ok(Some(config)) => match self.persist_puzzle_source_config(config) {
+                        Ok(()) => return Task::done(Message::PuzzleSqliteSourceSelected),
+                        Err(error) => self.settings_status = error,
+                    },
+                    Ok(None) => unreachable!("a selected SQLite path must produce a configuration"),
                     Err(error) => {
                         self.settings_status = format!(
                             "{}: {}",
@@ -126,7 +145,18 @@ impl SettingsTab {
                 }
                 Task::none()
             }
-            SettingsMessage::PuzzleSqliteFileChosen(None) => Task::none(),
+            SettingsMessage::PuzzleSqliteFileChosen(None) => {
+                match puzzle_sqlite_config_for_file_choice(
+                    config::load_config(),
+                    None,
+                ) {
+                    Ok(None) => Task::none(),
+                    Ok(Some(_)) => {
+                        unreachable!("a cancelled SQLite choice must not produce a configuration")
+                    }
+                    Err(_) => unreachable!("a cancelled SQLite choice cannot fail validation"),
+                }
+            }
             SettingsMessage::UseCsvPuzzles => {
                 self.save_puzzle_sqlite_location(None);
                 Task::none()
@@ -226,6 +256,15 @@ impl SettingsTab {
 
     fn save_puzzle_sqlite_location(&mut self, puzzle_sqlite_location: Option<String>) {
         let config = with_puzzle_sqlite_location(config::load_config(), puzzle_sqlite_location);
+        if let Err(error) = self.persist_puzzle_source_config(config) {
+            self.settings_status = error;
+        }
+    }
+
+    fn persist_puzzle_source_config(
+        &mut self,
+        config: config::OfflinePuzzlesConfig,
+    ) -> Result<(), String> {
         match Self::persist_config(&config) {
             Ok(()) => {
                 let status_key = if config.puzzle_sqlite_location.is_some() {
@@ -235,9 +274,18 @@ impl SettingsTab {
                 };
                 self.saved_configs = config;
                 self.settings_status = lang::tr(&self.lang.lang, status_key);
+                Ok(())
             }
-            Err(status_key) => self.settings_status = lang::tr(&self.lang.lang, status_key),
+            Err(status_key) => Err(lang::tr(&self.lang.lang, status_key)),
         }
+    }
+
+    pub fn status(&self) -> &str {
+        &self.settings_status
+    }
+
+    pub fn is_using_sqlite_puzzles(&self) -> bool {
+        self.saved_configs.puzzle_sqlite_location.is_some()
     }
 
     pub fn save_window_size(&self) {
@@ -277,6 +325,69 @@ impl SettingsTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diesel::Connection;
+    use diesel::sqlite::SqliteConnection;
+    use diesel_migrations::MigrationHarness;
+
+    struct TempPuzzleDb {
+        path: std::path::PathBuf,
+        directory: Option<std::path::PathBuf>,
+    }
+
+    impl TempPuzzleDb {
+        fn new(label: &str) -> Self {
+            let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("cms_022b_tests");
+            std::fs::create_dir_all(&directory).expect("test directory should be created");
+            let path = directory.join(format!(
+                "{label}-{}-{}.sqlite",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock should be after UNIX epoch")
+                    .as_nanos(),
+            ));
+            Self {
+                path,
+                directory: None,
+            }
+        }
+
+        fn protected_ocp_db(label: &str) -> Self {
+            let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("cms_022b_tests")
+                .join(format!("{label}-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("test directory should be created");
+            Self {
+                path: directory.join("ocp.db"),
+                directory: Some(directory),
+            }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempPuzzleDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            if let Some(directory) = &self.directory {
+                let _ = std::fs::remove_dir(directory);
+            }
+        }
+    }
+
+    fn create_valid_puzzle_db(path: &std::path::Path) {
+        let mut connection =
+            SqliteConnection::establish(path.to_str().expect("test path should be UTF-8"))
+                .expect("test database should open");
+        connection
+            .run_pending_migrations(chess_material_studio::puzzle_import::MIGRATIONS)
+            .expect("test database schema should migrate");
+    }
 
     #[test]
     fn puzzle_sqlite_location_update_preserves_unrelated_persisted_config() {
@@ -296,6 +407,63 @@ mod tests {
         assert_eq!(updated.puzzle_db_location, "custom-puzzles.csv");
         assert_eq!(updated.last_min_rating, 1234);
         assert_eq!(updated.last_max_rating, 2345);
+    }
+
+    #[test]
+    fn sqlite_file_choice_updates_source_config_without_changing_other_settings() {
+        let database = TempPuzzleDb::new("valid-selection");
+        create_valid_puzzle_db(database.path());
+        let mut persisted = config::OfflinePuzzlesConfig::default();
+        persisted.engine_limit = "nodes 123".into();
+        persisted.puzzle_db_location = "custom-puzzles.csv".into();
+
+        let selected = puzzle_sqlite_config_for_file_choice(persisted, Some(database.path()))
+            .expect("a valid puzzle SQLite database should be accepted")
+            .expect("a selected database should update the configuration");
+
+        assert_eq!(
+            selected.puzzle_sqlite_location.as_deref(),
+            database.path().to_str()
+        );
+        assert!(config::puzzle_source_exists(&selected));
+        assert_eq!(selected.engine_limit, "nodes 123");
+        assert_eq!(selected.puzzle_db_location, "custom-puzzles.csv");
+    }
+
+    #[test]
+    fn cancelling_sqlite_file_choice_leaves_source_config_unchanged() {
+        let persisted = config::OfflinePuzzlesConfig {
+            puzzle_sqlite_location: Some("existing-puzzles.sqlite".into()),
+            ..config::OfflinePuzzlesConfig::default()
+        };
+
+        assert!(
+            puzzle_sqlite_config_for_file_choice(persisted, None)
+                .expect("cancelling a picker should not fail")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_sqlite_file_choice_does_not_produce_a_replacement_config() {
+        let persisted = config::OfflinePuzzlesConfig {
+            puzzle_sqlite_location: Some("existing-puzzles.sqlite".into()),
+            ..config::OfflinePuzzlesConfig::default()
+        };
+        let invalid = TempPuzzleDb::new("invalid-selection");
+        std::fs::write(invalid.path(), b"not a SQLite database")
+            .expect("invalid test database should be created");
+
+        assert!(puzzle_sqlite_config_for_file_choice(persisted, Some(invalid.path())).is_err());
+    }
+
+    #[test]
+    fn protected_ocp_db_file_choice_does_not_produce_a_replacement_config() {
+        let persisted = config::OfflinePuzzlesConfig::default();
+        let protected = TempPuzzleDb::protected_ocp_db("protected-selection");
+        create_valid_puzzle_db(protected.path());
+
+        assert!(puzzle_sqlite_config_for_file_choice(persisted, Some(protected.path())).is_err());
     }
 }
 

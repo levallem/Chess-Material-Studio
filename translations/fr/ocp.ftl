@@ -46,6 +46,7 @@ do_you_wanna_download = Voulez-vous la télécharger maintenant ?
 download_size_info = Le fichier à télécharger a une taille d’environ 300 Mo et, une fois décompressé, environ 1 Go.
 downloading = Téléchargement en cours...
 download_btn = Télécharger
+select_puzzle_sqlite_db = Sélectionner une base de données SQLite
 
 #Search Tab
 lichess_db = BdD Lichess

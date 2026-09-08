@@ -44,6 +44,7 @@ do_you_wanna_download = Quiere descargarla ahora?
 download_size_info = la descarga es aprox. 300mb, y cerca de 1gb cuando descomprimido.
 downloading = Descargando...
 download_btn = Descargar
+select_puzzle_sqlite_db = Seleccionar base de datos SQLite
 
 #Search Tab
 lichess_db = Base de datos de Lichess

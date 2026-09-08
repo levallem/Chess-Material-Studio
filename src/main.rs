@@ -123,6 +123,7 @@ pub enum Message {
     StartDBDownload,
     DBDownloadFinished,
     DownloadProgress(String),
+    PuzzleSqliteSourceSelected,
     PuzzleInputIndexChange(String),
     JumpToPuzzle,
 }
@@ -531,6 +532,9 @@ impl OfflinePuzzles {
                 Task::none()
             } (_, Message::Settings(message)) => {
                 self.settings_tab.update(message)
+            } (_, Message::PuzzleSqliteSourceSelected) => {
+                self.has_db = config::puzzle_source_exists(&self.settings_tab.saved_configs);
+                Task::none()
             } (_, Message::SelectMode(message)) => {
                 self.game_mode = message;
                 if message == config::GameMode::Analysis {
@@ -772,6 +776,12 @@ impl OfflinePuzzles {
                     }
                 }
             } (_, Message::StartDBDownload) => {
+                if self.settings_tab.is_using_sqlite_puzzles() {
+                    let _ = self.settings_tab.update(SettingsMessage::UseCsvPuzzles);
+                    if self.settings_tab.is_using_sqlite_puzzles() {
+                        return Task::none();
+                    }
+                }
                 self.downloading_db = true;
                 Task::none()
             } (_, Message::DBDownloadFinished) => {
@@ -925,11 +935,32 @@ impl OfflinePuzzles {
                         .align_x(alignment::Horizontal::Center)
                     );
             } else {
-                col = col.push(
-                    container(
-                        button(Text::new(lang::tr(&self.lang, "download_btn"))).on_press(Message::StartDBDownload)
-                    ).width(Length::Fill).center_x(Length::Fill).padding(20)
-                );
+                col = col
+                    .push(
+                        container(
+                            button(Text::new(lang::tr(&self.lang, "download_btn")))
+                                .on_press(Message::StartDBDownload)
+                        )
+                        .width(Length::Fill)
+                        .center_x(Length::Fill)
+                        .padding(20),
+                    )
+                    .push(
+                        container(
+                            button(Text::new(lang::tr(&self.lang, "select_puzzle_sqlite_db")))
+                                .on_press(Message::Settings(
+                                    SettingsMessage::SelectPuzzleSqlitePressed,
+                                ))
+                        )
+                        .width(Length::Fill)
+                        .center_x(Length::Fill)
+                        .padding(20),
+                    )
+                    .push(
+                        Text::new(self.settings_tab.status())
+                            .width(Length::Fill)
+                            .align_x(alignment::Horizontal::Center),
+                    );
             };
             center(col)
                 .padding(1)
@@ -939,6 +970,22 @@ impl OfflinePuzzles {
 
     fn theme(&self) -> iced::Theme {
         iced::Theme::custom(String::from("Theme"), self.settings_tab.board_theme.palette().into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_puzzle_source_keeps_startup_in_missing_source_state() {
+        let config = config::OfflinePuzzlesConfig {
+            puzzle_db_location: "/nonexistent/lichess-puzzles.csv".into(),
+            puzzle_sqlite_location: None,
+            ..config::OfflinePuzzlesConfig::default()
+        };
+
+        assert!(!config::puzzle_source_exists(&config));
     }
 }
 

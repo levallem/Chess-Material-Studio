@@ -47,6 +47,7 @@ do_you_wanna_download = 您要现在下载吗？
 download_size_info = 下载文件约 300MB，解压后约 1GB。
 downloading = 下载中...
 download_btn = 下载
+select_puzzle_sqlite_db = 选择 SQLite 数据库
 
 # 搜索标签页
 
