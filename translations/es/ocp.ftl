@@ -46,6 +46,32 @@ downloading = Descargando...
 download_btn = Descargar
 select_puzzle_sqlite_db = Seleccionar base de datos SQLite
 
+#Proyecto
+#============================================================
+project = Proyecto
+new_project = Nuevo proyecto
+project_name = Nombre del proyecto
+project_file = Archivo del proyecto
+choose_project_file = Elegir archivo de proyecto
+project_file_not_selected = No se seleccionó un archivo de proyecto
+create_project = Crear proyecto
+open_project = Abrir proyecto
+close_project = Cerrar proyecto
+chapters = Capítulos
+active_chapter = Capítulo activo
+new_chapter = Nuevo capítulo
+chapter_name = Nombre del capítulo
+target_puzzle_count_optional = Cantidad objetivo de ejercicios (opcional)
+create_chapter = Crear capítulo
+selected = seleccionados
+or = O
+project_name_required = El nombre del proyecto no puede estar vacío.
+project_file_required = Primero elegí un archivo de proyecto.
+project_file_extension_required = Los archivos de proyecto deben terminar en .cms.sqlite.
+chapter_name_required = El nombre del capítulo no puede estar vacío.
+no_project_open = No hay ningún proyecto abierto.
+no_active_chapter = No hay ningún capítulo activo.
+
 #Search Tab
 lichess_db = Base de datos de Lichess
 my_favories = Mis favoritos

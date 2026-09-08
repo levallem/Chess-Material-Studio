@@ -46,6 +46,32 @@ downloading = Downloading...
 download_btn = Download
 select_puzzle_sqlite_db = Select SQLite database
 
+#Project
+#============================================================
+project = Project
+new_project = New Project
+project_name = Project name
+project_file = Project file
+choose_project_file = Choose project file
+project_file_not_selected = No project file selected
+create_project = Create Project
+open_project = Open Project
+close_project = Close Project
+chapters = Chapters
+active_chapter = Active chapter
+new_chapter = New Chapter
+chapter_name = Chapter name
+target_puzzle_count_optional = Target puzzle count (optional)
+create_chapter = Create Chapter
+selected = selected
+or = Or
+project_name_required = Project name cannot be empty.
+project_file_required = Choose a project file first.
+project_file_extension_required = Project files must end in .cms.sqlite.
+chapter_name_required = Chapter name cannot be empty.
+no_project_open = No project is open.
+no_active_chapter = No active chapter.
+
 #Search Tab
 lichess_db = Lichess DB
 my_favories = My Favorites

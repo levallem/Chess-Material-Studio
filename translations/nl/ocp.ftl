@@ -46,6 +46,32 @@ downloading = Downloaden...
 download_btn = Downloaden
 select_puzzle_sqlite_db = SQLite-database selecteren
 
+#Project
+#============================================================
+project = Project
+new_project = Nieuw project
+project_name = Projectnaam
+project_file = Projectbestand
+choose_project_file = Kies projectbestand
+project_file_not_selected = Geen projectbestand geselecteerd
+create_project = Project maken
+open_project = Project openen
+close_project = Project sluiten
+chapters = Hoofdstukken
+active_chapter = Actief hoofdstuk
+new_chapter = Nieuw hoofdstuk
+chapter_name = Hoofdstuknaam
+target_puzzle_count_optional = Doelaantal puzzels (optioneel)
+create_chapter = Hoofdstuk maken
+selected = geselecteerd
+or = Of
+project_name_required = Projectnaam mag niet leeg zijn.
+project_file_required = Kies eerst een projectbestand.
+project_file_extension_required = Projectbestanden moeten eindigen op .cms.sqlite.
+chapter_name_required = Hoofdstuknaam mag niet leeg zijn.
+no_project_open = Er is geen project geopend.
+no_active_chapter = Geen actief hoofdstuk.
+
 #Search Tab
 lichess_db = Lichess DB
 my_favories = Mijn Favorieten

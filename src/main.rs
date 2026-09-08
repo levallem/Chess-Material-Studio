@@ -43,6 +43,9 @@ use settings::{SettingsMessage, SettingsTab};
 mod puzzles;
 use puzzles::{PuzzleMessage, PuzzleTab, GameStatus};
 
+mod project_tab;
+use project_tab::{ProjectMessage, ProjectTab};
+
 use crate::styles::btn_style_simple;
 
 mod eval;
@@ -75,6 +78,7 @@ pub enum TabId {
     Search,
     Settings,
     CurrentPuzzle,
+    Project,
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, PartialOrd, Ord)]
@@ -96,6 +100,7 @@ pub enum Message {
     Search(SearchMesssage),
     Settings(SettingsMessage),
     PuzzleInfo(PuzzleMessage),
+    Project(ProjectMessage),
     SelectMode(config::GameMode),
     TabSelected(TabId),
     ShowHint,
@@ -270,6 +275,7 @@ struct OfflinePuzzles {
     search_tab: SearchTab,
     settings_tab: SettingsTab,
     puzzle_tab: PuzzleTab,
+    project_tab: ProjectTab,
     game_mode: config::GameMode,
     sound_playback: Option<SoundPlayback>,
     lang: lang::Language,
@@ -316,6 +322,7 @@ impl OfflinePuzzles {
             search_tab: SearchTab::new(),
             settings_tab: SettingsTab::new(),
             puzzle_tab: PuzzleTab::new(),
+            project_tab: ProjectTab::new(),
             active_tab: TabId::Search,
 
             game_mode: config::GameMode::Puzzle,
@@ -532,6 +539,8 @@ impl OfflinePuzzles {
                 Task::none()
             } (_, Message::Settings(message)) => {
                 self.settings_tab.update(message)
+            } (_, Message::Project(message)) => {
+                self.project_tab.update(message)
             } (_, Message::PuzzleSqliteSourceSelected) => {
                 self.has_db = config::puzzle_source_exists(&self.settings_tab.saved_configs);
                 Task::none()
@@ -619,6 +628,7 @@ impl OfflinePuzzles {
                     self.search_tab.theme.lang = self.lang;
                     self.search_tab.opening.lang = self.lang;
                     self.puzzle_tab.lang = self.lang;
+                    self.project_tab.lang = self.lang;
                     self.settings_tab.saved_configs = settings;
                     self.piece_imgs = get_image_handles(&self.settings_tab.piece_theme);
                     self.search_tab.promotion_piece_img = search_tab::gen_piece_vec(&self.settings_tab.piece_theme);
@@ -896,9 +906,11 @@ impl OfflinePuzzles {
                     self.search_tab.tab_label(),
                     self.settings_tab.tab_label(),
                     self.puzzle_tab.tab_label(),
+                    self.project_tab.tab_label(),
                     self.search_tab.view(),
                     self.settings_tab.view(),
                     self.puzzle_tab.view(),
+                    self.project_tab.view(),
                     &self.lang,
                     size,
                     self.mini_ui,
@@ -1028,9 +1040,11 @@ fn gen_view<'a>(
     search_tab_label: TabLabel,
     settings_tab_label: TabLabel,
     puzzle_tab_label: TabLabel,
+    project_tab_label: TabLabel,
     search_tab: Element<'a, Message, Theme, iced::Renderer>,
     settings_tab: Element<'a, Message, Theme, iced::Renderer>,
     puzzle_tab: Element<'a, Message, Theme, iced::Renderer>,
+    project_tab: Element<'a, Message, Theme, iced::Renderer>,
     lang: &lang::Language,
     size: Size,
     mini_ui: bool,
@@ -1363,6 +1377,7 @@ fn gen_view<'a>(
                 .push(TabId::Search, search_tab_label, search_tab)
                 .push(TabId::Settings, settings_tab_label, settings_tab)
                 .push(TabId::CurrentPuzzle ,puzzle_tab_label, puzzle_tab)
+                .push(TabId::Project, project_tab_label, project_tab)
                 .tab_bar_position(iced_aw::TabBarPosition::Top)
                 .tab_bar_style(styles::tab_style)
                 .set_active_tab(active_tab);

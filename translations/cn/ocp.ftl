@@ -49,6 +49,32 @@ downloading = 下载中...
 download_btn = 下载
 select_puzzle_sqlite_db = 选择 SQLite 数据库
 
+#项目
+#============================================================
+project = 项目
+new_project = 新建项目
+project_name = 项目名称
+project_file = 项目文件
+choose_project_file = 选择项目文件
+project_file_not_selected = 未选择项目文件
+create_project = 创建项目
+open_project = 打开项目
+close_project = 关闭项目
+chapters = 章节
+active_chapter = 当前章节
+new_chapter = 新建章节
+chapter_name = 章节名称
+target_puzzle_count_optional = 目标谜题数量（可选）
+create_chapter = 创建章节
+selected = 已选
+or = 或
+project_name_required = 项目名称不能为空。
+project_file_required = 请先选择项目文件。
+project_file_extension_required = 项目文件必须以 .cms.sqlite 结尾。
+chapter_name_required = 章节名称不能为空。
+no_project_open = 未打开项目。
+no_active_chapter = 没有当前章节。
+
 # 搜索标签页
 
 lichess_db = Lichess数据库
