@@ -394,10 +394,17 @@ mod tests {
     }
 
     #[test]
-    fn test_old_settings_json_deserializes() {
-        let settings_json = include_str!("../settings.json");
-        let config: OfflinePuzzlesConfig = serde_json::from_str(settings_json)
-            .expect("existing settings.json should deserialize");
+    fn config_without_new_fields_deserializes_with_defaults() {
+        let mut settings_json = serde_json::to_value(OfflinePuzzlesConfig::default())
+            .expect("default configuration should serialize");
+        let fields = settings_json
+            .as_object_mut()
+            .expect("serialized configuration should be an object");
+        fields.remove("puzzle_sqlite_location");
+        fields.remove("interface_theme");
+
+        let config: OfflinePuzzlesConfig = serde_json::from_value(settings_json)
+            .expect("configuration without new fields should deserialize");
         assert!(
             config.puzzle_sqlite_location.is_none(),
             "puzzle_sqlite_location should be None when absent from JSON"

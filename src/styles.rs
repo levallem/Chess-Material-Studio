@@ -515,43 +515,109 @@ pub fn board_container_style(
 
 pub fn tab_style(theme: &iced::Theme, status: iced_aw::style::Status) -> tab_bar::Style {
     let palette = theme.extended_palette();
+    let dark_interface = theme.palette().background == InterfaceTheme::Dark.palette().background;
+    let text_color = |background: iced::theme::palette::Pair, light_color: Color| {
+        if dark_interface {
+            background.text
+        } else {
+            light_color
+        }
+    };
+
     match status {
         iced_aw::style::Status::Active => tab_bar::Style {
             tab_label_background: iced::Background::Color(palette.success.base.color),
             background: Some(iced::Background::Color(palette.success.base.color)),
-            text_color: Color::WHITE,
+            text_color: text_color(palette.success.base, Color::WHITE),
             ..Default::default()
         },
-        iced_aw::style::Status::Selected =>  tab_bar::Style {
+        iced_aw::style::Status::Selected => tab_bar::Style {
             tab_label_background: iced::Background::Color(palette.primary.base.color),
             background: Some(iced::Background::Color(palette.primary.base.color)),
-            text_color: Color::WHITE,
+            text_color: text_color(palette.primary.base, Color::WHITE),
             ..Default::default()
         },
         iced_aw::style::Status::Focused => tab_bar::Style {
             tab_label_background: iced::Background::Color(palette.primary.base.color),
             background: Some(iced::Background::Color(palette.primary.base.color)),
-            text_color: Color::WHITE,
+            text_color: text_color(palette.primary.base, Color::WHITE),
             ..Default::default()
         },
         iced_aw::style::Status::Hovered => tab_bar::Style {
             tab_label_background: iced::Background::Color(palette.success.strong.color),
             background: Some(iced::Background::Color(palette.success.strong.color)),
-            text_color: Color::WHITE,
+            text_color: text_color(palette.success.strong, Color::WHITE),
             ..Default::default()
         },
         iced_aw::style::Status::Pressed => tab_bar::Style {
             tab_label_background: iced::Background::Color(palette.success.weak.color),
             background: Some(iced::Background::Color(palette.success.weak.color)),
-            text_color: Color::WHITE,
+            text_color: text_color(palette.success.weak, Color::WHITE),
             ..Default::default()
         },
-        _ => tab_bar::Style {
+        iced_aw::style::Status::Disabled => tab_bar::Style {
             tab_label_background: iced::Background::Color(palette.primary.base.color),
             background: Some(iced::Background::Color(palette.primary.base.color)),
-            text_color: rgb!(45., 45., 45.),
+            text_color: text_color(palette.primary.base, rgb!(45., 45., 45.)),
             ..Default::default()
+        },
+    }
+}
+
+#[cfg(test)]
+mod tab_style_tests {
+    use super::*;
+
+    fn interface_theme(theme: InterfaceTheme) -> iced::Theme {
+        iced::Theme::custom("test", theme.palette())
+    }
+
+    #[test]
+    fn dark_tab_text_uses_readable_palette_text_for_all_states() {
+        let theme = interface_theme(InterfaceTheme::Dark);
+        let palette = theme.extended_palette();
+        let cases = [
+            (iced_aw::style::Status::Active, palette.success.base.text),
+            (iced_aw::style::Status::Selected, palette.primary.base.text),
+            (iced_aw::style::Status::Focused, palette.primary.base.text),
+            (iced_aw::style::Status::Hovered, palette.success.strong.text),
+            (iced_aw::style::Status::Pressed, palette.success.weak.text),
+            (iced_aw::style::Status::Disabled, palette.primary.base.text),
+        ];
+
+        for (status, expected_text) in cases {
+            assert_eq!(tab_style(&theme, status).text_color, expected_text);
         }
+    }
+
+    #[test]
+    fn light_tab_text_colors_remain_unchanged() {
+        let theme = interface_theme(InterfaceTheme::Light);
+
+        assert_eq!(
+            tab_style(&theme, iced_aw::style::Status::Active).text_color,
+            Color::WHITE
+        );
+        assert_eq!(
+            tab_style(&theme, iced_aw::style::Status::Selected).text_color,
+            Color::WHITE
+        );
+        assert_eq!(
+            tab_style(&theme, iced_aw::style::Status::Focused).text_color,
+            Color::WHITE
+        );
+        assert_eq!(
+            tab_style(&theme, iced_aw::style::Status::Hovered).text_color,
+            Color::WHITE
+        );
+        assert_eq!(
+            tab_style(&theme, iced_aw::style::Status::Pressed).text_color,
+            Color::WHITE
+        );
+        assert_eq!(
+            tab_style(&theme, iced_aw::style::Status::Disabled).text_color,
+            rgb!(45., 45., 45.)
+        );
     }
 }
 
