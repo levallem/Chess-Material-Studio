@@ -1,0 +1,1 @@
+DROP TABLE chapter_puzzle_reviews;

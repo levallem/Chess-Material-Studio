@@ -1,3 +1,4 @@
+use crate::models::Puzzle;
 use diesel::prelude::*;
 use diesel::sql_types::{Integer, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
@@ -7,7 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 pub const PROJECT_APPLICATION_ID: &str = "chess-material-studio-project";
-pub const PROJECT_SCHEMA_VERSION: i32 = 2;
+pub const PROJECT_SCHEMA_VERSION: i32 = 3;
 pub const PROJECT_MIGRATIONS: EmbeddedMigrations = embed_migrations!("project_migrations");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,37 @@ pub struct ProjectChapter {
     pub position: i32,
     pub target_puzzle_count: Option<i32>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectPuzzleDecision {
+    Selected,
+    Discarded,
+}
+
+impl ProjectPuzzleDecision {
+    fn as_sql_value(self) -> &'static str {
+        match self {
+            Self::Selected => "selected",
+            Self::Discarded => "discarded",
+        }
+    }
+
+    fn from_sql_value(value: &str) -> Result<Self, String> {
+        match value {
+            "selected" => Ok(Self::Selected),
+            "discarded" => Ok(Self::Discarded),
+            _ => Err("project puzzle review has an invalid decision".into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectPuzzleReview {
+    pub chapter_id: i32,
+    pub puzzle: Puzzle,
+    pub decision: ProjectPuzzleDecision,
+    pub reviewed_at: String,
 }
 
 #[derive(QueryableByName)]
@@ -52,6 +84,48 @@ struct ProjectChapterRow {
     created_at: String,
 }
 
+#[derive(QueryableByName)]
+struct ProjectPuzzleReviewRow {
+    #[diesel(sql_type = Integer)]
+    chapter_id: i32,
+    #[diesel(sql_type = Text)]
+    puzzle_id: String,
+    #[diesel(sql_type = Text)]
+    decision: String,
+    #[diesel(sql_type = Text)]
+    fen: String,
+    #[diesel(sql_type = Text)]
+    moves: String,
+    #[diesel(sql_type = Integer)]
+    rating: i32,
+    #[diesel(sql_type = Integer)]
+    rating_deviation: i32,
+    #[diesel(sql_type = Integer)]
+    popularity: i32,
+    #[diesel(sql_type = Integer)]
+    nb_plays: i32,
+    #[diesel(sql_type = Text)]
+    themes: String,
+    #[diesel(sql_type = Text)]
+    game_url: String,
+    #[diesel(sql_type = Text)]
+    opening_tags: String,
+    #[diesel(sql_type = Text)]
+    reviewed_at: String,
+}
+
+#[derive(QueryableByName)]
+struct ProjectPuzzleDecisionRow {
+    #[diesel(sql_type = Text)]
+    decision: String,
+}
+
+#[derive(QueryableByName)]
+struct ChapterExistsRow {
+    #[diesel(sql_type = Integer)]
+    chapter_exists: i32,
+}
+
 impl From<ProjectChapterRow> for ProjectChapter {
     fn from(row: ProjectChapterRow) -> Self {
         Self {
@@ -61,6 +135,30 @@ impl From<ProjectChapterRow> for ProjectChapter {
             target_puzzle_count: row.target_puzzle_count,
             created_at: row.created_at,
         }
+    }
+}
+
+impl TryFrom<ProjectPuzzleReviewRow> for ProjectPuzzleReview {
+    type Error = String;
+
+    fn try_from(row: ProjectPuzzleReviewRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            chapter_id: row.chapter_id,
+            puzzle: Puzzle {
+                puzzle_id: row.puzzle_id,
+                fen: row.fen,
+                moves: row.moves,
+                rating: row.rating,
+                rating_deviation: row.rating_deviation,
+                popularity: row.popularity,
+                nb_plays: row.nb_plays,
+                themes: row.themes,
+                game_url: row.game_url,
+                opening: row.opening_tags,
+            },
+            decision: ProjectPuzzleDecision::from_sql_value(&row.decision)?,
+            reviewed_at: row.reviewed_at,
+        })
     }
 }
 
@@ -213,6 +311,121 @@ pub fn reorder_chapters(path: &Path, ordered_ids: &[i32]) -> Result<(), String> 
         .map_err(|error| format!("cannot reorder chapters: {error}"))
 }
 
+pub fn set_puzzle_decision(
+    path: &Path,
+    chapter_id: i32,
+    puzzle: &Puzzle,
+    decision: ProjectPuzzleDecision,
+) -> Result<(), String> {
+    let mut connection = open_validated_project_connection(path)?;
+    ensure_chapter_exists(&mut connection, chapter_id)?;
+    let reviewed_at = chrono::Utc::now().to_rfc3339();
+
+    connection
+        .transaction::<(), diesel::result::Error, _>(|connection| {
+            diesel::sql_query(
+                "INSERT INTO chapter_puzzle_reviews \
+                 (chapter_id, puzzle_id, decision, fen, moves, rating, rating_deviation, \
+                  popularity, nb_plays, themes, game_url, opening_tags, reviewed_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(chapter_id, puzzle_id) DO UPDATE SET \
+                 decision = excluded.decision, fen = excluded.fen, moves = excluded.moves, \
+                 rating = excluded.rating, rating_deviation = excluded.rating_deviation, \
+                 popularity = excluded.popularity, nb_plays = excluded.nb_plays, \
+                 themes = excluded.themes, game_url = excluded.game_url, \
+                 opening_tags = excluded.opening_tags, reviewed_at = excluded.reviewed_at",
+            )
+            .bind::<Integer, _>(chapter_id)
+            .bind::<Text, _>(&puzzle.puzzle_id)
+            .bind::<Text, _>(decision.as_sql_value())
+            .bind::<Text, _>(&puzzle.fen)
+            .bind::<Text, _>(&puzzle.moves)
+            .bind::<Integer, _>(puzzle.rating)
+            .bind::<Integer, _>(puzzle.rating_deviation)
+            .bind::<Integer, _>(puzzle.popularity)
+            .bind::<Integer, _>(puzzle.nb_plays)
+            .bind::<Text, _>(&puzzle.themes)
+            .bind::<Text, _>(&puzzle.game_url)
+            .bind::<Text, _>(&puzzle.opening)
+            .bind::<Text, _>(&reviewed_at)
+            .execute(connection)?;
+            Ok(())
+        })
+        .map_err(|error| match error {
+            diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            ) if decision == ProjectPuzzleDecision::Selected => {
+                "puzzle is already selected in another chapter".into()
+            }
+            error => format!("cannot set puzzle decision: {error}"),
+        })
+}
+
+pub fn get_puzzle_decision(
+    path: &Path,
+    chapter_id: i32,
+    puzzle_id: &str,
+) -> Result<Option<ProjectPuzzleDecision>, String> {
+    let mut connection = open_validated_project_connection(path)?;
+    ensure_chapter_exists(&mut connection, chapter_id)?;
+    diesel::sql_query(
+        "SELECT decision FROM chapter_puzzle_reviews WHERE chapter_id = ? AND puzzle_id = ?",
+    )
+    .bind::<Integer, _>(chapter_id)
+    .bind::<Text, _>(puzzle_id)
+    .get_result::<ProjectPuzzleDecisionRow>(&mut connection)
+    .optional()
+    .map_err(|error| format!("cannot get puzzle decision: {error}"))?
+    .map(|row| ProjectPuzzleDecision::from_sql_value(&row.decision))
+    .transpose()
+}
+
+pub fn clear_puzzle_decision(path: &Path, chapter_id: i32, puzzle_id: &str) -> Result<(), String> {
+    let mut connection = open_validated_project_connection(path)?;
+    ensure_chapter_exists(&mut connection, chapter_id)?;
+    diesel::sql_query("DELETE FROM chapter_puzzle_reviews WHERE chapter_id = ? AND puzzle_id = ?")
+        .bind::<Integer, _>(chapter_id)
+        .bind::<Text, _>(puzzle_id)
+        .execute(&mut connection)
+        .map_err(|error| format!("cannot clear puzzle decision: {error}"))?;
+    Ok(())
+}
+
+pub fn list_chapter_puzzle_reviews(
+    path: &Path,
+    chapter_id: i32,
+) -> Result<Vec<ProjectPuzzleReview>, String> {
+    list_puzzle_reviews(path, chapter_id, None)
+}
+
+pub fn list_selected_puzzles_for_chapter(
+    path: &Path,
+    chapter_id: i32,
+) -> Result<Vec<Puzzle>, String> {
+    list_puzzle_reviews(path, chapter_id, Some(ProjectPuzzleDecision::Selected))
+        .map(|reviews| reviews.into_iter().map(|review| review.puzzle).collect())
+}
+
+pub fn find_selected_puzzle_chapter(
+    path: &Path,
+    puzzle_id: &str,
+) -> Result<Option<ProjectChapter>, String> {
+    let mut connection = open_validated_project_connection(path)?;
+    diesel::sql_query(
+        "SELECT chapters.id, chapters.name, chapters.position, chapters.target_puzzle_count, \
+         chapters.created_at FROM chapters \
+         INNER JOIN chapter_puzzle_reviews ON chapter_puzzle_reviews.chapter_id = chapters.id \
+         WHERE chapter_puzzle_reviews.puzzle_id = ? \
+         AND chapter_puzzle_reviews.decision = 'selected'",
+    )
+    .bind::<Text, _>(puzzle_id)
+    .get_result::<ProjectChapterRow>(&mut connection)
+    .optional()
+    .map(|chapter| chapter.map(ProjectChapter::from))
+    .map_err(|error| format!("cannot find selected puzzle chapter: {error}"))
+}
+
 fn open_validated_project_connection(path: &Path) -> Result<SqliteConnection, String> {
     let file_metadata =
         std::fs::metadata(path).map_err(|error| format!("project file cannot be read: {error}"))?;
@@ -230,29 +443,70 @@ fn open_validated_project_connection(path: &Path) -> Result<SqliteConnection, St
     if row.project_name.trim().is_empty() || row.created_at.trim().is_empty() {
         return Err("project metadata is missing required values".into());
     }
-    if row.schema_version > PROJECT_SCHEMA_VERSION {
+    if row.schema_version < 1 || row.schema_version > PROJECT_SCHEMA_VERSION {
         return Err(format!(
             "unsupported project schema version: {}",
             row.schema_version
         ));
     }
     if row.schema_version < PROJECT_SCHEMA_VERSION {
-        if row.schema_version != 1 {
-            return Err(format!(
-                "unsupported project schema version: {}",
-                row.schema_version
-            ));
-        }
         connection
-            .run_pending_migrations(PROJECT_MIGRATIONS)
-            .map_err(|error| format!("cannot upgrade project migrations: {error}"))?;
-        diesel::sql_query("UPDATE project_metadata SET schema_version = ? WHERE id = 1")
-            .bind::<Integer, _>(PROJECT_SCHEMA_VERSION)
-            .execute(&mut connection)
-            .map_err(|error| format!("cannot update project schema version: {error}"))?;
+            .transaction::<(), Box<dyn std::error::Error + Send + Sync>, _>(|connection| {
+                connection.run_pending_migrations(PROJECT_MIGRATIONS)?;
+                diesel::sql_query("UPDATE project_metadata SET schema_version = ? WHERE id = 1")
+                    .bind::<Integer, _>(PROJECT_SCHEMA_VERSION)
+                    .execute(connection)?;
+                Ok(())
+            })
+            .map_err(|error| format!("cannot upgrade project: {error}"))?;
     }
 
     Ok(connection)
+}
+
+fn list_puzzle_reviews(
+    path: &Path,
+    chapter_id: i32,
+    decision: Option<ProjectPuzzleDecision>,
+) -> Result<Vec<ProjectPuzzleReview>, String> {
+    let mut connection = open_validated_project_connection(path)?;
+    ensure_chapter_exists(&mut connection, chapter_id)?;
+    let rows = match decision {
+        Some(decision) => diesel::sql_query(
+            "SELECT chapter_id, puzzle_id, decision, fen, moves, rating, rating_deviation, \
+             popularity, nb_plays, themes, game_url, opening_tags, reviewed_at \
+             FROM chapter_puzzle_reviews WHERE chapter_id = ? AND decision = ? \
+             ORDER BY reviewed_at ASC, puzzle_id ASC",
+        )
+        .bind::<Integer, _>(chapter_id)
+        .bind::<Text, _>(decision.as_sql_value())
+        .load::<ProjectPuzzleReviewRow>(&mut connection),
+        None => diesel::sql_query(
+            "SELECT chapter_id, puzzle_id, decision, fen, moves, rating, rating_deviation, \
+             popularity, nb_plays, themes, game_url, opening_tags, reviewed_at \
+             FROM chapter_puzzle_reviews WHERE chapter_id = ? \
+             ORDER BY reviewed_at ASC, puzzle_id ASC",
+        )
+        .bind::<Integer, _>(chapter_id)
+        .load::<ProjectPuzzleReviewRow>(&mut connection),
+    }
+    .map_err(|error| format!("cannot list puzzle reviews: {error}"))?;
+
+    rows.into_iter()
+        .map(ProjectPuzzleReview::try_from)
+        .collect()
+}
+
+fn ensure_chapter_exists(connection: &mut SqliteConnection, chapter_id: i32) -> Result<(), String> {
+    let row =
+        diesel::sql_query("SELECT EXISTS(SELECT 1 FROM chapters WHERE id = ?) AS chapter_exists")
+            .bind::<Integer, _>(chapter_id)
+            .get_result::<ChapterExistsRow>(connection)
+            .map_err(|error| format!("cannot validate chapter: {error}"))?;
+    if row.chapter_exists == 0 {
+        return Err("chapter not found".into());
+    }
+    Ok(())
 }
 
 fn read_project_metadata(connection: &mut SqliteConnection) -> Result<ProjectMetadataRow, String> {
@@ -399,6 +653,12 @@ mod tests {
         version: String,
     }
 
+    #[derive(QueryableByName)]
+    struct ExistingValueRow {
+        #[diesel(sql_type = Text)]
+        existing_value: String,
+    }
+
     #[test]
     fn creating_a_project_creates_a_valid_sqlite_project() {
         let project = TempProjectDb::new("create");
@@ -423,14 +683,14 @@ mod tests {
     }
 
     #[test]
-    fn project_schema_version_starts_at_two() {
+    fn project_schema_version_starts_at_three() {
         let project = TempProjectDb::new("schema-version");
 
         assert_eq!(
             create_project(project.path(), "Versión inicial")
                 .unwrap()
                 .schema_version,
-            2
+            3
         );
     }
 
@@ -520,25 +780,33 @@ mod tests {
 
         assert_eq!(
             migration_versions(&mut connection),
-            ["20260908000000".to_string(), "20260908010000".to_string()]
-                .into_iter()
-                .collect()
+            [
+                "20260908000000".to_string(),
+                "20260908010000".to_string(),
+                "20260908020000".to_string(),
+            ]
+            .into_iter()
+            .collect()
         );
     }
 
     #[test]
-    fn opening_a_valid_v1_project_upgrades_it_to_version_two() {
+    fn opening_a_valid_v1_project_upgrades_it_to_version_three() {
         let project = TempProjectDb::new("upgrade-v1");
         create_valid_v1_project(&project);
 
-        assert_eq!(open_project(project.path()).unwrap().schema_version, 2);
+        assert_eq!(open_project(project.path()).unwrap().schema_version, 3);
         let mut connection = project.connection();
         assert!(table_names(&mut connection).contains("chapters"));
         assert_eq!(
             migration_versions(&mut connection),
-            ["20260908000000".to_string(), "20260908010000".to_string()]
-                .into_iter()
-                .collect()
+            [
+                "20260908000000".to_string(),
+                "20260908010000".to_string(),
+                "20260908020000".to_string(),
+            ]
+            .into_iter()
+            .collect()
         );
     }
 
@@ -546,7 +814,7 @@ mod tests {
     fn opening_a_future_project_version_rejects_without_modifying_it() {
         let project = create_test_project("future-version");
         let mut connection = project.connection();
-        diesel::sql_query("UPDATE project_metadata SET schema_version = 3")
+        diesel::sql_query("UPDATE project_metadata SET schema_version = 4")
             .execute(&mut connection)
             .unwrap();
         let migration_versions_before = migration_versions(&mut connection);
@@ -554,7 +822,7 @@ mod tests {
         assert!(open_project(project.path()).is_err());
 
         let metadata = read_project_metadata(&mut connection).unwrap();
-        assert_eq!(metadata.schema_version, 3);
+        assert_eq!(metadata.schema_version, 4);
         assert_eq!(
             migration_versions(&mut connection),
             migration_versions_before
@@ -715,6 +983,283 @@ mod tests {
         assert_ne!(first.id, second.id);
     }
 
+    #[test]
+    fn opening_a_valid_v2_project_upgrades_it_to_version_three() {
+        let project = TempProjectDb::new("upgrade-v2");
+        create_valid_v2_project(&project);
+
+        assert_eq!(open_project(project.path()).unwrap().schema_version, 3);
+        let mut connection = project.connection();
+        assert!(table_names(&mut connection).contains("chapter_puzzle_reviews"));
+        assert_eq!(
+            migration_versions(&mut connection),
+            [
+                "20260908000000".to_string(),
+                "20260908010000".to_string(),
+                "20260908020000".to_string(),
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[test]
+    fn failed_v1_upgrade_rolls_back_every_pending_project_migration() {
+        let project = TempProjectDb::new("upgrade-v1-rollback");
+        create_valid_v1_project(&project);
+        let mut connection = project.connection();
+        diesel::sql_query("CREATE TABLE chapter_puzzle_reviews (existing_value TEXT NOT NULL)")
+            .execute(&mut connection)
+            .unwrap();
+        diesel::sql_query("INSERT INTO chapter_puzzle_reviews VALUES ('preserve me')")
+            .execute(&mut connection)
+            .unwrap();
+        let tables_before = table_names(&mut connection);
+        let migrations_before = migration_versions(&mut connection);
+
+        assert!(open_project(project.path()).is_err());
+
+        assert_eq!(
+            read_project_metadata(&mut connection)
+                .unwrap()
+                .schema_version,
+            1
+        );
+        assert_eq!(migration_versions(&mut connection), migrations_before);
+        assert_eq!(table_names(&mut connection), tables_before);
+        assert!(!table_names(&mut connection).contains("chapters"));
+        assert_eq!(
+            diesel::sql_query("SELECT existing_value FROM chapter_puzzle_reviews")
+                .get_result::<ExistingValueRow>(&mut connection)
+                .unwrap()
+                .existing_value,
+            "preserve me"
+        );
+    }
+
+    #[test]
+    fn opening_rejects_schema_versions_below_one_without_migrating() {
+        let project = TempProjectDb::new("invalid-version");
+        let mut connection = project.connection();
+        diesel::sql_query(
+            "CREATE TABLE project_metadata (\
+             id INTEGER PRIMARY KEY, application_id TEXT NOT NULL, schema_version INTEGER NOT NULL, \
+             project_name TEXT NOT NULL, created_at TEXT NOT NULL)",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO project_metadata VALUES \
+             (1, 'chess-material-studio-project', 0, 'Proyecto inválido', '2026-09-08T00:00:00Z')",
+        )
+        .execute(&mut connection)
+        .unwrap();
+
+        assert!(open_project(project.path()).is_err());
+        assert!(!table_names(&mut connection).contains("__diesel_schema_migrations"));
+        assert_eq!(
+            read_project_metadata(&mut connection)
+                .unwrap()
+                .schema_version,
+            0
+        );
+    }
+
+    #[test]
+    fn puzzle_reviews_persist_complete_snapshots_and_decisions() {
+        let project = create_test_project("review-persistence");
+        let chapter = create_chapter(project.path(), "Ataques", None).unwrap();
+        let selected = puzzle("selected");
+        let discarded = puzzle("discarded");
+
+        set_puzzle_decision(
+            project.path(),
+            chapter.id,
+            &selected,
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            project.path(),
+            chapter.id,
+            &discarded,
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+
+        assert_eq!(
+            get_puzzle_decision(project.path(), chapter.id, &selected.puzzle_id).unwrap(),
+            Some(ProjectPuzzleDecision::Selected)
+        );
+        assert_eq!(
+            get_puzzle_decision(project.path(), chapter.id, &discarded.puzzle_id).unwrap(),
+            Some(ProjectPuzzleDecision::Discarded)
+        );
+        assert_eq!(
+            get_puzzle_decision(project.path(), chapter.id, "unreviewed").unwrap(),
+            None
+        );
+
+        let reviews = list_chapter_puzzle_reviews(project.path(), chapter.id).unwrap();
+        let selected_review = reviews
+            .iter()
+            .find(|review| review.puzzle.puzzle_id == selected.puzzle_id)
+            .unwrap();
+        assert_eq!(selected_review.decision, ProjectPuzzleDecision::Selected);
+        assert_puzzle_matches(&selected_review.puzzle, &selected);
+        assert!(chrono::DateTime::parse_from_rfc3339(&selected_review.reviewed_at).is_ok());
+
+        let selected_puzzles =
+            list_selected_puzzles_for_chapter(project.path(), chapter.id).unwrap();
+        assert_eq!(selected_puzzles.len(), 1);
+        assert_puzzle_matches(&selected_puzzles[0], &selected);
+    }
+
+    #[test]
+    fn puzzle_decisions_validate_chapters_change_and_clear_idempotently() {
+        let project = create_test_project("review-changes");
+        let chapter = create_chapter(project.path(), "Cambios", None).unwrap();
+        let value = puzzle("changeable");
+
+        assert!(
+            set_puzzle_decision(project.path(), 999, &value, ProjectPuzzleDecision::Selected)
+                .is_err()
+        );
+        assert!(get_puzzle_decision(project.path(), 999, &value.puzzle_id).is_err());
+        assert!(clear_puzzle_decision(project.path(), 999, &value.puzzle_id).is_err());
+        assert!(list_chapter_puzzle_reviews(project.path(), 999).is_err());
+
+        set_puzzle_decision(
+            project.path(),
+            chapter.id,
+            &value,
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            project.path(),
+            chapter.id,
+            &value,
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        assert_eq!(
+            get_puzzle_decision(project.path(), chapter.id, &value.puzzle_id).unwrap(),
+            Some(ProjectPuzzleDecision::Selected)
+        );
+        set_puzzle_decision(
+            project.path(),
+            chapter.id,
+            &value,
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+        clear_puzzle_decision(project.path(), chapter.id, &value.puzzle_id).unwrap();
+        clear_puzzle_decision(project.path(), chapter.id, &value.puzzle_id).unwrap();
+        assert_eq!(
+            get_puzzle_decision(project.path(), chapter.id, &value.puzzle_id).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn chapter_puzzle_reviews_are_ordered_by_timestamp_then_puzzle_id() {
+        let project = create_test_project("review-order");
+        let chapter = create_chapter(project.path(), "Orden", None).unwrap();
+        for value in [puzzle("B"), puzzle("A")] {
+            set_puzzle_decision(
+                project.path(),
+                chapter.id,
+                &value,
+                ProjectPuzzleDecision::Discarded,
+            )
+            .unwrap();
+        }
+        let mut connection = project.connection();
+        diesel::sql_query("UPDATE chapter_puzzle_reviews SET reviewed_at = '2026-09-08T00:00:00Z'")
+            .execute(&mut connection)
+            .unwrap();
+
+        assert_eq!(
+            list_chapter_puzzle_reviews(project.path(), chapter.id)
+                .unwrap()
+                .into_iter()
+                .map(|review| review.puzzle.puzzle_id)
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+    }
+
+    #[test]
+    fn duplicate_selected_puzzles_are_protected_across_chapters() {
+        let project = create_test_project("duplicate-selections");
+        let first = create_chapter(project.path(), "Primero", None).unwrap();
+        let second = create_chapter(project.path(), "Segundo", None).unwrap();
+        let value = puzzle("shared");
+
+        set_puzzle_decision(
+            project.path(),
+            first.id,
+            &value,
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            project.path(),
+            second.id,
+            &value,
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            project.path(),
+            first.id,
+            &value,
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+
+        let error = set_puzzle_decision(
+            project.path(),
+            second.id,
+            &value,
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap_err();
+        assert!(error.contains("already selected"));
+        assert_eq!(
+            get_puzzle_decision(project.path(), first.id, &value.puzzle_id).unwrap(),
+            Some(ProjectPuzzleDecision::Selected)
+        );
+        assert_eq!(
+            get_puzzle_decision(project.path(), second.id, &value.puzzle_id).unwrap(),
+            Some(ProjectPuzzleDecision::Discarded)
+        );
+        assert_eq!(
+            find_selected_puzzle_chapter(project.path(), &value.puzzle_id)
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+
+        clear_puzzle_decision(project.path(), first.id, &value.puzzle_id).unwrap();
+        set_puzzle_decision(
+            project.path(),
+            second.id,
+            &value,
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        assert_eq!(
+            find_selected_puzzle_chapter(project.path(), &value.puzzle_id)
+                .unwrap()
+                .unwrap()
+                .id,
+            second.id
+        );
+    }
+
     fn create_test_project(label: &str) -> TempProjectDb {
         let project = TempProjectDb::new(label);
         create_project(project.path(), "Proyecto de prueba").unwrap();
@@ -723,6 +1268,26 @@ mod tests {
 
     fn create_valid_v1_project(project: &TempProjectDb) {
         create_v1_project_with_application_id(project, PROJECT_APPLICATION_ID);
+    }
+
+    fn create_valid_v2_project(project: &TempProjectDb) {
+        create_valid_v1_project(project);
+        let mut connection = project.connection();
+        diesel::sql_query(
+            "CREATE TABLE chapters (\
+             id INTEGER PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL, \
+             target_puzzle_count INTEGER NULL, created_at TEXT NOT NULL, UNIQUE (position))",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO __diesel_schema_migrations (version) VALUES ('20260908010000')",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query("UPDATE project_metadata SET schema_version = 2")
+            .execute(&mut connection)
+            .unwrap();
     }
 
     fn create_v1_project_with_application_id(project: &TempProjectDb, application_id: &str) {
@@ -757,6 +1322,34 @@ mod tests {
         .bind::<Text, _>(application_id)
         .execute(&mut connection)
         .unwrap();
+    }
+
+    fn puzzle(puzzle_id: &str) -> Puzzle {
+        Puzzle {
+            puzzle_id: puzzle_id.into(),
+            fen: format!("fen-{puzzle_id}"),
+            moves: format!("e2e4 e7e5 {puzzle_id}"),
+            rating: 1800,
+            rating_deviation: 75,
+            popularity: 92,
+            nb_plays: 1234,
+            themes: format!("fork {puzzle_id}"),
+            game_url: format!("https://lichess.org/{puzzle_id}"),
+            opening: format!("Italian_Game {puzzle_id}"),
+        }
+    }
+
+    fn assert_puzzle_matches(actual: &Puzzle, expected: &Puzzle) {
+        assert_eq!(actual.puzzle_id, expected.puzzle_id);
+        assert_eq!(actual.fen, expected.fen);
+        assert_eq!(actual.moves, expected.moves);
+        assert_eq!(actual.rating, expected.rating);
+        assert_eq!(actual.rating_deviation, expected.rating_deviation);
+        assert_eq!(actual.popularity, expected.popularity);
+        assert_eq!(actual.nb_plays, expected.nb_plays);
+        assert_eq!(actual.themes, expected.themes);
+        assert_eq!(actual.game_url, expected.game_url);
+        assert_eq!(actual.opening, expected.opening);
     }
 
     fn chapter_names(chapters: &[ProjectChapter]) -> Vec<&str> {
