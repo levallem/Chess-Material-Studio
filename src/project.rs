@@ -58,6 +58,14 @@ pub struct ProjectPuzzleReview {
     pub reviewed_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectChapterSelectedPuzzles {
+    pub chapter_id: i32,
+    pub chapter_name: String,
+    pub chapter_position: i32,
+    pub puzzles: Vec<Puzzle>,
+}
+
 #[derive(QueryableByName)]
 struct ProjectMetadataRow {
     #[diesel(sql_type = Text)]
@@ -115,6 +123,36 @@ struct ProjectPuzzleReviewRow {
 }
 
 #[derive(QueryableByName)]
+struct ProjectChapterSelectedPuzzleRow {
+    #[diesel(sql_type = Integer)]
+    chapter_id: i32,
+    #[diesel(sql_type = Text)]
+    chapter_name: String,
+    #[diesel(sql_type = Integer)]
+    chapter_position: i32,
+    #[diesel(sql_type = Text)]
+    puzzle_id: String,
+    #[diesel(sql_type = Text)]
+    fen: String,
+    #[diesel(sql_type = Text)]
+    moves: String,
+    #[diesel(sql_type = Integer)]
+    rating: i32,
+    #[diesel(sql_type = Integer)]
+    rating_deviation: i32,
+    #[diesel(sql_type = Integer)]
+    popularity: i32,
+    #[diesel(sql_type = Integer)]
+    nb_plays: i32,
+    #[diesel(sql_type = Text)]
+    themes: String,
+    #[diesel(sql_type = Text)]
+    game_url: String,
+    #[diesel(sql_type = Text)]
+    opening_tags: String,
+}
+
+#[derive(QueryableByName)]
 struct ProjectPuzzleDecisionRow {
     #[diesel(sql_type = Text)]
     decision: String,
@@ -165,6 +203,23 @@ impl TryFrom<ProjectPuzzleReviewRow> for ProjectPuzzleReview {
             decision: ProjectPuzzleDecision::from_sql_value(&row.decision)?,
             reviewed_at: row.reviewed_at,
         })
+    }
+}
+
+impl ProjectChapterSelectedPuzzleRow {
+    fn into_puzzle(self) -> Puzzle {
+        Puzzle {
+            puzzle_id: self.puzzle_id,
+            fen: self.fen,
+            moves: self.moves,
+            rating: self.rating,
+            rating_deviation: self.rating_deviation,
+            popularity: self.popularity,
+            nb_plays: self.nb_plays,
+            themes: self.themes,
+            game_url: self.game_url,
+            opening: self.opening_tags,
+        }
     }
 }
 
@@ -426,6 +481,49 @@ pub fn list_selected_puzzles_for_chapter(
         .map(|reviews| reviews.into_iter().map(|review| review.puzzle).collect())
 }
 
+pub fn list_selected_puzzles_by_chapter(
+    path: &Path,
+) -> Result<Vec<ProjectChapterSelectedPuzzles>, String> {
+    let mut connection = open_read_only_project_connection(path)?;
+    let rows = diesel::sql_query(
+        "SELECT chapters.id AS chapter_id, chapters.name AS chapter_name, \
+         chapters.position AS chapter_position, chapter_puzzle_reviews.puzzle_id, \
+         chapter_puzzle_reviews.fen, chapter_puzzle_reviews.moves, \
+         chapter_puzzle_reviews.rating, chapter_puzzle_reviews.rating_deviation, \
+         chapter_puzzle_reviews.popularity, chapter_puzzle_reviews.nb_plays, \
+         chapter_puzzle_reviews.themes, chapter_puzzle_reviews.game_url, \
+         chapter_puzzle_reviews.opening_tags \
+         FROM chapters INNER JOIN chapter_puzzle_reviews \
+         ON chapter_puzzle_reviews.chapter_id = chapters.id \
+         WHERE chapter_puzzle_reviews.decision = 'selected' \
+         ORDER BY chapters.position ASC, chapter_puzzle_reviews.reviewed_at ASC, \
+         chapter_puzzle_reviews.puzzle_id ASC",
+    )
+    .load::<ProjectChapterSelectedPuzzleRow>(&mut connection)
+    .map_err(|error| format!("cannot list selected project puzzles: {error}"))?;
+
+    let mut chapters: Vec<ProjectChapterSelectedPuzzles> = Vec::new();
+    for row in rows {
+        let is_current_chapter = chapters
+            .last()
+            .is_some_and(|chapter| chapter.chapter_id == row.chapter_id);
+        if !is_current_chapter {
+            chapters.push(ProjectChapterSelectedPuzzles {
+                chapter_id: row.chapter_id,
+                chapter_name: row.chapter_name.clone(),
+                chapter_position: row.chapter_position,
+                puzzles: Vec::new(),
+            });
+        }
+        chapters
+            .last_mut()
+            .expect("selected puzzle row always creates a chapter")
+            .puzzles
+            .push(row.into_puzzle());
+    }
+    Ok(chapters)
+}
+
 pub fn find_selected_puzzle_chapter(
     path: &Path,
     puzzle_id: &str,
@@ -480,6 +578,32 @@ fn open_validated_project_connection(path: &Path) -> Result<SqliteConnection, St
             .map_err(|error| format!("cannot upgrade project: {error}"))?;
     }
 
+    Ok(connection)
+}
+
+fn open_read_only_project_connection(path: &Path) -> Result<SqliteConnection, String> {
+    let file_metadata =
+        std::fs::metadata(path).map_err(|error| format!("project file cannot be read: {error}"))?;
+    if !file_metadata.is_file() {
+        return Err("project path is not a regular file".into());
+    }
+
+    let path_string = project_path_string(path)?;
+    let mut connection = SqliteConnection::establish(&path_string)
+        .map_err(|error| format!("cannot open SQLite project: {error}"))?;
+    let row = read_project_metadata(&mut connection)?;
+    if row.application_id != PROJECT_APPLICATION_ID {
+        return Err("SQLite file is not a Chess Material Studio project".into());
+    }
+    if row.project_name.trim().is_empty() || row.created_at.trim().is_empty() {
+        return Err("project metadata is missing required values".into());
+    }
+    if row.schema_version != PROJECT_SCHEMA_VERSION {
+        return Err(format!(
+            "project schema version {} is not readable without an upgrade",
+            row.schema_version
+        ));
+    }
     Ok(connection)
 }
 
@@ -1251,6 +1375,102 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["A", "B"]
         );
+    }
+
+    #[test]
+    fn project_selected_puzzles_are_grouped_ordered_and_read_only() {
+        let project = create_test_project("project-selected-puzzles");
+        let first = create_chapter(project.path(), "Primero", None).unwrap();
+        let second = create_chapter(project.path(), "Segundo", None).unwrap();
+        let discarded = puzzle("discarded");
+        let first_b = puzzle("first-b");
+        let first_a = puzzle("first-a");
+        let second_a = puzzle("second-a");
+
+        for (chapter_id, puzzle, decision) in [
+            (first.id, &discarded, ProjectPuzzleDecision::Discarded),
+            (first.id, &first_b, ProjectPuzzleDecision::Selected),
+            (first.id, &first_a, ProjectPuzzleDecision::Selected),
+            (second.id, &second_a, ProjectPuzzleDecision::Selected),
+        ] {
+            set_puzzle_decision(project.path(), chapter_id, puzzle, decision).unwrap();
+        }
+        let mut connection = project.connection();
+        diesel::sql_query("UPDATE chapter_puzzle_reviews SET reviewed_at = '2026-09-09T00:00:00Z'")
+            .execute(&mut connection)
+            .unwrap();
+        let before = list_chapter_puzzle_reviews(project.path(), first.id)
+            .unwrap()
+            .into_iter()
+            .map(|review| (review.puzzle.puzzle_id, review.decision, review.reviewed_at))
+            .collect::<Vec<_>>();
+
+        let chapters = list_selected_puzzles_by_chapter(project.path()).unwrap();
+
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].chapter_id, first.id);
+        assert_eq!(chapters[0].chapter_name, "Primero");
+        assert_eq!(chapters[0].chapter_position, first.position);
+        assert_eq!(
+            chapters[0]
+                .puzzles
+                .iter()
+                .map(|puzzle| puzzle.puzzle_id.as_str())
+                .collect::<Vec<_>>(),
+            ["first-a", "first-b"]
+        );
+        assert_puzzle_matches(&chapters[0].puzzles[0], &first_a);
+        assert_eq!(chapters[1].chapter_id, second.id);
+        assert_eq!(chapters[1].chapter_name, "Segundo");
+        assert_eq!(chapters[1].puzzles[0].puzzle_id, "second-a");
+        let after = list_chapter_puzzle_reviews(project.path(), first.id)
+            .unwrap()
+            .into_iter()
+            .map(|review| (review.puzzle.puzzle_id, review.decision, review.reviewed_at))
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn project_selected_puzzles_omit_empty_chapters_and_report_unavailable_projects() {
+        let project = create_test_project("project-selected-empty");
+        let chapter = create_chapter(project.path(), "Vacío", None).unwrap();
+        set_puzzle_decision(
+            project.path(),
+            chapter.id,
+            &puzzle("discarded-only"),
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+
+        assert!(
+            list_selected_puzzles_by_chapter(project.path())
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::remove_file(project.path()).unwrap();
+        assert!(list_selected_puzzles_by_chapter(project.path()).is_err());
+
+        std::fs::write(project.path(), "not a project").unwrap();
+        assert!(list_selected_puzzles_by_chapter(project.path()).is_err());
+    }
+
+    #[test]
+    fn project_selected_puzzles_do_not_upgrade_an_older_project() {
+        let project = TempProjectDb::new("project-selected-read-only-schema");
+        create_valid_v2_project(&project);
+
+        assert!(list_selected_puzzles_by_chapter(project.path()).is_err());
+
+        let mut connection = project.connection();
+        assert_eq!(
+            read_project_metadata(&mut connection)
+                .unwrap()
+                .schema_version,
+            2
+        );
+        assert!(!table_names(&mut connection).contains("chapter_puzzle_reviews"));
     }
 
     #[test]

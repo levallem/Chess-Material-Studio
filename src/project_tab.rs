@@ -9,7 +9,8 @@ use chess_material_studio::project::{
     ProjectChapter, ProjectMetadata, ProjectPuzzleDecision, clear_puzzle_decision, create_chapter,
     create_project, find_selected_puzzle_chapter, get_puzzle_decision, list_chapters,
     list_reviewed_puzzle_ids_for_chapter,
-    list_selected_puzzles_for_chapter, open_project, set_puzzle_decision,
+    list_selected_puzzles_by_chapter, list_selected_puzzles_for_chapter, open_project,
+    set_puzzle_decision,
 };
 
 use crate::lang;
@@ -65,7 +66,19 @@ struct SelectedPuzzlesCache {
 }
 
 #[derive(Debug, Clone)]
+struct ProjectPgnExportSnapshot {
+    project_name: String,
+    chapters: Vec<crate::export::ProjectPgnChapter>,
+}
+
+#[derive(Debug, Clone)]
 pub enum SelectedPuzzlesPgnExportResult {
+    Cancelled,
+    Finished(Result<(), String>),
+}
+
+#[derive(Debug, Clone)]
+pub enum ProjectPgnExportResult {
     Cancelled,
     Finished(Result<(), String>),
 }
@@ -98,6 +111,8 @@ pub enum ProjectMessage {
     CreateChapter,
     SelectChapter(i32),
     LoadSelectedPuzzles,
+    ExportProjectPgn,
+    ProjectPgnExportFinished(ProjectPgnExportResult),
     ExportSelectedPuzzlesPgn,
     SelectedPuzzlesPgnExportFinished(SelectedPuzzlesPgnExportResult),
     ExportSelectedPuzzlesPdf,
@@ -193,6 +208,26 @@ impl ProjectTab {
                 .map(Message::LoadProjectPuzzles)
                 .map(Task::done)
                 .unwrap_or_else(Task::none),
+            ProjectMessage::ExportProjectPgn => match self.project_pgn_export_snapshot() {
+                Ok(Some(snapshot)) => Task::perform(Self::export_project_pgn(snapshot), |result| {
+                    Message::Project(ProjectMessage::ProjectPgnExportFinished(result))
+                }),
+                Ok(None) => {
+                    self.status = lang::tr(&self.lang, "no_selected_puzzles_in_project");
+                    Task::none()
+                }
+                Err(error) => {
+                    self.status = format!(
+                        "{}: {error}",
+                        lang::tr(&self.lang, "project_pgn_export_failed")
+                    );
+                    Task::none()
+                }
+            },
+            ProjectMessage::ProjectPgnExportFinished(result) => {
+                self.apply_project_pgn_export_result(result);
+                Task::none()
+            }
             ProjectMessage::ExportSelectedPuzzlesPgn => self
                 .selected_puzzle_export_batch()
                 .map(|puzzles| {
@@ -374,6 +409,24 @@ impl ProjectTab {
         };
 
         SelectedPuzzlesPgnExportResult::Finished(crate::export::write_pgn(&puzzles, &path))
+    }
+
+    async fn export_project_pgn(snapshot: ProjectPgnExportSnapshot) -> ProjectPgnExportResult {
+        let Some(path) = AsyncFileDialog::new()
+            .add_filter("PGN", &["pgn"])
+            .set_file_name("project.pgn")
+            .save_file()
+            .await
+            .map(|file| file.path().to_path_buf())
+        else {
+            return ProjectPgnExportResult::Cancelled;
+        };
+
+        ProjectPgnExportResult::Finished(crate::export::write_project_pgn(
+            &snapshot.project_name,
+            &snapshot.chapters,
+            &path,
+        ))
     }
 
     async fn export_selected_puzzles_pdf(
@@ -570,6 +623,24 @@ impl ProjectTab {
         self.selected_puzzle_load_batch()
     }
 
+    fn project_pgn_export_snapshot(&self) -> Result<Option<ProjectPgnExportSnapshot>, String> {
+        let active_project = self
+            .active_project
+            .as_ref()
+            .ok_or_else(|| "no project is open".to_string())?;
+        let chapters = list_selected_puzzles_by_chapter(&active_project.path)?
+            .into_iter()
+            .map(|chapter| crate::export::ProjectPgnChapter {
+                name: chapter.chapter_name,
+                puzzles: chapter.puzzles.iter().map(app_puzzle).collect(),
+            })
+            .collect::<Vec<_>>();
+        Ok((!chapters.is_empty()).then_some(ProjectPgnExportSnapshot {
+            project_name: active_project.metadata.project_name.clone(),
+            chapters,
+        }))
+    }
+
     fn apply_selected_puzzles_pgn_export_result(&mut self, result: SelectedPuzzlesPgnExportResult) {
         match result {
             SelectedPuzzlesPgnExportResult::Cancelled => {}
@@ -580,6 +651,21 @@ impl ProjectTab {
                 self.status = format!(
                     "{}: {error}",
                     lang::tr(&self.lang, "chapter_pgn_export_failed")
+                );
+            }
+        }
+    }
+
+    fn apply_project_pgn_export_result(&mut self, result: ProjectPgnExportResult) {
+        match result {
+            ProjectPgnExportResult::Cancelled => {}
+            ProjectPgnExportResult::Finished(Ok(())) => {
+                self.status = lang::tr(&self.lang, "project_pgn_exported");
+            }
+            ProjectPgnExportResult::Finished(Err(error)) => {
+                self.status = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "project_pgn_export_failed")
                 );
             }
         }
@@ -785,6 +871,11 @@ impl ProjectTab {
             .push(
                 Button::new(Text::new(lang::tr(&self.lang, "close_project")))
                     .on_press(ProjectMessage::CloseProject)
+                    .style(btn_style_simple),
+            )
+            .push(
+                Button::new(Text::new(lang::tr(&self.lang, "export_project_to_pgn")))
+                    .on_press(ProjectMessage::ExportProjectPgn)
                     .style(btn_style_simple),
             )
             .push(Text::new(lang::tr(&self.lang, "chapters")))
@@ -1250,6 +1341,96 @@ mod tests {
     }
 
     #[test]
+    fn project_pgn_snapshot_reads_all_chapters_and_is_owned() {
+        let project = TempProjectDb::new("project-pgn-snapshot");
+        create_project(&project.path, "Libro editorial").unwrap();
+        let first_chapter = create_chapter(&project.path, "Primero", None).unwrap();
+        let second_chapter = create_chapter(&project.path, "Segundo", None).unwrap();
+        let mut first = sample_puzzle();
+        first.puzzle_id = "cms-023k-first".into();
+        let mut second = sample_puzzle();
+        second.puzzle_id = "cms-023k-second".into();
+        set_puzzle_decision(
+            &project.path,
+            first_chapter.id,
+            &project_puzzle(&first),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &project.path,
+            second_chapter.id,
+            &project_puzzle(&second),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let snapshot = tab.project_pgn_export_snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.project_name, "Libro editorial");
+        assert_eq!(
+            snapshot
+                .chapters
+                .iter()
+                .map(|chapter| chapter.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Primero", "Segundo"]
+        );
+        assert_eq!(snapshot.chapters[0].puzzles[0].puzzle_id, first.puzzle_id);
+        tab.select_chapter(second_chapter.id);
+        let _ = tab.update(ProjectMessage::CloseProject);
+        assert_eq!(snapshot.chapters[1].puzzles[0].puzzle_id, second.puzzle_id);
+    }
+
+    #[test]
+    fn project_pgn_snapshot_distinguishes_empty_and_read_failures() {
+        let project = TempProjectDb::new("project-pgn-empty");
+        create_project(&project.path, "Vacío").unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        assert!(tab.project_pgn_export_snapshot().unwrap().is_none());
+
+        std::fs::remove_file(&project.path).unwrap();
+        assert!(tab.project_pgn_export_snapshot().is_err());
+    }
+
+    #[test]
+    fn project_pgn_action_reports_empty_read_and_completion_states() {
+        let project = TempProjectDb::new("project-pgn-status");
+        create_project(&project.path, "Vacío").unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let _ = tab.update(ProjectMessage::ExportProjectPgn);
+        assert_eq!(
+            tab.status,
+            lang::tr(&tab.lang, "no_selected_puzzles_in_project")
+        );
+
+        std::fs::remove_file(&project.path).unwrap();
+        let _ = tab.update(ProjectMessage::ExportProjectPgn);
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "project_pgn_export_failed"))
+        );
+
+        tab.status = "unchanged".into();
+        tab.apply_project_pgn_export_result(ProjectPgnExportResult::Cancelled);
+        assert_eq!(tab.status, "unchanged");
+        tab.apply_project_pgn_export_result(ProjectPgnExportResult::Finished(Ok(())));
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "project_pgn_exported"))
+        );
+        tab.apply_project_pgn_export_result(ProjectPgnExportResult::Finished(Err(
+            "disk full".into()
+        )));
+        assert!(tab.status.contains("disk full"));
+    }
+
+    #[test]
     fn selected_puzzle_load_batch_is_unavailable_for_a_stale_cache_context() {
         let project = TempProjectDb::new("selected-load-stale-context");
         create_project(&project.path, "Selección").unwrap();
@@ -1677,7 +1858,7 @@ mod tests {
 
     #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 42] = [
+        const PROJECT_KEYS: [&str; 46] = [
             "project",
             "new_project",
             "project_name",
@@ -1708,6 +1889,10 @@ mod tests {
             "export_chapter_to_pgn",
             "chapter_pgn_exported",
             "chapter_pgn_export_failed",
+            "export_project_to_pgn",
+            "project_pgn_exported",
+            "project_pgn_export_failed",
+            "no_selected_puzzles_in_project",
             "export_chapter_to_pdf",
             "chapter_pdf_exported",
             "chapter_pdf_export_failed",

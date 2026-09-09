@@ -210,8 +210,41 @@ fn board_to_pgn_fen(board: &Board) -> Result<String, String> {
     ))
 }
 
+struct PgnGameContext<'a> {
+    project_name: &'a str,
+    chapter_name: &'a str,
+}
+
+fn escape_pgn_tag_value(value: &str) -> String {
+    let mut escaped = String::new();
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                escaped.push_str("\\n");
+            }
+            '\n' => escaped.push_str("\\n"),
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 /// Build the PGN text for a single puzzle as a complete game.
 fn build_pgn_game(puzzle: &config::Puzzle, date: &str) -> Result<String, String> {
+    build_pgn_game_with_context(puzzle, date, None)
+}
+
+fn build_pgn_game_with_context(
+    puzzle: &config::Puzzle,
+    date: &str,
+    context: Option<PgnGameContext<'_>>,
+) -> Result<String, String> {
     let moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
     if moves.is_empty() {
         return Err("Puzzle has no moves".to_string());
@@ -242,6 +275,16 @@ fn build_pgn_game(puzzle: &config::Puzzle, date: &str) -> Result<String, String>
         "[Site \"https://lichess.org/training/{}\"]\n",
         puzzle.puzzle_id
     ));
+    if let Some(context) = context {
+        pgn.push_str(&format!(
+            "[Project \"{}\"]\n",
+            escape_pgn_tag_value(context.project_name)
+        ));
+        pgn.push_str(&format!(
+            "[Chapter \"{}\"]\n",
+            escape_pgn_tag_value(context.chapter_name)
+        ));
+    }
     pgn.push_str(&format!("[Date \"{}\"]\n", date));
     pgn.push_str("[Round \"-\"]\n");
     pgn.push_str(&format!(
@@ -341,6 +384,47 @@ pub fn write_pgn(puzzles: &[config::Puzzle], path: &Path) -> Result<(), String> 
     let date = chrono::Local::now().format("%Y.%m.%d").to_string();
     let content = build_pgn_content(puzzles, &date)
         .map_err(|error| format!("Error building PGN content: {error}"))?;
+    std::fs::write(path, content)
+        .map_err(|error| format!("Error writing PGN file '{}': {error}", path.display()))
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectPgnChapter {
+    pub name: String,
+    pub puzzles: Vec<config::Puzzle>,
+}
+
+pub fn write_project_pgn(
+    project_name: &str,
+    chapters: &[ProjectPgnChapter],
+    path: &Path,
+) -> Result<(), String> {
+    if chapters.iter().all(|chapter| chapter.puzzles.is_empty()) {
+        return Err("project has no selected puzzles".into());
+    }
+
+    let date = chrono::Local::now().format("%Y.%m.%d").to_string();
+    let mut content = String::new();
+    let mut has_game = false;
+    for chapter in chapters {
+        for puzzle in &chapter.puzzles {
+            let game = build_pgn_game_with_context(
+                puzzle,
+                &date,
+                Some(PgnGameContext {
+                    project_name,
+                    chapter_name: &chapter.name,
+                }),
+            )
+            .map_err(|error| format!("Error building project PGN content: {error}"))?;
+            if has_game {
+                content.push('\n');
+            }
+            content.push_str(&game);
+            has_game = true;
+        }
+    }
+
     std::fs::write(path, content)
         .map_err(|error| format!("Error writing PGN file '{}': {error}", path.display()))
 }
@@ -1538,6 +1622,128 @@ mod tests {
             .join(format!("missing-cms023i-parent-{}", std::process::id()))
             .join("output.pgn");
         assert!(write_pgn(&[fixture_puzzle_00010()], &unwritable).is_err());
+    }
+
+    #[test]
+    fn project_pgn_adds_editorial_tags_and_preserves_received_order() {
+        let mut first = fixture_puzzle_00010();
+        first.puzzle_id = "chapter-one".into();
+        let mut second = fixture_puzzle_00010();
+        second.puzzle_id = "chapter-two".into();
+        let chapters = [
+            ProjectPgnChapter {
+                name: "Primero".into(),
+                puzzles: vec![first],
+            },
+            ProjectPgnChapter {
+                name: "Segundo".into(),
+                puzzles: vec![second],
+            },
+        ];
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp")
+            .join(format!("cms023k-project-{}.pgn", std::process::id()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        write_project_pgn("Libro táctico", &chapters, &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.matches("[Event \"Chess Puzzle\"]").count(), 2);
+        assert_eq!(content.matches("[Project \"Libro táctico\"]").count(), 2);
+        assert!(content.contains("[Chapter \"Primero\"]"));
+        assert!(content.contains("[Chapter \"Segundo\"]"));
+        assert!(content.find("chapter-one").unwrap() < content.find("chapter-two").unwrap());
+        let games = content
+            .split("[Event \"Chess Puzzle\"]")
+            .skip(1)
+            .collect::<Vec<_>>();
+        assert!(games[0].contains("chapter-one"));
+        assert!(games[0].contains("[Chapter \"Primero\"]"));
+        assert!(games[1].contains("chapter-two"));
+        assert!(games[1].contains("[Chapter \"Segundo\"]"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn project_pgn_escapes_tags_and_rejects_empty_or_invalid_exports() {
+        let mut valid = fixture_puzzle_00010();
+        valid.puzzle_id = "escaped".into();
+        let project_name = "Libro \\\"A\\\"\nB";
+        let chapter_name = "Capítulo \\\"uno\\\"\r\ndos";
+        let chapters = [ProjectPgnChapter {
+            name: chapter_name.into(),
+            puzzles: vec![valid],
+        }];
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp")
+            .join(format!("cms023k-escaped-{}.pgn", std::process::id()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        write_project_pgn(project_name, &chapters, &path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(&format!(
+            "[Project \"{}\"]",
+            escape_pgn_tag_value(project_name)
+        )));
+        assert!(content.contains(&format!(
+            "[Chapter \"{}\"]",
+            escape_pgn_tag_value(chapter_name)
+        )));
+        assert_eq!(
+            content
+                .lines()
+                .filter(|line| line.starts_with("[Project ") || line.starts_with("[Chapter "))
+                .count(),
+            2
+        );
+        assert!(write_project_pgn("Vacío", &[], &path).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn project_pgn_tag_escape_normalizes_physical_line_endings() {
+        assert_eq!(
+            escape_pgn_tag_value("line one\r\nline two\rline three\nline four"),
+            "line one\\nline two\\nline three\\nline four"
+        );
+    }
+
+    #[test]
+    fn project_pgn_rejects_invalid_games_without_changing_historical_output() {
+        let mut invalid = fixture_puzzle_00010();
+        invalid.moves.clear();
+        let chapters = [ProjectPgnChapter {
+            name: "Inválido".into(),
+            puzzles: vec![invalid],
+        }];
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp")
+            .join(format!("cms023k-invalid-{}.pgn", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        assert!(write_project_pgn("Libro", &chapters, &path).is_err());
+        assert!(!path.exists());
+        let unwritable = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("missing-cms023k-parent-{}", std::process::id()))
+            .join("output.pgn");
+        assert!(
+            write_project_pgn(
+                "Libro",
+                &[ProjectPgnChapter {
+                    name: "Válido".into(),
+                    puzzles: vec![fixture_puzzle_00010()],
+                }],
+                &unwritable,
+            )
+            .is_err()
+        );
+        let historical = build_pgn_game(&fixture_puzzle_00010(), "2026.09.09").unwrap();
+        assert!(!historical.contains("[Project "));
+        assert!(!historical.contains("[Chapter "));
     }
 
     #[test]
