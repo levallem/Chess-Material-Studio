@@ -84,6 +84,12 @@ pub enum ProjectPgnExportResult {
 }
 
 #[derive(Debug, Clone)]
+pub enum SelectedChaptersPgnExportResult {
+    Cancelled,
+    Finished(Result<(), String>),
+}
+
+#[derive(Debug, Clone)]
 pub enum SelectedPuzzlesPdfExportResult {
     Cancelled,
     Finished(Result<(), String>),
@@ -114,6 +120,8 @@ pub enum ProjectMessage {
     LoadSelectedPuzzles,
     ExportProjectPgn,
     ProjectPgnExportFinished(ProjectPgnExportResult),
+    ExportSelectedChaptersPgn,
+    SelectedChaptersPgnExportFinished(SelectedChaptersPgnExportResult),
     ExportSelectedPuzzlesPgn,
     SelectedPuzzlesPgnExportFinished(SelectedPuzzlesPgnExportResult),
     ExportSelectedPuzzlesPdf,
@@ -237,6 +245,36 @@ impl ProjectTab {
             },
             ProjectMessage::ProjectPgnExportFinished(result) => {
                 self.apply_project_pgn_export_result(result);
+                Task::none()
+            }
+            ProjectMessage::ExportSelectedChaptersPgn => {
+                if self.selected_export_chapter_count() == 0 {
+                    return Task::none();
+                }
+                match self.selected_chapters_pgn_export_snapshot() {
+                    Ok(Some(snapshot)) => {
+                        Task::perform(Self::export_selected_chapters_pgn(snapshot), |result| {
+                            Message::Project(ProjectMessage::SelectedChaptersPgnExportFinished(
+                                result,
+                            ))
+                        })
+                    }
+                    Ok(None) => {
+                        self.status =
+                            lang::tr(&self.lang, "no_selected_puzzles_in_selected_chapters");
+                        Task::none()
+                    }
+                    Err(error) => {
+                        self.status = format!(
+                            "{}: {error}",
+                            lang::tr(&self.lang, "selected_chapters_pgn_export_failed")
+                        );
+                        Task::none()
+                    }
+                }
+            }
+            ProjectMessage::SelectedChaptersPgnExportFinished(result) => {
+                self.apply_selected_chapters_pgn_export_result(result);
                 Task::none()
             }
             ProjectMessage::ExportSelectedPuzzlesPgn => self
@@ -499,6 +537,26 @@ impl ProjectTab {
         ))
     }
 
+    async fn export_selected_chapters_pgn(
+        snapshot: ProjectPgnExportSnapshot,
+    ) -> SelectedChaptersPgnExportResult {
+        let Some(path) = AsyncFileDialog::new()
+            .add_filter("PGN", &["pgn"])
+            .set_file_name("selected-chapters.pgn")
+            .save_file()
+            .await
+            .map(|file| file.path().to_path_buf())
+        else {
+            return SelectedChaptersPgnExportResult::Cancelled;
+        };
+
+        SelectedChaptersPgnExportResult::Finished(crate::export::write_project_pgn(
+            &snapshot.project_name,
+            &snapshot.chapters,
+            &path,
+        ))
+    }
+
     async fn export_selected_puzzles_pdf(
         puzzles: Vec<crate::config::Puzzle>,
         lang: lang::Language,
@@ -711,6 +769,31 @@ impl ProjectTab {
         }))
     }
 
+    fn selected_chapters_pgn_export_snapshot(
+        &self,
+    ) -> Result<Option<ProjectPgnExportSnapshot>, String> {
+        if self.selected_export_chapter_count() == 0 {
+            return Ok(None);
+        }
+        let active_project = self
+            .active_project
+            .as_ref()
+            .ok_or_else(|| "no project is open".to_string())?;
+        let selected_ids = self.selected_export_chapter_ids();
+        let chapters = list_selected_puzzles_by_chapter(&active_project.path)?
+            .into_iter()
+            .filter(|chapter| selected_ids.contains(&chapter.chapter_id))
+            .map(|chapter| crate::export::ProjectPgnChapter {
+                name: chapter.chapter_name,
+                puzzles: chapter.puzzles.iter().map(app_puzzle).collect(),
+            })
+            .collect::<Vec<_>>();
+        Ok((!chapters.is_empty()).then_some(ProjectPgnExportSnapshot {
+            project_name: active_project.metadata.project_name.clone(),
+            chapters,
+        }))
+    }
+
     fn apply_selected_puzzles_pgn_export_result(&mut self, result: SelectedPuzzlesPgnExportResult) {
         match result {
             SelectedPuzzlesPgnExportResult::Cancelled => {}
@@ -736,6 +819,24 @@ impl ProjectTab {
                 self.status = format!(
                     "{}: {error}",
                     lang::tr(&self.lang, "project_pgn_export_failed")
+                );
+            }
+        }
+    }
+
+    fn apply_selected_chapters_pgn_export_result(
+        &mut self,
+        result: SelectedChaptersPgnExportResult,
+    ) {
+        match result {
+            SelectedChaptersPgnExportResult::Cancelled => {}
+            SelectedChaptersPgnExportResult::Finished(Ok(())) => {
+                self.status = lang::tr(&self.lang, "selected_chapters_pgn_exported");
+            }
+            SelectedChaptersPgnExportResult::Finished(Err(error)) => {
+                self.status = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "selected_chapters_pgn_export_failed")
                 );
             }
         }
@@ -971,6 +1072,18 @@ impl ProjectTab {
                 lang::tr(&self.lang, "selected_chapters_for_export"),
                 self.selected_export_chapter_count()
             )))
+            .push({
+                let button = Button::new(Text::new(lang::tr(
+                    &self.lang,
+                    "export_selected_chapters_to_pgn",
+                )))
+                .style(btn_style_simple);
+                if self.selected_export_chapter_count() == 0 {
+                    button
+                } else {
+                    button.on_press(ProjectMessage::ExportSelectedChaptersPgn)
+                }
+            })
             .push(Text::new(progress));
 
         if let Some(selected_puzzles) = self.selected_puzzles_content() {
@@ -1589,6 +1702,7 @@ mod tests {
         .unwrap();
         let mut tab = ProjectTab::new();
         tab.open_project_path(&project.path);
+        tab.set_chapter_export_selected(second_chapter.id, true);
 
         let snapshot = tab.project_pgn_export_snapshot().unwrap().unwrap();
 
@@ -1605,6 +1719,165 @@ mod tests {
         tab.select_chapter(second_chapter.id);
         let _ = tab.update(ProjectMessage::CloseProject);
         assert_eq!(snapshot.chapters[1].puzzles[0].puzzle_id, second.puzzle_id);
+    }
+
+    #[test]
+    fn selected_chapters_pgn_snapshot_filters_the_ordered_project_read_and_is_owned() {
+        let project = TempProjectDb::new("selected-chapters-pgn-snapshot");
+        create_project(&project.path, "Libro editorial").unwrap();
+        let first_chapter = create_chapter(&project.path, "Primero", None).unwrap();
+        let empty_chapter = create_chapter(&project.path, "Vacío", None).unwrap();
+        let unselected_chapter = create_chapter(&project.path, "No marcado", None).unwrap();
+        let third_chapter = create_chapter(&project.path, "Tercero", None).unwrap();
+        let mut first = sample_puzzle();
+        first.puzzle_id = "cms-023m-first".into();
+        let mut second_in_first = sample_puzzle();
+        second_in_first.puzzle_id = "cms-023m-second-in-first".into();
+        let mut discarded = sample_puzzle();
+        discarded.puzzle_id = "cms-023m-discarded".into();
+        let mut third = sample_puzzle();
+        third.puzzle_id = "cms-023m-third".into();
+        for (chapter_id, puzzle, decision) in [
+            (first_chapter.id, &first, ProjectPuzzleDecision::Selected),
+            (
+                first_chapter.id,
+                &second_in_first,
+                ProjectPuzzleDecision::Selected,
+            ),
+            (
+                first_chapter.id,
+                &discarded,
+                ProjectPuzzleDecision::Discarded,
+            ),
+            (
+                unselected_chapter.id,
+                &discarded,
+                ProjectPuzzleDecision::Selected,
+            ),
+            (third_chapter.id, &third, ProjectPuzzleDecision::Selected),
+        ] {
+            set_puzzle_decision(&project.path, chapter_id, &project_puzzle(puzzle), decision)
+                .unwrap();
+        }
+
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.set_chapter_export_selected(third_chapter.id, true);
+        tab.set_chapter_export_selected(empty_chapter.id, true);
+        tab.set_chapter_export_selected(first_chapter.id, true);
+
+        let snapshot = tab
+            .selected_chapters_pgn_export_snapshot()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(snapshot.project_name, "Libro editorial");
+        assert_eq!(
+            snapshot
+                .chapters
+                .iter()
+                .map(|chapter| chapter.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Primero", "Tercero"]
+        );
+        assert_eq!(snapshot.chapters[0].puzzles.len(), 2);
+        assert_eq!(snapshot.chapters[0].puzzles[0].puzzle_id, first.puzzle_id);
+        assert_eq!(snapshot.chapters[0].puzzles[0].fen, first.fen);
+        assert_eq!(snapshot.chapters[0].puzzles[0].moves, first.moves);
+        assert_eq!(snapshot.chapters[0].puzzles[0].rating, first.rating);
+        assert_eq!(
+            snapshot.chapters[0].puzzles[0].rating_deviation,
+            first.rating_deviation
+        );
+        assert_eq!(snapshot.chapters[0].puzzles[0].popularity, first.popularity);
+        assert_eq!(snapshot.chapters[0].puzzles[0].nb_plays, first.nb_plays);
+        assert_eq!(snapshot.chapters[0].puzzles[0].themes, first.themes);
+        assert_eq!(snapshot.chapters[0].puzzles[0].game_url, first.game_url);
+        assert_eq!(snapshot.chapters[0].puzzles[0].opening, first.opening);
+        assert_eq!(
+            snapshot.chapters[0].puzzles[1].puzzle_id,
+            second_in_first.puzzle_id
+        );
+        tab.set_chapter_export_selected(first_chapter.id, false);
+        tab.select_chapter(third_chapter.id);
+        let _ = tab.update(ProjectMessage::CloseProject);
+        let replacement_project = TempProjectDb::new("selected-chapters-pgn-replacement");
+        create_project(&replacement_project.path, "Otro proyecto").unwrap();
+        tab.open_project_path(&replacement_project.path);
+        assert_eq!(snapshot.chapters[1].puzzles[0].puzzle_id, third.puzzle_id);
+    }
+
+    #[test]
+    fn selected_chapters_pgn_action_is_neutral_without_selection_and_reports_empty_and_results() {
+        let project = TempProjectDb::new("selected-chapters-pgn-status");
+        create_project(&project.path, "Vacío").unwrap();
+        let chapter = create_chapter(&project.path, "Vacío", None).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.status = "unchanged".into();
+
+        let _ = tab.update(ProjectMessage::ExportSelectedChaptersPgn);
+        assert_eq!(tab.status, "unchanged");
+        assert!(
+            tab.selected_chapters_pgn_export_snapshot()
+                .unwrap()
+                .is_none()
+        );
+
+        tab.set_chapter_export_selected(chapter.id, true);
+        let _ = tab.update(ProjectMessage::ExportSelectedChaptersPgn);
+        assert_eq!(
+            tab.status,
+            lang::tr(&tab.lang, "no_selected_puzzles_in_selected_chapters")
+        );
+        let selected_before = tab.selected_export_chapter_ids().clone();
+        tab.status = "unchanged".into();
+        tab.apply_selected_chapters_pgn_export_result(SelectedChaptersPgnExportResult::Cancelled);
+        assert_eq!(tab.status, "unchanged");
+        tab.apply_selected_chapters_pgn_export_result(SelectedChaptersPgnExportResult::Finished(
+            Ok(()),
+        ));
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "selected_chapters_pgn_exported"))
+        );
+        tab.apply_selected_chapters_pgn_export_result(SelectedChaptersPgnExportResult::Finished(
+            Err("disk full".into()),
+        ));
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "selected_chapters_pgn_export_failed"))
+        );
+        assert!(tab.status.contains("disk full"));
+        assert_eq!(tab.selected_export_chapter_ids(), &selected_before);
+
+        tab.set_chapter_export_selected(chapter.id, false);
+        std::fs::remove_file(&project.path).unwrap();
+        let _ = tab.update(ProjectMessage::ExportSelectedChaptersPgn);
+        assert!(tab.status.contains("disk full"));
+        assert!(
+            tab.selected_chapters_pgn_export_snapshot()
+                .unwrap()
+                .is_none()
+        );
+
+        let unavailable_project = TempProjectDb::new("selected-chapters-pgn-read-failure");
+        create_project(&unavailable_project.path, "No disponible").unwrap();
+        let unavailable_chapter =
+            create_chapter(&unavailable_project.path, "Capítulo", None).unwrap();
+        let mut unavailable_tab = ProjectTab::new();
+        unavailable_tab.open_project_path(&unavailable_project.path);
+        unavailable_tab.set_chapter_export_selected(unavailable_chapter.id, true);
+        std::fs::remove_file(&unavailable_project.path).unwrap();
+        let _ = unavailable_tab.update(ProjectMessage::ExportSelectedChaptersPgn);
+        assert!(unavailable_tab.status.contains(&lang::tr(
+            &unavailable_tab.lang,
+            "selected_chapters_pgn_export_failed"
+        )));
+        assert_eq!(
+            unavailable_tab.selected_export_chapter_ids(),
+            &HashSet::from([unavailable_chapter.id])
+        );
     }
 
     #[test]
@@ -2081,7 +2354,7 @@ mod tests {
 
     #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 48] = [
+        const PROJECT_KEYS: [&str; 52] = [
             "project",
             "new_project",
             "project_name",
@@ -2094,6 +2367,10 @@ mod tests {
             "chapters",
             "select_chapters_for_export",
             "selected_chapters_for_export",
+            "export_selected_chapters_to_pgn",
+            "selected_chapters_pgn_exported",
+            "selected_chapters_pgn_export_failed",
+            "no_selected_puzzles_in_selected_chapters",
             "active_chapter",
             "new_chapter",
             "chapter_name",
