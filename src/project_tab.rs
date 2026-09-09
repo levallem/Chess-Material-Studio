@@ -70,6 +70,12 @@ pub enum SelectedPuzzlesPgnExportResult {
     Finished(Result<(), String>),
 }
 
+#[derive(Debug, Clone)]
+pub enum SelectedPuzzlesPdfExportResult {
+    Cancelled,
+    Finished(Result<(), String>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PuzzleReviewView {
     pub chapter_name: String,
@@ -94,6 +100,8 @@ pub enum ProjectMessage {
     LoadSelectedPuzzles,
     ExportSelectedPuzzlesPgn,
     SelectedPuzzlesPgnExportFinished(SelectedPuzzlesPgnExportResult),
+    ExportSelectedPuzzlesPdf,
+    SelectedPuzzlesPdfExportFinished(SelectedPuzzlesPdfExportResult),
 }
 
 pub struct ProjectTab {
@@ -195,6 +203,19 @@ impl ProjectTab {
                 .unwrap_or_else(Task::none),
             ProjectMessage::SelectedPuzzlesPgnExportFinished(result) => {
                 self.apply_selected_puzzles_pgn_export_result(result);
+                Task::none()
+            }
+            ProjectMessage::ExportSelectedPuzzlesPdf => self
+                .selected_puzzle_export_batch()
+                .map(|puzzles| {
+                    let lang = self.lang;
+                    Task::perform(Self::export_selected_puzzles_pdf(puzzles, lang), |result| {
+                        Message::Project(ProjectMessage::SelectedPuzzlesPdfExportFinished(result))
+                    })
+                })
+                .unwrap_or_else(Task::none),
+            ProjectMessage::SelectedPuzzlesPdfExportFinished(result) => {
+                self.apply_selected_puzzles_pdf_export_result(result);
                 Task::none()
             }
         }
@@ -353,6 +374,25 @@ impl ProjectTab {
         };
 
         SelectedPuzzlesPgnExportResult::Finished(crate::export::write_pgn(&puzzles, &path))
+    }
+
+    async fn export_selected_puzzles_pdf(
+        puzzles: Vec<crate::config::Puzzle>,
+        lang: lang::Language,
+    ) -> SelectedPuzzlesPdfExportResult {
+        let Some(path) = AsyncFileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name("chapter.pdf")
+            .save_file()
+            .await
+            .map(|file| file.path().to_path_buf())
+        else {
+            return SelectedPuzzlesPdfExportResult::Cancelled;
+        };
+
+        SelectedPuzzlesPdfExportResult::Finished(crate::export::write_pdf_all(
+            &puzzles, &lang, &path,
+        ))
     }
 
     pub fn reviewed_puzzle_ids_for_active_chapter(
@@ -540,6 +580,21 @@ impl ProjectTab {
                 self.status = format!(
                     "{}: {error}",
                     lang::tr(&self.lang, "chapter_pgn_export_failed")
+                );
+            }
+        }
+    }
+
+    fn apply_selected_puzzles_pdf_export_result(&mut self, result: SelectedPuzzlesPdfExportResult) {
+        match result {
+            SelectedPuzzlesPdfExportResult::Cancelled => {}
+            SelectedPuzzlesPdfExportResult::Finished(Ok(())) => {
+                self.status = lang::tr(&self.lang, "chapter_pdf_exported");
+            }
+            SelectedPuzzlesPdfExportResult::Finished(Err(error)) => {
+                self.status = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "chapter_pdf_export_failed")
                 );
             }
         }
@@ -796,6 +851,11 @@ impl ProjectTab {
                     .push(
                         Button::new(Text::new(lang::tr(&self.lang, "export_chapter_to_pgn")))
                             .on_press(ProjectMessage::ExportSelectedPuzzlesPgn)
+                            .style(btn_style_simple),
+                    )
+                    .push(
+                        Button::new(Text::new(lang::tr(&self.lang, "export_chapter_to_pdf")))
+                            .on_press(ProjectMessage::ExportSelectedPuzzlesPdf)
                             .style(btn_style_simple),
                     ),
             );
@@ -1166,6 +1226,25 @@ mod tests {
         assert!(
             tab.status
                 .contains(&lang::tr(&tab.lang, "chapter_pgn_export_failed"))
+        );
+        assert!(tab.status.contains("disk full"));
+
+        tab.status = "existing PDF status".into();
+        tab.apply_selected_puzzles_pdf_export_result(SelectedPuzzlesPdfExportResult::Cancelled);
+        assert_eq!(tab.status, "existing PDF status");
+        tab.apply_selected_puzzles_pdf_export_result(
+            SelectedPuzzlesPdfExportResult::Finished(Ok(())),
+        );
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "chapter_pdf_exported"))
+        );
+        tab.apply_selected_puzzles_pdf_export_result(
+            SelectedPuzzlesPdfExportResult::Finished(Err("disk full".into())),
+        );
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "chapter_pdf_export_failed"))
         );
         assert!(tab.status.contains("disk full"));
     }
@@ -1598,7 +1677,7 @@ mod tests {
 
     #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 39] = [
+        const PROJECT_KEYS: [&str; 42] = [
             "project",
             "new_project",
             "project_name",
@@ -1629,6 +1708,9 @@ mod tests {
             "export_chapter_to_pgn",
             "chapter_pgn_exported",
             "chapter_pgn_export_failed",
+            "export_chapter_to_pdf",
+            "chapter_pdf_exported",
+            "chapter_pdf_export_failed",
             "review_status",
             "unreviewed",
             "discarded",

@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::path::Path;
 use std::str::FromStr;
 use lopdf::dictionary;
@@ -6,12 +5,15 @@ use lopdf::{Document, Object, Stream};
 use lopdf::content::{Content, Operation};
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Rank, Square};
 
-use crate::{config, PuzzleTab, lang};
+use crate::{config, lang};
 
 // ─── Private helpers for PGN generation ────────────────────────────────────
 
 /// Parse a UCI move string and verify it is legal on the given board.
 fn parse_legal_uci_move(board: &Board, uci: &str) -> Result<ChessMove, String> {
+    if !uci.is_ascii() {
+        return Err(format!("Invalid non-ASCII UCI move: {}", uci));
+    }
     let (source_str, dest_str, promo_char) = if uci.len() == 5 {
         (&uci[0..2], &uci[2..4], Some(uci[4..5].to_lowercase()))
     } else if uci.len() == 4 {
@@ -386,7 +388,10 @@ fn chess_alpha_light_square_glyph(san_piece: char) -> char {
 /// Everything else (files, ranks, x, +, #, =, O-O) becomes Regular spans.
 fn standard_san_to_pdf_spans(san: &str) -> Vec<PdfSolutionSpan> {
     if san.starts_with("O-O") {
-        return vec![PdfSolutionSpan { font: PdfSolutionFont::Regular, text: san.to_string() }];
+        return vec![PdfSolutionSpan {
+            font: PdfSolutionFont::Regular,
+            text: san.to_string(),
+        }];
     }
 
     let chars: Vec<char> = san.chars().collect();
@@ -399,18 +404,27 @@ fn standard_san_to_pdf_spans(san: &str) -> Vec<PdfSolutionSpan> {
 
         if is_piece_start || is_promo_piece {
             if !regular_buf.is_empty() {
-                spans.push(PdfSolutionSpan { font: PdfSolutionFont::Regular, text: regular_buf.clone() });
+                spans.push(PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: regular_buf.clone(),
+                });
                 regular_buf.clear();
             }
             let fig_char = chess_alpha_light_square_glyph(ch);
-            spans.push(PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: fig_char.to_string() });
+            spans.push(PdfSolutionSpan {
+                font: PdfSolutionFont::Figurine,
+                text: fig_char.to_string(),
+            });
         } else {
             regular_buf.push(ch);
         }
     }
 
     if !regular_buf.is_empty() {
-        spans.push(PdfSolutionSpan { font: PdfSolutionFont::Regular, text: regular_buf });
+        spans.push(PdfSolutionSpan {
+            font: PdfSolutionFont::Regular,
+            text: regular_buf,
+        });
     }
 
     spans
@@ -435,29 +449,162 @@ fn append_pdf_solution_spans(ops: &mut Vec<Operation>, spans: &[PdfSolutionSpan]
         };
         ops.push(Operation::new("Tf", vec![font_name.into(), 12.into()]));
         ops.push(Operation::new("Ts", vec![rise.into()]));
-        ops.push(Operation::new("Tj", vec![Object::string_literal(span.text.clone())]));
+        ops.push(Operation::new(
+            "Tj",
+            vec![Object::string_literal(span.text.clone())],
+        ));
     }
     ops.push(Operation::new("Ts", vec![0.into()]));
 }
 
-// ─── PDF (unchanged) ───────────────────────────────────────────────────────
+// ─── PDF ───────────────────────────────────────────────────────────────────
 
-pub fn to_pdf(puzzles: &[config::Puzzle], number_of_pages: i32, lang: &lang::Language, path: String) {
+const PDF_PUZZLES_PER_PAGE: usize = 6;
 
-    // Create a document object and add the font and font descriptor to it
+fn editorial_diagram_pages(puzzle_count: usize) -> usize {
+    puzzle_count.div_ceil(PDF_PUZZLES_PER_PAGE)
+}
+
+fn historical_pdf_plan(puzzle_count: usize, number_of_pages: i32) -> (usize, usize) {
+    let capacity = (PDF_PUZZLES_PER_PAGE as i32 * number_of_pages) as usize;
+    if capacity > puzzle_count {
+        (puzzle_count, editorial_diagram_pages(puzzle_count))
+    } else {
+        (capacity, number_of_pages as usize)
+    }
+}
+
+fn historical_pdf_prefix(
+    puzzles: &[config::Puzzle],
+    number_of_pages: i32,
+) -> (&[config::Puzzle], usize) {
+    let (puzzle_count, diagram_pages) = historical_pdf_plan(puzzles.len(), number_of_pages);
+    (&puzzles[..puzzle_count], diagram_pages)
+}
+
+pub fn write_pdf_all(
+    puzzles: &[config::Puzzle],
+    lang: &lang::Language,
+    path: &Path,
+) -> Result<(), String> {
+    if puzzles.is_empty() {
+        return Err("cannot export an empty puzzle set".to_string());
+    }
+    write_pdf(puzzles, editorial_diagram_pages(puzzles.len()), lang, path)
+}
+
+pub fn to_pdf(
+    puzzles: &[config::Puzzle],
+    number_of_pages: i32,
+    lang: &lang::Language,
+    path: String,
+) {
+    let (puzzle_prefix, diagram_pages) = historical_pdf_prefix(puzzles, number_of_pages);
+    if let Err(error) = write_pdf(puzzle_prefix, diagram_pages, lang, Path::new(&path)) {
+        eprintln!("{error}");
+    }
+}
+
+fn add_pdf_page(
+    doc: &mut Document,
+    page_ids: &mut Vec<Object>,
+    pages_id: lopdf::ObjectId,
+    resources_id: Option<lopdf::ObjectId>,
+    operations: Vec<Operation>,
+) -> Result<(), String> {
+    let content = Content { operations };
+    let encoded = content
+        .encode()
+        .map_err(|error| format!("Error encoding PDF content: {error}"))?;
+    let content_id = doc.add_object(Stream::new(dictionary! {}, encoded));
+    let mut page = dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+    };
+    if let Some(resources_id) = resources_id {
+        page.set("Resources", resources_id);
+    }
+    page_ids.push(doc.add_object(page).into());
+    Ok(())
+}
+
+fn puzzle_board_after_trigger(puzzle: &config::Puzzle) -> Result<Board, String> {
+    let board = Board::from_str(&puzzle.fen)
+        .map_err(|error| format!("Invalid FEN '{}': {error:?}", puzzle.fen))?;
+    let trigger = puzzle
+        .moves
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("Puzzle '{}' has no trigger move", puzzle.puzzle_id))?;
+    let trigger = parse_legal_uci_move(&board, trigger)
+        .map_err(|error| format!("Trigger move error: {error}"))?;
+    Ok(board.make_move_new(trigger))
+}
+
+fn solution_spans_for_puzzle(
+    puzzle_number: usize,
+    puzzle: &config::Puzzle,
+) -> Result<Vec<PdfSolutionSpan>, String> {
+    let mut board = puzzle_board_after_trigger(puzzle)?;
+    let mut puzzle_moves = puzzle.moves.split_whitespace();
+    puzzle_moves.next();
+
+    let mut move_spans = vec![PdfSolutionSpan {
+        font: PdfSolutionFont::Regular,
+        text: format!("{})", puzzle_number),
+    }];
+    let mut half_move_number = 1;
+    let mut move_label = 1;
+    if board.side_to_move() == Color::Black {
+        move_spans.push(PdfSolutionSpan {
+            font: PdfSolutionFont::Regular,
+            text: " 1. ... ".to_string(),
+        });
+        half_move_number = 2;
+        move_label = 2;
+    }
+
+    for uci_move in puzzle_moves {
+        if half_move_number % 2 == 0 {
+            move_spans.push(PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: " ".to_string(),
+            });
+        } else {
+            move_spans.push(PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: format!(" {}. ", move_label),
+            });
+            move_label += 1;
+        }
+        let spans = uci_move_to_pdf_spans(&board, uci_move)
+            .map_err(|error| format!("Solution move error: {error}"))?;
+        move_spans.extend(spans);
+        let movement = parse_legal_uci_move(&board, uci_move)
+            .map_err(|error| format!("Solution move error: {error}"))?;
+        board = board.make_move_new(movement);
+        half_move_number += 1;
+    }
+    Ok(move_spans)
+}
+
+fn write_pdf(
+    puzzles: &[config::Puzzle],
+    diagram_pages: usize,
+    lang: &lang::Language,
+    path: &Path,
+) -> Result<(), String> {
+    if puzzles.chunks(PDF_PUZZLES_PER_PAGE).count() != diagram_pages {
+        return Err("PDF diagram page plan does not match puzzle batch".to_string());
+    }
+
     let mut doc = Document::with_version("1.5");
-
     let regular_font_id = doc.add_object(dictionary! {
-        // type of dictionary
         "Type" => "Font",
-        // type of font, type1 is simple postscript font
         "Subtype" => "TrueType",
-        // basefont is postscript name of font for type1 font.
-        // See PDF reference document for more details
         "BaseFont" => "Arial",
     });
-  
-    // pages is the root node of the page tree
     let pages_id = doc.new_object_id();
     let font_name = "Chess Alpha".to_string();
     let mut font_data = lopdf::FontData::new(config::CHESS_ALPHA_BYTES, font_name.clone());
@@ -466,9 +613,11 @@ pub fn to_pdf(puzzles: &[config::Puzzle], number_of_pages: i32, lang: &lang::Lan
         .set_font_bbox((0, 0, 1000, 1000))
         .set_first_char(32)
         .set_last_char(255)
-        .set_widths(vec![1000.into();223])
+        .set_widths(vec![1000.into(); 223])
         .set_encoding("WinAnsiEncoding".to_string());
-    let font_id = doc.add_font(font_data).unwrap();
+    let font_id = doc
+        .add_font(font_data)
+        .map_err(|error| format!("Error adding PDF font: {error}"))?;
     let resources_id = doc.add_object(dictionary! {
         "Font" => dictionary! {
             font_name => font_id,
@@ -476,184 +625,69 @@ pub fn to_pdf(puzzles: &[config::Puzzle], number_of_pages: i32, lang: &lang::Lan
         },
     });
 
-    let num_of_puzzles_to_print;
-    let num_of_pages;
-    if (6 * number_of_pages) as usize > puzzles.len() {
-        num_of_puzzles_to_print = puzzles.len();
-        num_of_pages = (puzzles.len() as f32 / 6.0).ceil() as usize;
-    } else {
-        num_of_puzzles_to_print = (6 * number_of_pages) as usize;
-        num_of_pages = number_of_pages as usize;
-    };
-
-    //let number_of_pages: i64 = 100;//(puzzles.len() / 6).try_into().unwrap();
     let mut page_ids = vec![];
-    let mut puzzle_index = 0;
-    for _ in 0..num_of_pages {
-        let mut ops: Vec<Operation> = vec![];
+    for (page_index, puzzle_page) in puzzles.chunks(PDF_PUZZLES_PER_PAGE).enumerate() {
+        let mut ops = vec![];
         let mut pos_x = 750;
         let mut pos_y = 75;
-        for i in 0..6 {
-            if puzzle_index == puzzles.len() { break };
-            ops.append(&mut gen_diagram_operations(puzzle_index + 1, &puzzles[puzzle_index], pos_x, pos_y, lang));
-            if i % 2 == 0 {
+        for (slot, puzzle) in puzzle_page.iter().enumerate() {
+            ops.append(&mut gen_diagram_operations(
+                page_index * PDF_PUZZLES_PER_PAGE + slot + 1,
+                puzzle,
+                pos_x,
+                pos_y,
+                lang,
+            )?);
+            if slot % 2 == 0 {
                 pos_y = 325;
             } else {
                 pos_y = 75;
                 pos_x -= 250;
-            };
-            puzzle_index += 1;
+            }
         }
-
-        // Content is a wrapper struct around an operations struct that contains a vector of operations
-        // The operations struct contains a vector of operations that match up with a particular PDF
-        // operator and operands.
-        // Reference the PDF reference for more details on these operators and operands.
-        // Note, the operators and operands are specified in a reverse order than they
-        // actually appear in the PDF file itself.
-        let content = Content {
-            operations: ops,
-        };
-
-        // Streams are a dictionary followed by a sequence of bytes. What that sequence of bytes
-        // represents depends on context
-        // The stream dictionary is set internally to lopdf and normally doesn't
-        // need to be manually nanipulated. It contains keys such as
-        // Length, Filter, DecodeParams, etc
-        //
-        // content is a stream of encoded content data.
-        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
-
-        // Page is a dictionary that represents one page of a PDF file.
-        // It has a type, parent and contents
-        //let page_id = doc.add_object(dictionary! {
-        page_ids.push(doc.add_object(dictionary! {
-            "Type" => "Page",
-            "Parent" => pages_id,
-            "Contents" => content_id,
-            "Resources" => resources_id,
-        }).into());
+        add_pdf_page(&mut doc, &mut page_ids, pages_id, Some(resources_id), ops)?;
     }
 
-    let mut ops: Vec<Operation> = vec![];
+    let mut ops = vec![];
     let mut pos_x = 800;
     let pos_y = 75;
-    for (puzzle_number, puzzle) in puzzles.iter().enumerate().take(num_of_puzzles_to_print) {
-        // need to start by making the 1st move in the list, because it's only then that
-        // the puzzle starts.
-        let mut board = Board::from_str(&puzzle.fen).unwrap();
-        let mut puzzle_moves: VecDeque<&str> = puzzles[puzzle_number].moves.split_whitespace().collect();
-        let movement = ChessMove::new(
-            Square::from_str(&String::from(&puzzle_moves[0][..2])).unwrap(),
-            Square::from_str(&String::from(&puzzle_moves[0][2..4])).unwrap(), PuzzleTab::check_promotion(puzzle_moves[0]));
-        board = board.make_move_new(movement);
-
-        // Remove the opponent's first move, it's not part of the solution.
-        puzzle_moves.pop_front();
-
-        let mut move_spans: Vec<PdfSolutionSpan> = Vec::new();
-        move_spans.push(PdfSolutionSpan { font: PdfSolutionFont::Regular, text: format!("{})", puzzle_number + 1) });
-        let mut half_move_number = 1;
-        let mut move_label = 1;
-        if board.side_to_move() == Color::Black {
-            move_spans.push(PdfSolutionSpan { font: PdfSolutionFont::Regular, text: " 1. ... ".to_string() });
-            half_move_number = 2;
-            move_label = 2;
-        }
-        for chess_move in puzzle_moves {
-            if half_move_number % 2 == 0 {
-                move_spans.push(PdfSolutionSpan { font: PdfSolutionFont::Regular, text: " ".to_string() });
-            } else {
-                move_spans.push(PdfSolutionSpan { font: PdfSolutionFont::Regular, text: format!(" {}. ", move_label) });
-                move_label += 1;
-            }
-            let spans = uci_move_to_pdf_spans(&board, chess_move).unwrap();
-            move_spans.extend(spans);
-            half_move_number += 1;
-            let movement = ChessMove::new(
-                Square::from_str(&String::from(&chess_move[..2])).unwrap(),
-                Square::from_str(&String::from(&chess_move[2..4])).unwrap(), PuzzleTab::check_promotion(chess_move));
-            board = board.make_move_new(movement);
-        }
-        ops.append(&mut vec![
-                Operation::new("BT", vec![]),
-                Operation::new("Tf", vec!["Regular".into(), 12.into()]),
-                Operation::new("rg", vec![0.into(),0.into(),0.into()]),
-                Operation::new("Td", vec![pos_y.into(), pos_x.into()]),
+    for (puzzle_number, puzzle) in puzzles.iter().enumerate() {
+        let move_spans = solution_spans_for_puzzle(puzzle_number + 1, puzzle)?;
+        ops.extend([
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["Regular".into(), 12.into()]),
+            Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
+            Operation::new("Td", vec![pos_y.into(), pos_x.into()]),
         ]);
         append_pdf_solution_spans(&mut ops, &move_spans);
         ops.push(Operation::new("ET", vec![]));
         pos_x -= 18;
-
-        // We need a page break
         if pos_x < 18 {
             pos_x = 800;
-
-            let content = Content {
-                operations: ops,
-            };
-
-            let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
-            page_ids.push(doc.add_object(dictionary! {
-                "Type" => "Page",
-                "Parent" => pages_id,
-                "Contents" => content_id,
-            }).into());
+            add_pdf_page(&mut doc, &mut page_ids, pages_id, None, ops)?;
             ops = vec![];
         }
     }
-    let content = Content {
-        operations: ops,
-    };
+    add_pdf_page(&mut doc, &mut page_ids, pages_id, None, ops)?;
 
-    let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
-    page_ids.push(doc.add_object(dictionary! {
-        "Type" => "Page",
-        "Parent" => pages_id,
-        "Contents" => content_id,
-    }).into());
-
-    // Again, pages is the root of the page tree. The ID was already created
-    // at the top of the page, since we needed it to assign to the parent element of the page
-    // dictionary
-    //
-    // This is just the basic requirements for a page tree root object. There are also many
-    // additional entries that can be added to the dictionary if needed. Some of these can also be
-    // defined on the page dictionary itself, and not inherited from the page tree root.
     let pages = dictionary! {
-        // Type of dictionary
         "Type" => "Pages",
-        // Page count
         "Count" => Object::Integer(page_ids.len() as i64),
-        // Vector of page IDs in document. Normally would contain more than one ID and be produced
-        // using a loop of some kind
         "Kids" => page_ids,
-        // ID of resources dictionary, defined earlier
         "Resources" => resources_id,
-        // a rectangle that defines the boundaries of the physical or digital media. This is the
-        // "Page Size"
         "MediaBox" => vec![0.into(), 0.into(), 600.into(), 850.into()],
     };
-
-    // using insert() here, instead of add_object() since the id is already known.
     doc.objects.insert(pages_id, Object::Dictionary(pages));
-
-    // Creating document catalog.
-    // There are many more entries allowed in the catalog dictionary.
     let catalog_id = doc.add_object(dictionary! {
         "Type" => "Catalog",
         "Pages" => pages_id,
     });
-
-    // Root key in trailer is set here to ID of document catalog,
-    // remainder of trailer is set during doc.save().
     doc.trailer.set("Root", catalog_id);
     doc.compress();
-
-    // Store file in current working directory.
-    let _ = doc.save(path);
+    doc.save(path)
+        .map(|_| ())
+        .map_err(|error| format!("Error writing PDF file '{}': {error}", path.display()))
 }
-
 fn pdf_board_labels(white_at_bottom: bool) -> ([i32; 8], [i32; 8]) {
     if white_at_bottom {
         ([0, 1, 2, 3, 4, 5, 6, 7], [7, 6, 5, 4, 3, 2, 1, 0])
@@ -703,13 +737,14 @@ fn pdf_draw_side_circle(ops: &mut Vec<Operation>, cx: i32, cy: i32, r: i32, whit
     ops.push(Operation::new("Q", vec![]));
 }
 
-fn gen_diagram_operations(index: usize, puzzle: &config::Puzzle, start_x:i32, start_y:i32, _lang: &lang::Language) -> Vec<Operation> {
-    let mut board = Board::from_str(&puzzle.fen).unwrap();
-    let puzzle_moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
-    let movement = ChessMove::new(
-        Square::from_str(&String::from(&puzzle_moves[0][..2])).unwrap(),
-        Square::from_str(&String::from(&puzzle_moves[0][2..4])).unwrap(), PuzzleTab::check_promotion(puzzle_moves[0]));
-    board = board.make_move_new(movement);
+fn gen_diagram_operations(
+    index: usize,
+    puzzle: &config::Puzzle,
+    start_x: i32,
+    start_y: i32,
+    _lang: &lang::Language,
+) -> Result<Vec<Operation>, String> {
+    let board = puzzle_board_after_trigger(puzzle)?;
 
     let white_at_bottom = board.side_to_move() == Color::White;
     let (files, ranks) = pdf_board_labels(white_at_bottom);
@@ -769,7 +804,7 @@ fn gen_diagram_operations(index: usize, puzzle: &config::Puzzle, start_x:i32, st
                 board.color_on(square));
 
             if let Some(piece) = piece {
-                if color.unwrap() == Color::White {
+                if color.ok_or("Board has a piece without a color")? == Color::White {
                     match piece {
                         Piece::Pawn => new_piece = 'P',
                         Piece::Rook => new_piece = 'R',
@@ -779,7 +814,7 @@ fn gen_diagram_operations(index: usize, puzzle: &config::Puzzle, start_x:i32, st
                         Piece::King => new_piece = 'K',
                     }
                     if light_square {
-                        new_piece = new_piece.to_lowercase().collect::<Vec<_>>()[0];
+                        new_piece = new_piece.to_ascii_lowercase();
                     }
                 } else {
                     match piece {
@@ -791,7 +826,7 @@ fn gen_diagram_operations(index: usize, puzzle: &config::Puzzle, start_x:i32, st
                         Piece::Pawn => new_piece = 'O',
                     }
                     if light_square {
-                        new_piece = new_piece.to_lowercase().collect::<Vec<_>>()[0];
+                        new_piece = new_piece.to_ascii_lowercase();
                     }
                 }
             } else if light_square {
@@ -820,12 +855,14 @@ fn gen_diagram_operations(index: usize, puzzle: &config::Puzzle, start_x:i32, st
         ]);
     }
 
-    ops
+    Ok(ops)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PuzzleTab;
+    use std::collections::VecDeque;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/lichess_puzzles_sample.csv");
 
@@ -873,6 +910,12 @@ mod tests {
         let board = Board::default();
         let result = parse_legal_uci_move(&board, "e2");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_legal_uci_move_rejects_non_ascii_without_panicking() {
+        let board = Board::default();
+        assert!(parse_legal_uci_move(&board, "é2e4").is_err());
     }
 
     #[test]
@@ -1671,7 +1714,7 @@ mod tests {
     #[test]
     fn test_pdf_header_no_last_move_text() {
         let puzzle = fixture_puzzle_00010();
-        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English);
+        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let texts = extract_tj_texts(&ops);
         let all_text = texts.join(" ");
         assert!(!all_text.contains("Ultimo"));
@@ -1684,7 +1727,7 @@ mod tests {
     #[test]
     fn test_pdf_header_contains_number() {
         let puzzle = fixture_puzzle_00010();
-        let ops = gen_diagram_operations(42, &puzzle, 750, 75, &lang::Language::English);
+        let ops = gen_diagram_operations(42, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let texts = extract_tj_texts(&ops);
         let all_text = texts.join("");
         assert!(all_text.contains("42"), "Header must contain exercise number '42'");
@@ -1693,7 +1736,7 @@ mod tests {
     #[test]
     fn test_pdf_header_no_trigger_san() {
         let puzzle = fixture_puzzle_00010();
-        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English);
+        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let texts = extract_tj_texts(&ops);
         let all_text = texts.join(" ");
         let trigger_san = {
@@ -1707,7 +1750,7 @@ mod tests {
     #[test]
     fn test_pdf_side_circle_no_eyes_no_mouth() {
         let puzzle = fixture_puzzle_00010();
-        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English);
+        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let has_re = ops.iter().any(|op| op.operator == "re");
         assert!(!has_re, "Side circle must not use 're' (rectangle for eyes)");
         let has_stroke = ops.iter().any(|op| op.operator == "S");
@@ -1723,7 +1766,7 @@ mod tests {
             rating: 0, rating_deviation: 0, popularity: 0, nb_plays: 0,
             themes: String::new(), game_url: String::new(), opening: String::new(),
         };
-        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English);
+        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let texts = extract_tj_texts(&ops);
         let all_text = texts.join("");
         for c in 'a'..='h' {
@@ -1737,7 +1780,7 @@ mod tests {
     #[test]
     fn test_pdf_coordinates_black_at_bottom() {
         let puzzle = fixture_puzzle_00010();
-        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English);
+        let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let texts = extract_tj_texts(&ops);
         let all_text = texts.join("");
         for c in 'a'..='h' {
@@ -2138,5 +2181,187 @@ mod tests {
         let puzzle_number: usize = 41;
         let prefix = format!("{})", puzzle_number + 1);
         assert_eq!(prefix, "42)");
+    }
+
+    fn pdf_test_path(name: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{name}-{}.pdf", std::process::id()))
+    }
+
+    #[test]
+    fn write_pdf_all_exports_the_complete_batch_in_received_order() {
+        let mut batch = vec![fixture_puzzle_00010(); 7];
+        for (index, puzzle) in batch.iter_mut().enumerate() {
+            puzzle.puzzle_id = format!("cms-023j-{index}");
+        }
+
+        let path = pdf_test_path("full-batch");
+        write_pdf_all(&batch, &lang::Language::English, &path).unwrap();
+
+        let document = Document::load(&path).expect("written PDF should be readable");
+        assert_eq!(
+            document.get_pages().len(),
+            3,
+            "7 puzzles need two diagram pages and one solution page"
+        );
+        assert_eq!(editorial_diagram_pages(batch.len()), 2);
+        assert_eq!(
+            batch
+                .iter()
+                .map(|puzzle| puzzle.puzzle_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "cms-023j-0",
+                "cms-023j-1",
+                "cms-023j-2",
+                "cms-023j-3",
+                "cms-023j-4",
+                "cms-023j-5",
+                "cms-023j-6"
+            ]
+        );
+    }
+
+    #[test]
+    fn write_pdf_all_rejects_empty_invalid_and_unwritable_inputs() {
+        let empty = write_pdf_all(&[], &lang::Language::English, &pdf_test_path("empty"));
+        assert!(empty.unwrap_err().contains("empty puzzle set"));
+
+        let mut missing_trigger = fixture_puzzle_00010();
+        missing_trigger.moves.clear();
+        assert!(
+            write_pdf_all(
+                &[missing_trigger],
+                &lang::Language::English,
+                &pdf_test_path("missing-trigger")
+            )
+            .is_err()
+        );
+
+        let mut invalid_fen = fixture_puzzle_00010();
+        invalid_fen.fen = "invalid fen".into();
+        assert!(
+            write_pdf_all(
+                &[invalid_fen],
+                &lang::Language::English,
+                &pdf_test_path("invalid-fen")
+            )
+            .is_err()
+        );
+
+        let mut invalid_trigger = fixture_puzzle_00010();
+        invalid_trigger.moves = "e2e5".into();
+        assert!(
+            write_pdf_all(
+                &[invalid_trigger],
+                &lang::Language::English,
+                &pdf_test_path("invalid-trigger")
+            )
+            .is_err()
+        );
+
+        let mut malformed_trigger = fixture_puzzle_00010();
+        malformed_trigger.moves = "f3g".into();
+        assert!(
+            write_pdf_all(
+                &[malformed_trigger],
+                &lang::Language::English,
+                &pdf_test_path("malformed-trigger")
+            )
+            .is_err()
+        );
+
+        let mut invalid_solution = fixture_puzzle_00010();
+        invalid_solution.moves = "f3g5 a1a1".into();
+        assert!(
+            write_pdf_all(
+                &[invalid_solution],
+                &lang::Language::English,
+                &pdf_test_path("invalid-solution")
+            )
+            .is_err()
+        );
+
+        let mut invalid_promotion = fixture_puzzle_00010();
+        invalid_promotion.moves = "f3g5 e7e8x".into();
+        assert!(
+            write_pdf_all(
+                &[invalid_promotion],
+                &lang::Language::English,
+                &pdf_test_path("invalid-promotion")
+            )
+            .is_err()
+        );
+
+        let mut non_ascii_solution = fixture_puzzle_00010();
+        non_ascii_solution.moves = "f3g5 é2e4".into();
+        assert!(
+            write_pdf_all(
+                &[non_ascii_solution],
+                &lang::Language::English,
+                &pdf_test_path("non-ascii-solution")
+            )
+            .is_err()
+        );
+
+        let missing_parent = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("missing-cms023j-parent-{}", std::process::id()))
+            .join("output.pdf");
+        assert!(
+            write_pdf_all(
+                &[fixture_puzzle_00010()],
+                &lang::Language::English,
+                &missing_parent
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn historical_pdf_keeps_its_page_limited_prefix() {
+        assert_eq!(editorial_diagram_pages(1), 1);
+        assert_eq!(editorial_diagram_pages(6), 1);
+        assert_eq!(editorial_diagram_pages(7), 2);
+        assert_eq!(editorial_diagram_pages(12), 2);
+        let mut puzzles = vec![fixture_puzzle_00010(); 7];
+        for (index, puzzle) in puzzles.iter_mut().enumerate() {
+            puzzle.puzzle_id = format!("ordered-{index}");
+        }
+        let (prefix, pages) = historical_pdf_prefix(&puzzles[..7], 1);
+        assert_eq!(pages, 1);
+        assert_eq!(prefix.len(), 6);
+        assert_eq!(
+            prefix
+                .iter()
+                .map(|puzzle| puzzle.puzzle_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "ordered-0",
+                "ordered-1",
+                "ordered-2",
+                "ordered-3",
+                "ordered-4",
+                "ordered-5"
+            ]
+        );
+
+        let path = pdf_test_path("historical-prefix");
+        to_pdf(
+            &puzzles[..7],
+            1,
+            &lang::Language::English,
+            path.display().to_string(),
+        );
+        let document =
+            Document::load(path).expect("historical wrapper should still write a readable PDF");
+        assert_eq!(
+            document.get_pages().len(),
+            2,
+            "one diagram page plus one solution page"
+        );
     }
 }
