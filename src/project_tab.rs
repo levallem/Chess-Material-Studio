@@ -1,4 +1,4 @@
-use iced::widget::{Button, Column, Container, Scrollable, Text, TextInput};
+use iced::widget::{Button, Column, Container, Scrollable, Text, TextInput, checkbox};
 use iced::{Alignment, Element, Length, Task, alignment};
 use iced_aw::TabLabel;
 use rfd::AsyncFileDialog;
@@ -110,6 +110,7 @@ pub enum ProjectMessage {
     TargetPuzzleCountChanged(String),
     CreateChapter,
     SelectChapter(i32),
+    SetChapterExportSelected { chapter_id: i32, selected: bool },
     LoadSelectedPuzzles,
     ExportProjectPgn,
     ProjectPgnExportFinished(ProjectPgnExportResult),
@@ -129,6 +130,7 @@ pub struct ProjectTab {
     status: String,
     review_cache: Option<CachedPuzzleReview>,
     selected_puzzles_cache: Option<SelectedPuzzlesCache>,
+    export_selected_chapter_ids: HashSet<i32>,
 }
 
 impl ProjectTab {
@@ -143,6 +145,7 @@ impl ProjectTab {
             status: String::new(),
             review_cache: None,
             selected_puzzles_cache: None,
+            export_selected_chapter_ids: HashSet::new(),
         }
     }
 
@@ -178,6 +181,7 @@ impl ProjectTab {
             ProjectMessage::ProjectToOpenChosen(None) => Task::none(),
             ProjectMessage::CloseProject => {
                 self.active_project = None;
+                self.export_selected_chapter_ids.clear();
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
                 self.status.clear();
@@ -201,6 +205,13 @@ impl ProjectTab {
             }
             ProjectMessage::SelectChapter(chapter_id) => {
                 self.select_chapter(chapter_id);
+                Task::none()
+            }
+            ProjectMessage::SetChapterExportSelected {
+                chapter_id,
+                selected,
+            } => {
+                self.set_chapter_export_selected(chapter_id, selected);
                 Task::none()
             }
             ProjectMessage::LoadSelectedPuzzles => self
@@ -300,6 +311,7 @@ impl ProjectTab {
         {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
+                self.export_selected_chapter_ids.clear();
                 self.clear_puzzle_review_cache();
                 self.refresh_selected_puzzles();
                 self.project_name.clear();
@@ -316,6 +328,7 @@ impl ProjectTab {
         {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
+                self.export_selected_chapter_ids.clear();
                 self.clear_puzzle_review_cache();
                 self.refresh_selected_puzzles();
                 self.chapter_name.clear();
@@ -355,6 +368,7 @@ impl ProjectTab {
         ) {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
+                self.reconcile_export_selected_chapter_ids();
                 self.clear_puzzle_review_cache();
                 self.refresh_selected_puzzles();
                 self.chapter_name.clear();
@@ -380,6 +394,62 @@ impl ProjectTab {
             self.clear_puzzle_review_cache();
             self.refresh_selected_puzzles();
         }
+    }
+
+    fn set_chapter_export_selected(&mut self, chapter_id: i32, selected: bool) {
+        let chapter_exists = self.active_project.as_ref().is_some_and(|active_project| {
+            active_project
+                .chapters
+                .iter()
+                .any(|chapter| chapter.id == chapter_id)
+        });
+        if !chapter_exists {
+            return;
+        }
+
+        if selected {
+            self.export_selected_chapter_ids.insert(chapter_id);
+        } else {
+            self.export_selected_chapter_ids.remove(&chapter_id);
+        }
+    }
+
+    fn reconcile_export_selected_chapter_ids(&mut self) {
+        let Some(active_project) = self.active_project.as_ref() else {
+            self.export_selected_chapter_ids.clear();
+            return;
+        };
+        self.export_selected_chapter_ids.retain(|chapter_id| {
+            active_project
+                .chapters
+                .iter()
+                .any(|chapter| chapter.id == *chapter_id)
+        });
+    }
+
+    fn selected_export_chapter_ids(&self) -> &HashSet<i32> {
+        &self.export_selected_chapter_ids
+    }
+
+    fn selected_export_chapter_count(&self) -> usize {
+        self.selected_export_chapter_ids().len()
+    }
+
+    fn export_chapter_selection_rows(&self) -> Vec<(i32, String, bool)> {
+        let Some(active_project) = self.active_project.as_ref() else {
+            return Vec::new();
+        };
+        active_project
+            .chapters
+            .iter()
+            .map(|chapter| {
+                (
+                    chapter.id,
+                    chapter.name.clone(),
+                    self.export_selected_chapter_ids.contains(&chapter.id),
+                )
+            })
+            .collect()
     }
 
     fn active_chapter(&self) -> Option<&ProjectChapter> {
@@ -834,6 +904,17 @@ impl ProjectTab {
             );
         }
 
+        let mut export_chapter_selection = Column::new().spacing(5);
+        for (chapter_id, chapter_name, is_selected) in self.export_chapter_selection_rows() {
+            export_chapter_selection =
+                export_chapter_selection.push(checkbox(is_selected).label(chapter_name).on_toggle(
+                    move |selected| ProjectMessage::SetChapterExportSelected {
+                        chapter_id,
+                        selected,
+                    },
+                ));
+        }
+
         let progress = match (self.active_chapter(), self.selected_count()) {
             (Some(chapter), Some(selected)) => match chapter.target_puzzle_count {
                 Some(target) => format!(
@@ -880,6 +961,16 @@ impl ProjectTab {
             )
             .push(Text::new(lang::tr(&self.lang, "chapters")))
             .push(chapters)
+            .push(Text::new(lang::tr(
+                &self.lang,
+                "select_chapters_for_export",
+            )))
+            .push(export_chapter_selection)
+            .push(Text::new(format!(
+                "{}: {}",
+                lang::tr(&self.lang, "selected_chapters_for_export"),
+                self.selected_export_chapter_count()
+            )))
             .push(Text::new(progress));
 
         if let Some(selected_puzzles) = self.selected_puzzles_content() {
@@ -1016,6 +1107,138 @@ mod tests {
 
         assert!(tab.active_project.is_none());
         assert_eq!(tab.selected_count(), None);
+        assert!(tab.selected_export_chapter_ids().is_empty());
+        assert_eq!(tab.selected_export_chapter_count(), 0);
+    }
+
+    #[test]
+    fn export_chapter_selection_is_validated_and_independent_from_the_active_chapter() {
+        let project = TempProjectDb::new("export-selection");
+        create_project(&project.path, "Selección").unwrap();
+        let first = create_chapter(&project.path, "Primero", None).unwrap();
+        let second = create_chapter(&project.path, "Segundo", None).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let selected_cache_context = tab
+            .selected_puzzles_cache
+            .as_ref()
+            .map(|cache| cache.context.clone());
+        let active_before = tab.active_project.as_ref().unwrap().active_chapter_id;
+        let _ = tab.update(ProjectMessage::SetChapterExportSelected {
+            chapter_id: first.id,
+            selected: true,
+        });
+        let _ = tab.update(ProjectMessage::SetChapterExportSelected {
+            chapter_id: second.id,
+            selected: true,
+        });
+
+        assert_eq!(
+            tab.selected_export_chapter_ids(),
+            &HashSet::from([first.id, second.id])
+        );
+        assert_eq!(tab.selected_export_chapter_count(), 2);
+        assert_eq!(
+            tab.active_project.as_ref().unwrap().active_chapter_id,
+            active_before
+        );
+        assert_eq!(
+            tab.selected_puzzles_cache
+                .as_ref()
+                .map(|cache| cache.context.clone()),
+            selected_cache_context
+        );
+
+        tab.select_chapter(second.id);
+        assert_eq!(
+            tab.active_project.as_ref().unwrap().active_chapter_id,
+            Some(second.id)
+        );
+        assert_eq!(
+            tab.selected_export_chapter_ids(),
+            &HashSet::from([first.id, second.id])
+        );
+
+        let _ = tab.update(ProjectMessage::SetChapterExportSelected {
+            chapter_id: first.id,
+            selected: false,
+        });
+        let _ = tab.update(ProjectMessage::SetChapterExportSelected {
+            chapter_id: 999_999,
+            selected: true,
+        });
+
+        assert_eq!(
+            tab.selected_export_chapter_ids(),
+            &HashSet::from([second.id])
+        );
+        assert_eq!(tab.selected_export_chapter_count(), 1);
+    }
+
+    #[test]
+    fn export_chapter_selection_survives_chapter_creation_and_follows_editorial_order() {
+        let project = TempProjectDb::new("export-selection-create-chapter");
+        create_project(&project.path, "Capítulos").unwrap();
+        let first = create_chapter(&project.path, "Primero", None).unwrap();
+        let second = create_chapter(&project.path, "Segundo", None).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.set_chapter_export_selected(first.id, true);
+
+        tab.chapter_name = "Tercero".into();
+        tab.create_chapter_from_draft();
+
+        let active = tab.active_project.as_ref().unwrap();
+        let third = active.chapters[2].id;
+        assert_eq!(
+            tab.selected_export_chapter_ids(),
+            &HashSet::from([first.id])
+        );
+        assert!(!tab.selected_export_chapter_ids().contains(&third));
+        assert_eq!(
+            tab.export_chapter_selection_rows(),
+            vec![
+                (first.id, "Primero".into(), true),
+                (second.id, "Segundo".into(), false),
+                (third, "Tercero".into(), false)
+            ]
+        );
+
+        tab.export_selected_chapter_ids.insert(999_999);
+        tab.reconcile_export_selected_chapter_ids();
+        assert_eq!(
+            tab.selected_export_chapter_ids(),
+            &HashSet::from([first.id])
+        );
+    }
+
+    #[test]
+    fn export_chapter_selection_is_cleared_for_project_lifecycle_boundaries() {
+        let first_project = TempProjectDb::new("export-selection-first-project");
+        create_project(&first_project.path, "Primero").unwrap();
+        let first_chapter = create_chapter(&first_project.path, "Uno", None).unwrap();
+        let second_project = TempProjectDb::new("export-selection-second-project");
+        create_project(&second_project.path, "Segundo").unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&first_project.path);
+        tab.set_chapter_export_selected(first_chapter.id, true);
+
+        let _ = tab.update(ProjectMessage::CloseProject);
+        assert!(tab.selected_export_chapter_ids().is_empty());
+
+        tab.open_project_path(&first_project.path);
+        tab.set_chapter_export_selected(first_chapter.id, true);
+        tab.open_project_path(&second_project.path);
+        assert!(tab.selected_export_chapter_ids().is_empty());
+
+        tab.open_project_path(&first_project.path);
+        tab.set_chapter_export_selected(first_chapter.id, true);
+        let new_project = TempProjectDb::new("export-selection-new-project");
+        tab.project_name = "Nuevo".into();
+        tab.new_project_path = Some(new_project.path.clone());
+        tab.create_project_from_draft();
+        assert!(tab.selected_export_chapter_ids().is_empty());
     }
 
     #[test]
@@ -1858,7 +2081,7 @@ mod tests {
 
     #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 46] = [
+        const PROJECT_KEYS: [&str; 48] = [
             "project",
             "new_project",
             "project_name",
@@ -1869,6 +2092,8 @@ mod tests {
             "open_project",
             "close_project",
             "chapters",
+            "select_chapters_for_export",
+            "selected_chapters_for_export",
             "active_chapter",
             "new_chapter",
             "chapter_name",
