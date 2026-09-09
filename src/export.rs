@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::path::Path;
 use std::str::FromStr;
 use lopdf::dictionary;
 use lopdf::{Document, Object, Stream};
@@ -334,17 +335,17 @@ fn build_pgn_content(
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
-pub fn to_pgn(puzzles: &[config::Puzzle], _lang: &lang::Language, path: String) {
+pub fn write_pgn(puzzles: &[config::Puzzle], path: &Path) -> Result<(), String> {
     let date = chrono::Local::now().format("%Y.%m.%d").to_string();
-    match build_pgn_content(puzzles, &date) {
-        Ok(content) => {
-            if let Err(e) = std::fs::write(&path, &content) {
-                eprintln!("Error writing PGN file '{}': {}", path, e);
-            }
-        }
-        Err(e) => {
-            eprintln!("Error building PGN content: {}", e);
-        }
+    let content = build_pgn_content(puzzles, &date)
+        .map_err(|error| format!("Error building PGN content: {error}"))?;
+    std::fs::write(path, content)
+        .map_err(|error| format!("Error writing PGN file '{}': {error}", path.display()))
+}
+
+pub fn to_pgn(puzzles: &[config::Puzzle], _lang: &lang::Language, path: String) {
+    if let Err(error) = write_pgn(puzzles, Path::new(&path)) {
+        eprintln!("{error}");
     }
 }
 
@@ -1455,7 +1456,46 @@ mod tests {
         assert!(move_text.trim_end().ends_with("*"), "Should end with '*'");
     }
 
-    // ── to_pgn file write test ──
+    // ── PGN file write tests ──
+
+    #[test]
+    fn test_write_pgn_writes_games_in_received_order() {
+        let mut puzzles = read_fixture_puzzles();
+        puzzles[0].puzzle_id = "first-in-slice".into();
+        puzzles[1].puzzle_id = "second-in-slice".into();
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("cms023i_write_{}.pgn", std::process::id()));
+
+        write_pgn(&puzzles, &path).expect("valid puzzle slice should be exported");
+
+        let content = std::fs::read_to_string(&path).expect("PGN file should exist");
+        assert_eq!(
+            content.matches("[Event \"Chess Puzzle\"]").count(),
+            puzzles.len()
+        );
+        assert!(content.find("first-in-slice").unwrap() < content.find("second-in-slice").unwrap());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_write_pgn_propagates_build_and_write_errors() {
+        let mut invalid = fixture_puzzle_00010();
+        invalid.moves.clear();
+        let target = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp")
+            .join(format!("invalid-{}.pgn", std::process::id()));
+        assert!(write_pgn(&[invalid], &target).is_err());
+
+        let unwritable = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("missing-cms023i-parent-{}", std::process::id()))
+            .join("output.pgn");
+        assert!(write_pgn(&[fixture_puzzle_00010()], &unwritable).is_err());
+    }
 
     #[test]
     fn test_to_pgn_writes_file_correctly() {

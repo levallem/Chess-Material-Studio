@@ -64,6 +64,12 @@ struct SelectedPuzzlesCache {
     state: CachedSelectedPuzzles,
 }
 
+#[derive(Debug, Clone)]
+pub enum SelectedPuzzlesPgnExportResult {
+    Cancelled,
+    Finished(Result<(), String>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PuzzleReviewView {
     pub chapter_name: String,
@@ -86,6 +92,8 @@ pub enum ProjectMessage {
     CreateChapter,
     SelectChapter(i32),
     LoadSelectedPuzzles,
+    ExportSelectedPuzzlesPgn,
+    SelectedPuzzlesPgnExportFinished(SelectedPuzzlesPgnExportResult),
 }
 
 pub struct ProjectTab {
@@ -177,6 +185,18 @@ impl ProjectTab {
                 .map(Message::LoadProjectPuzzles)
                 .map(Task::done)
                 .unwrap_or_else(Task::none),
+            ProjectMessage::ExportSelectedPuzzlesPgn => self
+                .selected_puzzle_export_batch()
+                .map(|puzzles| {
+                    Task::perform(Self::export_selected_puzzles_pgn(puzzles), |result| {
+                        Message::Project(ProjectMessage::SelectedPuzzlesPgnExportFinished(result))
+                    })
+                })
+                .unwrap_or_else(Task::none),
+            ProjectMessage::SelectedPuzzlesPgnExportFinished(result) => {
+                self.apply_selected_puzzles_pgn_export_result(result);
+                Task::none()
+            }
         }
     }
 
@@ -317,6 +337,22 @@ impl ProjectTab {
 
     fn selected_count(&self) -> Option<usize> {
         self.selected_puzzles().map(|puzzles| puzzles.len())
+    }
+
+    async fn export_selected_puzzles_pgn(
+        puzzles: Vec<crate::config::Puzzle>,
+    ) -> SelectedPuzzlesPgnExportResult {
+        let Some(path) = AsyncFileDialog::new()
+            .add_filter("PGN", &["pgn"])
+            .set_file_name("chapter.pgn")
+            .save_file()
+            .await
+            .map(|file| file.path().to_path_buf())
+        else {
+            return SelectedPuzzlesPgnExportResult::Cancelled;
+        };
+
+        SelectedPuzzlesPgnExportResult::Finished(crate::export::write_pgn(&puzzles, &path))
     }
 
     pub fn reviewed_puzzle_ids_for_active_chapter(
@@ -488,6 +524,25 @@ impl ProjectTab {
     fn selected_puzzle_load_batch(&self) -> Option<Vec<crate::config::Puzzle>> {
         let puzzles = self.selected_puzzles()?;
         (!puzzles.is_empty()).then(|| puzzles.iter().map(app_puzzle).collect())
+    }
+
+    fn selected_puzzle_export_batch(&self) -> Option<Vec<crate::config::Puzzle>> {
+        self.selected_puzzle_load_batch()
+    }
+
+    fn apply_selected_puzzles_pgn_export_result(&mut self, result: SelectedPuzzlesPgnExportResult) {
+        match result {
+            SelectedPuzzlesPgnExportResult::Cancelled => {}
+            SelectedPuzzlesPgnExportResult::Finished(Ok(())) => {
+                self.status = lang::tr(&self.lang, "chapter_pgn_exported");
+            }
+            SelectedPuzzlesPgnExportResult::Finished(Err(error)) => {
+                self.status = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "chapter_pgn_export_failed")
+                );
+            }
+        }
     }
 
     fn selected_puzzles_error(&self) -> Option<&str> {
@@ -731,11 +786,19 @@ impl ProjectTab {
                     puzzle.themes,
                 )));
             }
-            return Some(content.push(
-                Button::new(Text::new(lang::tr(&self.lang, "load_selected_puzzles")))
-                    .on_press(ProjectMessage::LoadSelectedPuzzles)
-                    .style(btn_style_simple),
-            ));
+            return Some(
+                content
+                    .push(
+                        Button::new(Text::new(lang::tr(&self.lang, "load_selected_puzzles")))
+                            .on_press(ProjectMessage::LoadSelectedPuzzles)
+                            .style(btn_style_simple),
+                    )
+                    .push(
+                        Button::new(Text::new(lang::tr(&self.lang, "export_chapter_to_pgn")))
+                            .on_press(ProjectMessage::ExportSelectedPuzzlesPgn)
+                            .style(btn_style_simple),
+                    ),
+            );
         }
 
         Some(content.push(Text::new(
@@ -1003,6 +1066,108 @@ mod tests {
 
         assert!(tab.selected_puzzle_load_batch().is_none());
         assert!(tab.selected_puzzles_error().is_some());
+    }
+
+    #[test]
+    fn selected_puzzle_export_batch_requires_a_current_nonempty_loaded_cache() {
+        let project = TempProjectDb::new("selected-export-unavailable");
+        create_project(&project.path, "Exportación").unwrap();
+        let chapter = create_chapter(&project.path, "Vacío", None).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        assert!(tab.selected_puzzle_export_batch().is_none());
+
+        let puzzle = sample_puzzle();
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &project_puzzle(&puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        tab.refresh_selected_puzzles();
+        assert_eq!(
+            tab.selected_puzzle_export_batch().unwrap()[0].puzzle_id,
+            puzzle.puzzle_id
+        );
+
+        tab.selected_puzzles_cache
+            .as_mut()
+            .unwrap()
+            .context
+            .chapter_id += 1;
+        assert!(tab.selected_puzzle_export_batch().is_none());
+
+        tab.selected_puzzles_cache
+            .as_mut()
+            .unwrap()
+            .context
+            .chapter_id = chapter.id;
+        tab.selected_puzzles_cache.as_mut().unwrap().state = CachedSelectedPuzzles::Failed {
+            status: "Selected puzzles unavailable".into(),
+        };
+        assert!(tab.selected_puzzle_export_batch().is_none());
+    }
+
+    #[test]
+    fn selected_puzzle_export_batch_captures_adapter_order_and_result_status() {
+        let project = TempProjectDb::new("selected-export-snapshot");
+        create_project(&project.path, "Exportación").unwrap();
+        let first_chapter = create_chapter(&project.path, "Primero", None).unwrap();
+        let second_chapter = create_chapter(&project.path, "Segundo", None).unwrap();
+        let mut first = sample_puzzle();
+        first.puzzle_id = "cms-023i-first".into();
+        let mut second = sample_puzzle();
+        second.puzzle_id = "cms-023i-second".into();
+        set_puzzle_decision(
+            &project.path,
+            first_chapter.id,
+            &project_puzzle(&first),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &project.path,
+            first_chapter.id,
+            &project_puzzle(&second),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let snapshot = tab.selected_puzzle_export_batch().unwrap();
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|puzzle| puzzle.puzzle_id.as_str())
+                .collect::<Vec<_>>(),
+            ["cms-023i-first", "cms-023i-second"]
+        );
+        assert_eq!(snapshot[0].fen, first.fen);
+        assert_eq!(snapshot[0].opening, first.opening);
+
+        tab.select_chapter(second_chapter.id);
+        assert_eq!(snapshot[0].puzzle_id, "cms-023i-first");
+        tab.status = "existing status".into();
+        tab.apply_selected_puzzles_pgn_export_result(SelectedPuzzlesPgnExportResult::Cancelled);
+        assert_eq!(tab.status, "existing status");
+        tab.apply_selected_puzzles_pgn_export_result(SelectedPuzzlesPgnExportResult::Finished(Ok(
+            (),
+        )));
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "chapter_pgn_exported"))
+        );
+        tab.apply_selected_puzzles_pgn_export_result(SelectedPuzzlesPgnExportResult::Finished(
+            Err("disk full".into()),
+        ));
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "chapter_pgn_export_failed"))
+        );
+        assert!(tab.status.contains("disk full"));
     }
 
     #[test]
@@ -1433,7 +1598,7 @@ mod tests {
 
     #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 36] = [
+        const PROJECT_KEYS: [&str; 39] = [
             "project",
             "new_project",
             "project_name",
@@ -1461,6 +1626,9 @@ mod tests {
             "no_selected_puzzles",
             "selected_puzzles_error",
             "load_selected_puzzles",
+            "export_chapter_to_pgn",
+            "chapter_pgn_exported",
+            "chapter_pgn_export_failed",
             "review_status",
             "unreviewed",
             "discarded",
