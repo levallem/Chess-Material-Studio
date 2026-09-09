@@ -85,6 +85,7 @@ pub enum ProjectMessage {
     TargetPuzzleCountChanged(String),
     CreateChapter,
     SelectChapter(i32),
+    LoadSelectedPuzzles,
 }
 
 pub struct ProjectTab {
@@ -171,6 +172,11 @@ impl ProjectTab {
                 self.select_chapter(chapter_id);
                 Task::none()
             }
+            ProjectMessage::LoadSelectedPuzzles => self
+                .selected_puzzle_load_batch()
+                .map(Message::LoadProjectPuzzles)
+                .map(Task::done)
+                .unwrap_or_else(Task::none),
         }
     }
 
@@ -479,6 +485,11 @@ impl ProjectTab {
         }
     }
 
+    fn selected_puzzle_load_batch(&self) -> Option<Vec<crate::config::Puzzle>> {
+        let puzzles = self.selected_puzzles()?;
+        (!puzzles.is_empty()).then(|| puzzles.iter().map(app_puzzle).collect())
+    }
+
     fn selected_puzzles_error(&self) -> Option<&str> {
         let context = self.selected_puzzles_context()?;
         let cache = self.selected_puzzles_cache.as_ref()?;
@@ -506,6 +517,14 @@ fn load_active_project(path: PathBuf, metadata: ProjectMetadata) -> Result<Activ
 
 fn project_puzzle(puzzle: &Puzzle) -> chess_material_studio::models::Puzzle {
     chess_material_studio::models::Puzzle {
+        puzzle_id: puzzle.puzzle_id.clone(), fen: puzzle.fen.clone(), moves: puzzle.moves.clone(),
+        rating: puzzle.rating, rating_deviation: puzzle.rating_deviation, popularity: puzzle.popularity,
+        nb_plays: puzzle.nb_plays, themes: puzzle.themes.clone(), game_url: puzzle.game_url.clone(), opening: puzzle.opening.clone(),
+    }
+}
+
+fn app_puzzle(puzzle: &chess_material_studio::models::Puzzle) -> crate::config::Puzzle {
+    crate::config::Puzzle {
         puzzle_id: puzzle.puzzle_id.clone(), fen: puzzle.fen.clone(), moves: puzzle.moves.clone(),
         rating: puzzle.rating, rating_deviation: puzzle.rating_deviation, popularity: puzzle.popularity,
         nb_plays: puzzle.nb_plays, themes: puzzle.themes.clone(), game_url: puzzle.game_url.clone(), opening: puzzle.opening.clone(),
@@ -712,7 +731,11 @@ impl ProjectTab {
                     puzzle.themes,
                 )));
             }
-            return Some(content);
+            return Some(content.push(
+                Button::new(Text::new(lang::tr(&self.lang, "load_selected_puzzles")))
+                    .on_press(ProjectMessage::LoadSelectedPuzzles)
+                    .style(btn_style_simple),
+            ));
         }
 
         Some(content.push(Text::new(
@@ -931,6 +954,91 @@ mod tests {
         assert_eq!(selected_puzzles[0].opening, selected.opening);
         assert_eq!(selected_puzzles[1].puzzle_id, second_selected.puzzle_id);
         assert_eq!(tab.selected_count(), Some(2));
+    }
+
+    #[test]
+    fn selected_puzzle_load_batch_adapts_every_field_and_preserves_cache_order() {
+        let project = TempProjectDb::new("selected-load-batch");
+        create_project(&project.path, "Selección").unwrap();
+        let chapter = create_chapter(&project.path, "Ataques", None).unwrap();
+        let mut first = sample_puzzle();
+        first.puzzle_id = "cms-023h-first".into();
+        first.opening = "Sicilian Defense".into();
+        let mut second = sample_puzzle();
+        second.puzzle_id = "cms-023h-second".into();
+        second.rating = 1800;
+        set_puzzle_decision(&project.path, chapter.id, &project_puzzle(&first), ProjectPuzzleDecision::Selected).unwrap();
+        set_puzzle_decision(&project.path, chapter.id, &project_puzzle(&second), ProjectPuzzleDecision::Selected).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let batch = tab.selected_puzzle_load_batch().unwrap();
+
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].puzzle_id, first.puzzle_id);
+        assert_eq!(batch[0].fen, first.fen);
+        assert_eq!(batch[0].moves, first.moves);
+        assert_eq!(batch[0].rating, first.rating);
+        assert_eq!(batch[0].rating_deviation, first.rating_deviation);
+        assert_eq!(batch[0].popularity, first.popularity);
+        assert_eq!(batch[0].nb_plays, first.nb_plays);
+        assert_eq!(batch[0].themes, first.themes);
+        assert_eq!(batch[0].game_url, first.game_url);
+        assert_eq!(batch[0].opening, first.opening);
+        assert_eq!(batch[1].puzzle_id, second.puzzle_id);
+    }
+
+    #[test]
+    fn selected_puzzle_load_batch_is_unavailable_for_empty_or_failed_cache() {
+        let project = TempProjectDb::new("selected-load-unavailable");
+        create_project(&project.path, "Selección").unwrap();
+        let chapter = create_chapter(&project.path, "Vacío", None).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        assert_eq!(tab.active_project.as_ref().unwrap().active_chapter_id, Some(chapter.id));
+        assert!(tab.selected_puzzle_load_batch().is_none());
+
+        std::fs::remove_file(&project.path).unwrap();
+        tab.refresh_selected_puzzles();
+
+        assert!(tab.selected_puzzle_load_batch().is_none());
+        assert!(tab.selected_puzzles_error().is_some());
+    }
+
+    #[test]
+    fn selected_puzzle_load_batch_is_unavailable_for_a_stale_cache_context() {
+        let project = TempProjectDb::new("selected-load-stale-context");
+        create_project(&project.path, "Selección").unwrap();
+        let chapter = create_chapter(&project.path, "Actual", None).unwrap();
+        let stale_chapter = create_chapter(&project.path, "Obsoleto", None).unwrap();
+        let puzzle = sample_puzzle();
+        set_puzzle_decision(&project.path, chapter.id, &project_puzzle(&puzzle), ProjectPuzzleDecision::Selected).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.selected_puzzles_cache.as_mut().unwrap().context.chapter_id = stale_chapter.id;
+
+        assert!(tab.selected_puzzle_load_batch().is_none());
+    }
+
+    #[test]
+    fn selected_puzzle_load_batch_uses_the_new_active_chapter_cache() {
+        let project = TempProjectDb::new("selected-load-active-chapter");
+        create_project(&project.path, "Selección").unwrap();
+        let first_chapter = create_chapter(&project.path, "Primero", None).unwrap();
+        let second_chapter = create_chapter(&project.path, "Segundo", None).unwrap();
+        let mut first = sample_puzzle();
+        first.puzzle_id = "cms-023h-first-chapter".into();
+        let mut second = sample_puzzle();
+        second.puzzle_id = "cms-023h-second-chapter".into();
+        set_puzzle_decision(&project.path, first_chapter.id, &project_puzzle(&first), ProjectPuzzleDecision::Selected).unwrap();
+        set_puzzle_decision(&project.path, second_chapter.id, &project_puzzle(&second), ProjectPuzzleDecision::Selected).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.select_chapter(second_chapter.id);
+
+        let batch = tab.selected_puzzle_load_batch().unwrap();
+
+        assert_eq!(batch.iter().map(|puzzle| puzzle.puzzle_id.as_str()).collect::<Vec<_>>(), vec![second.puzzle_id.as_str()]);
     }
 
     #[test]
@@ -1325,7 +1433,7 @@ mod tests {
 
     #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 35] = [
+        const PROJECT_KEYS: [&str; 36] = [
             "project",
             "new_project",
             "project_name",
@@ -1352,6 +1460,7 @@ mod tests {
             "selected_puzzles",
             "no_selected_puzzles",
             "selected_puzzles_error",
+            "load_selected_puzzles",
             "review_status",
             "unreviewed",
             "discarded",

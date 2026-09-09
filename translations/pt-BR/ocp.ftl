@@ -74,6 +74,7 @@ no_active_chapter = Nenhum capítulo ativo.
 selected_puzzles = Quebra-cabeças selecionados
 no_selected_puzzles = Não há quebra-cabeças selecionados neste capítulo.
 selected_puzzles_error = Os quebra-cabeças selecionados não estão disponíveis
+load_selected_puzzles = Carregar quebra-cabeças selecionados
 review_status = Status da revisão
 unreviewed = Não revisado
 select_puzzle = Selecionar problema

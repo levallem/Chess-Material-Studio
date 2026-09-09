@@ -115,6 +115,7 @@ pub enum Message {
     SaveScreenshot(Option<(Screenshot, String)>),
     ExportPDF(Option<String>),
     LoadPuzzle(Option<Vec<config::Puzzle>>),
+    LoadProjectPuzzles(Vec<config::Puzzle>),
     ExportPGN(Option<String>),
     ChangeSettings(Option<config::OfflinePuzzlesConfig>),
     EventOccurred(iced::Event),
@@ -493,6 +494,16 @@ impl OfflinePuzzles {
         self.refresh_current_puzzle_review();
     }
 
+    fn replace_puzzle_batch(&mut self, mut puzzles: Vec<config::Puzzle>, shuffle: bool) {
+        if shuffle {
+            puzzles.shuffle(&mut rng());
+        }
+        self.puzzle_tab.puzzles = puzzles;
+        self.puzzle_tab.current_puzzle = 0;
+        self.puzzle_number_ui = String::from("1");
+        self.load_puzzle(false);
+    }
+
     fn current_reviewable_puzzle(&self) -> Option<&config::Puzzle> {
         (self.puzzle_tab.game_status != GameStatus::NoPuzzles)
             .then(|| self.puzzle_tab.puzzles.get(self.puzzle_tab.current_puzzle))
@@ -606,6 +617,18 @@ impl OfflinePuzzles {
             } (_, Message::RedoPuzzle) => {
                 self.load_puzzle(false);
                 Task::none()
+            } (_, Message::LoadProjectPuzzles(puzzles_vec)) => {
+                if puzzles_vec.is_empty() {
+                    return Task::none();
+                }
+                self.from_square = None;
+                self.game_mode = config::GameMode::Puzzle;
+                if self.engine_state != EngineStatus::TurnedOff
+                    && let Some(sender) = &self.engine_sender {
+                        sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
+                }
+                self.replace_puzzle_batch(puzzles_vec, false);
+                Task::none()
             } (_, Message::LoadPuzzle(puzzles_vec)) => {
                 self.from_square = None;
                 self.search_tab.show_searching_msg = false;
@@ -616,11 +639,7 @@ impl OfflinePuzzles {
                 }
                 if let Some(puzzles_vec) = puzzles_vec {
                     if !puzzles_vec.is_empty() {
-                        self.puzzle_tab.puzzles = puzzles_vec;
-                        self.puzzle_tab.puzzles.shuffle(&mut rng());
-                        self.puzzle_tab.current_puzzle = 0;
-                        self.puzzle_number_ui = String::from("1");
-                        self.load_puzzle(false);
+                        self.replace_puzzle_batch(puzzles_vec, true);
                     } else {
                         // Just putting the default position to make it obvious the search ended.
                         self.board = Board::default();
@@ -1185,6 +1204,85 @@ mod tests {
         let _ = app.update(Message::PuzzleInputIndexChange("3".into()));
         let _ = app.update(Message::JumpToPuzzle);
         assert_current_review(&app, "cms-023e-third", ProjectPuzzleDecision::Discarded);
+    }
+
+    #[test]
+    fn project_puzzle_batch_preserves_order_initializes_the_board_and_refreshes_review() {
+        let project = TempProjectDb::new("project-load-batch");
+        create_project(&project.path, "Proyecto").unwrap();
+        let chapter = create_chapter(&project.path, "Capítulo", None).unwrap();
+        let puzzles = vec![
+            navigation_puzzle("cms-023h-first"),
+            navigation_puzzle("cms-023h-second"),
+            navigation_puzzle("cms-023h-third"),
+        ];
+        for puzzle in &puzzles {
+            set_puzzle_decision(&project.path, chapter.id, &persistent_puzzle(puzzle), ProjectPuzzleDecision::Selected).unwrap();
+        }
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(project.path.clone()))));
+
+        let _ = app.update(Message::LoadProjectPuzzles(puzzles.clone()));
+
+        assert_eq!(app.puzzle_tab.puzzles.iter().map(|puzzle| puzzle.puzzle_id.as_str()).collect::<Vec<_>>(), vec!["cms-023h-first", "cms-023h-second", "cms-023h-third"]);
+        assert_eq!(app.puzzle_tab.current_puzzle, 0);
+        assert_eq!(app.puzzle_number_ui, "1");
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert_eq!(app.board, Board::from_str(&puzzles[0].fen).unwrap().make_move_new(ChessMove::new(Square::A1, Square::A2, None)));
+        assert_current_review(&app, "cms-023h-first", ProjectPuzzleDecision::Selected);
+
+        let _ = app.update(Message::ShowNextPuzzle);
+        assert_current_review(&app, "cms-023h-second", ProjectPuzzleDecision::Selected);
+        let _ = app.update(Message::ShowPreviousPuzzle);
+        assert_current_review(&app, "cms-023h-first", ProjectPuzzleDecision::Selected);
+        let _ = app.update(Message::PuzzleInputIndexChange("3".into()));
+        let _ = app.update(Message::JumpToPuzzle);
+        assert_current_review(&app, "cms-023h-third", ProjectPuzzleDecision::Selected);
+    }
+
+    #[test]
+    fn empty_project_puzzle_batch_keeps_the_loaded_snapshot_stable() {
+        let mut app = OfflinePuzzles::new(false);
+        let loaded = navigation_puzzle("cms-023h-existing");
+        app.puzzle_tab.puzzles = vec![loaded.clone()];
+        app.puzzle_tab.current_puzzle = 0;
+        app.load_puzzle(false);
+        let board = app.board;
+
+        let _ = app.update(Message::LoadProjectPuzzles(Vec::new()));
+
+        assert_eq!(app.puzzle_tab.puzzles.len(), 1);
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, loaded.puzzle_id);
+        assert_eq!(app.puzzle_tab.current_puzzle, 0);
+        assert_eq!(app.board, board);
+    }
+
+    #[test]
+    fn review_mutation_does_not_remove_a_loaded_project_snapshot() {
+        let project = TempProjectDb::new("project-load-mutation");
+        create_project(&project.path, "Proyecto").unwrap();
+        let chapter = create_chapter(&project.path, "Capítulo", None).unwrap();
+        let puzzles = vec![navigation_puzzle("cms-023h-mutation-first"), navigation_puzzle("cms-023h-mutation-second")];
+        for puzzle in &puzzles {
+            set_puzzle_decision(&project.path, chapter.id, &persistent_puzzle(puzzle), ProjectPuzzleDecision::Selected).unwrap();
+        }
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(project.path.clone()))));
+        let _ = app.update(Message::LoadProjectPuzzles(puzzles.clone()));
+
+        let _ = app.update(Message::SetPuzzleReview(ProjectPuzzleDecision::Discarded));
+
+        assert_eq!(app.puzzle_tab.puzzles.len(), puzzles.len());
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, puzzles[0].puzzle_id);
+        assert_eq!(app.puzzle_tab.puzzles[1].puzzle_id, puzzles[1].puzzle_id);
+        assert_current_review(&app, "cms-023h-mutation-first", ProjectPuzzleDecision::Discarded);
+
+        let _ = app.update(Message::ClearPuzzleReview);
+
+        assert_eq!(app.puzzle_tab.puzzles.len(), puzzles.len());
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, puzzles[0].puzzle_id);
+        assert_eq!(app.puzzle_tab.puzzles[1].puzzle_id, puzzles[1].puzzle_id);
+        assert_eq!(app.project_tab.review_view().unwrap().decision, None);
     }
 
     #[test]

@@ -77,6 +77,7 @@ no_active_chapter = 没有当前章节。
 selected_puzzles = 已选谜题
 no_selected_puzzles = 此章节没有已选谜题。
 selected_puzzles_error = 已选谜题不可用
+load_selected_puzzles = 加载已选谜题
 review_status = 审核状态
 unreviewed = 未审核
 select_puzzle = 选择谜题

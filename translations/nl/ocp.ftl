@@ -74,6 +74,7 @@ no_active_chapter = Geen actief hoofdstuk.
 selected_puzzles = Geselecteerde puzzels
 no_selected_puzzles = Geen geselecteerde puzzels in dit hoofdstuk.
 selected_puzzles_error = Geselecteerde puzzels niet beschikbaar
+load_selected_puzzles = Geselecteerde puzzels laden
 review_status = Beoordelingsstatus
 unreviewed = Niet beoordeeld
 select_puzzle = Puzzel selecteren

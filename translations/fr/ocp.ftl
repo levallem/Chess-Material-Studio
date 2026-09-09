@@ -76,6 +76,7 @@ no_active_chapter = Aucun chapitre actif.
 selected_puzzles = Puzzles sélectionnés
 no_selected_puzzles = Aucun puzzle sélectionné dans ce chapitre.
 selected_puzzles_error = Puzzles sélectionnés indisponibles
+load_selected_puzzles = Charger les puzzles sélectionnés
 review_status = État de révision
 unreviewed = Non révisé
 select_puzzle = Sélectionner le puzzle
