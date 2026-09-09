@@ -1,5 +1,6 @@
 use crate::{styles, search_tab::TacticalThemes, search_tab::OpeningSide, lang, openings::{Openings, Variation}};
 use chess::{Board, ChessMove, Piece, Square};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use iced::Font;
@@ -80,7 +81,7 @@ impl ::std::default::Default for OfflinePuzzlesConfig {
             maximized: false,
             puzzle_db_location: String::from(PUZZLES_DIRECTORY) + "lichess_db_puzzle.csv",
             piece_theme: styles::PieceTheme::Cburnett,
-            search_results_limit: 20000,
+            search_results_limit: 100,
             play_sound: true,
             auto_load_next: true,
             flip_board: false,
@@ -109,8 +110,12 @@ pub fn puzzle_source_exists(config: &OfflinePuzzlesConfig) -> bool {
 }
 
 pub fn load_config() -> OfflinePuzzlesConfig {
+    load_config_from_path(Path::new(SETTINGS_FILE))
+}
+
+pub fn load_config_from_path(path: &Path) -> OfflinePuzzlesConfig {
     let config;
-    let file = std::fs::File::open(SETTINGS_FILE);
+    let file = std::fs::File::open(path);
     match file {
         Ok(file) => {
             let reader = std::io::BufReader::new(file);
@@ -436,6 +441,32 @@ mod tests {
     fn test_default_puzzle_sqlite_location_is_none() {
         let config = OfflinePuzzlesConfig::default();
         assert_eq!(config.puzzle_sqlite_location, None);
+    }
+
+    #[test]
+    fn default_search_results_limit_is_100() {
+        assert_eq!(OfflinePuzzlesConfig::default().search_results_limit, 100);
+    }
+
+    #[test]
+    fn missing_config_path_loads_defaults() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp")
+            .join(format!(
+                "missing_settings_{}_{}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock should be after UNIX epoch")
+                    .as_nanos(),
+            ));
+
+        assert!(!path.exists(), "the test configuration path must not exist");
+        let config = load_config_from_path(&path);
+
+        assert_eq!(config.search_results_limit, 100);
+        assert_eq!(config.engine_limit, "depth 40");
     }
 
     #[test]

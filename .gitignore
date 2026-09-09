@@ -1,5 +1,6 @@
 /target
 /puzzles/lichess_db_puzzle.csv
+/settings.json
 .vscode/
 ocp.db
 

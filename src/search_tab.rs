@@ -2,13 +2,12 @@ use iced::widget::svg::Handle;
 use iced::widget::{Container, Button, column as col, Text, Radio, row, Row, Svg, PickList, Slider, Scrollable, Space};
 use iced::widget::text::LineHeight;
 use iced::{alignment, Alignment, Element, Length, Task, Theme};
-use std::io::BufReader;
 use std::path::Path;
 
 use diesel::Connection;
 use iced_aw::TabLabel;
 use chess::{Piece, PROMOTION_PIECES};
-use crate::config::{load_config, SETTINGS_FILE, PIECES_DIRECTORY};
+use crate::config::{load_config, load_config_from_path, SETTINGS_FILE, PIECES_DIRECTORY};
 use crate::styles::{PieceTheme, btn_style_simple};
 use crate::{Tab, Message, config, styles, lang, db, openings};
 
@@ -506,23 +505,40 @@ impl SearchTab {
     }
 
     pub fn save_search_settings(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation: Variation, op_side: Option<OpeningSide>) {
-        let file = std::fs::File::open(SETTINGS_FILE);
-        if let Ok(file) = file {
-            let buf_reader = BufReader::new(file);
-            if let Ok(mut config) = serde_json::from_reader::<std::io::BufReader<std::fs::File>, config::OfflinePuzzlesConfig>(buf_reader) {
-                config.last_min_rating = min_rating;
-                config.last_max_rating = max_rating;
-                config.last_min_popularity = min_popularity;
-                config.last_theme = theme;
-                config.last_opening = opening;
-                config.last_variation = variation;
-                config.last_opening_side = op_side;
+        Self::save_search_settings_to_path(
+            Path::new(SETTINGS_FILE),
+            min_rating,
+            max_rating,
+            min_popularity,
+            theme,
+            opening,
+            variation,
+            op_side,
+        );
+    }
 
-                let file = std::fs::File::create(SETTINGS_FILE);
-                if let Ok(file) = file && serde_json::to_writer_pretty(file, &config).is_err() {
-                    println!("Error saving search options.");
-                }
-            }
+    fn save_search_settings_to_path(
+        path: &Path,
+        min_rating: i32,
+        max_rating: i32,
+        min_popularity: i32,
+        theme: TacticalThemes,
+        opening: Openings,
+        variation: Variation,
+        op_side: Option<OpeningSide>,
+    ) {
+        let mut config = load_config_from_path(path);
+        config.last_min_rating = min_rating;
+        config.last_max_rating = max_rating;
+        config.last_min_popularity = min_popularity;
+        config.last_theme = theme;
+        config.last_opening = opening;
+        config.last_variation = variation;
+        config.last_opening_side = op_side;
+
+        let file = std::fs::File::create(path);
+        if let Ok(file) = file && serde_json::to_writer_pretty(file, &config).is_err() {
+            println!("Error saving search options.");
         }
     }
 
@@ -732,6 +748,77 @@ mod tests {
 
     fn cleanup(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_search_settings_creates_missing_config_from_defaults() {
+        let path = tmp_path("search_settings_missing.json");
+
+        SearchTab::save_search_settings_to_path(
+            &path,
+            1200,
+            2200,
+            42,
+            TacticalThemes::All,
+            Openings::Any,
+            Variation::ANY.clone(),
+            Some(OpeningSide::Any),
+        );
+
+        let config = config::load_config_from_path(&path);
+        assert_eq!(config.search_results_limit, 100);
+        assert_eq!(config.engine_limit, "depth 40");
+        assert_eq!(config.last_min_rating, 1200);
+        assert_eq!(config.last_max_rating, 2200);
+        assert_eq!(config.last_min_popularity, 42);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn save_search_settings_preserves_custom_limit_and_unrelated_fields() {
+        let path = tmp_path("search_settings_existing.json");
+        let mut existing = config::OfflinePuzzlesConfig::default();
+        existing.search_results_limit = 500;
+        existing.engine_limit = "nodes 42".into();
+        existing.interface_theme = styles::InterfaceTheme::Dark;
+        serde_json::to_writer_pretty(
+            std::fs::File::create(&path).expect("test settings should be created"),
+            &existing,
+        )
+        .expect("test settings should serialize");
+
+        SearchTab::save_search_settings_to_path(
+            &path,
+            1300,
+            2300,
+            43,
+            TacticalThemes::Fork,
+            Openings::Sicilian,
+            Variation {
+                name: std::borrow::Cow::Borrowed("Sicilian_Defense_Najdorf_Variation"),
+                family: Openings::Sicilian,
+            },
+            Some(OpeningSide::White),
+        );
+
+        let config = config::load_config_from_path(&path);
+        assert_eq!(config.search_results_limit, 500);
+        assert_eq!(config.engine_limit, "nodes 42");
+        assert_eq!(config.interface_theme, styles::InterfaceTheme::Dark);
+        assert_eq!(config.last_min_rating, 1300);
+        assert_eq!(config.last_max_rating, 2300);
+        assert_eq!(config.last_min_popularity, 43);
+        assert_eq!(config.last_theme, TacticalThemes::Fork);
+        assert_eq!(config.last_opening, Openings::Sicilian);
+        assert_eq!(
+            config.last_variation,
+            Variation {
+                name: std::borrow::Cow::Borrowed("Sicilian_Defense_Najdorf_Variation"),
+                family: Openings::Sicilian,
+            }
+        );
+        assert_eq!(config.last_opening_side, Some(OpeningSide::White));
+        cleanup(&path);
     }
 
     // ── Adapter test ────────────────────────────────────────────────
