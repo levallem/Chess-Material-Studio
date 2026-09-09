@@ -121,6 +121,12 @@ struct ProjectPuzzleDecisionRow {
 }
 
 #[derive(QueryableByName)]
+struct PuzzleIdRow {
+    #[diesel(sql_type = Text)]
+    puzzle_id: String,
+}
+
+#[derive(QueryableByName)]
 struct ChapterExistsRow {
     #[diesel(sql_type = Integer)]
     chapter_exists: i32,
@@ -397,6 +403,19 @@ pub fn list_chapter_puzzle_reviews(
     chapter_id: i32,
 ) -> Result<Vec<ProjectPuzzleReview>, String> {
     list_puzzle_reviews(path, chapter_id, None)
+}
+
+pub fn list_reviewed_puzzle_ids_for_chapter(
+    path: &Path,
+    chapter_id: i32,
+) -> Result<HashSet<String>, String> {
+    let mut connection = open_validated_project_connection(path)?;
+    ensure_chapter_exists(&mut connection, chapter_id)?;
+    diesel::sql_query("SELECT puzzle_id FROM chapter_puzzle_reviews WHERE chapter_id = ?")
+        .bind::<Integer, _>(chapter_id)
+        .load::<PuzzleIdRow>(&mut connection)
+        .map(|rows| rows.into_iter().map(|row| row.puzzle_id).collect())
+        .map_err(|error| format!("cannot list reviewed puzzle IDs: {error}"))
 }
 
 pub fn list_selected_puzzles_for_chapter(
@@ -1113,6 +1132,50 @@ mod tests {
             list_selected_puzzles_for_chapter(project.path(), chapter.id).unwrap();
         assert_eq!(selected_puzzles.len(), 1);
         assert_puzzle_matches(&selected_puzzles[0], &selected);
+    }
+
+    #[test]
+    fn reviewed_puzzle_ids_are_chapter_scoped_and_read_only() {
+        let project = create_test_project("reviewed-puzzle-ids");
+        let first = create_chapter(project.path(), "Primero", None).unwrap();
+        let second = create_chapter(project.path(), "Segundo", None).unwrap();
+        let selected = puzzle("selected");
+        let discarded = puzzle("discarded");
+        let other_chapter = puzzle("other-chapter");
+
+        set_puzzle_decision(project.path(), first.id, &selected, ProjectPuzzleDecision::Selected)
+            .unwrap();
+        set_puzzle_decision(project.path(), first.id, &discarded, ProjectPuzzleDecision::Discarded)
+            .unwrap();
+        set_puzzle_decision(
+            project.path(),
+            second.id,
+            &other_chapter,
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        let before = list_chapter_puzzle_reviews(project.path(), first.id)
+            .unwrap()
+            .into_iter()
+            .map(|review| (review.puzzle.puzzle_id, review.decision, review.reviewed_at))
+            .collect::<Vec<_>>();
+
+        let reviewed = list_reviewed_puzzle_ids_for_chapter(project.path(), first.id).unwrap();
+
+        assert_eq!(reviewed, HashSet::from([selected.puzzle_id.clone(), discarded.puzzle_id]));
+        assert!(!reviewed.contains(&other_chapter.puzzle_id));
+        let after = list_chapter_puzzle_reviews(project.path(), first.id)
+            .unwrap()
+            .into_iter()
+            .map(|review| (review.puzzle.puzzle_id, review.decision, review.reviewed_at))
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert!(list_reviewed_puzzle_ids_for_chapter(project.path(), 999).is_err());
+
+        clear_puzzle_decision(project.path(), first.id, &selected.puzzle_id).unwrap();
+        assert!(!list_reviewed_puzzle_ids_for_chapter(project.path(), first.id)
+            .unwrap()
+            .contains(&selected.puzzle_id));
     }
 
     #[test]

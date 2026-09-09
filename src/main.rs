@@ -656,6 +656,17 @@ impl OfflinePuzzles {
             }
              (_, Message::PuzzleInfo(message)) => {
                 self.puzzle_tab.update(message)
+            } (_, Message::Search(SearchMesssage::ClickSearch)) if !self.search_tab.is_favorites() => {
+                match self.project_tab.reviewed_puzzle_ids_for_active_chapter() {
+                    Ok(excluded_ids) => self.search_tab.start_lichess_search(
+                        excluded_ids.unwrap_or_default(),
+                    ),
+                    Err(error) => {
+                        self.search_tab.show_searching_msg = false;
+                        self.puzzle_status = format!("{}: {error}", lang::tr(&self.lang, "review_error"));
+                        Task::none()
+                    }
+                }
             } (_, Message::Search(message)) => {
                 self.search_tab.update(message)
             } (_, Message::PuzzleInputIndexChange(puzzle_input)) => {
@@ -1027,6 +1038,7 @@ mod tests {
     use super::*;
     use chess_material_studio::models::Puzzle as PersistentPuzzle;
     use chess_material_studio::project::{create_chapter, create_project, set_puzzle_decision};
+    use crate::search_tab::SearchBase;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1173,6 +1185,44 @@ mod tests {
         let _ = app.update(Message::PuzzleInputIndexChange("3".into()));
         let _ = app.update(Message::JumpToPuzzle);
         assert_current_review(&app, "cms-023e-third", ProjectPuzzleDecision::Discarded);
+    }
+
+    #[test]
+    fn search_preparation_fails_closed_for_review_read_errors_and_skips_favorites() {
+        let project = TempProjectDb::new("search-exclusions-error");
+        create_project(&project.path, "Proyecto").unwrap();
+        create_chapter(&project.path, "Capítulo", None).unwrap();
+        let mut app = OfflinePuzzles::new(false);
+        let loaded = navigation_puzzle("already-loaded");
+        app.puzzle_tab.puzzles = vec![loaded.clone()];
+        app.puzzle_tab.current_puzzle = 0;
+        app.puzzle_tab.game_status = GameStatus::Playing;
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
+        std::fs::remove_file(&project.path).unwrap();
+
+        let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
+
+        assert!(!app.search_tab.show_searching_msg);
+        assert_eq!(app.puzzle_tab.puzzles.len(), 1);
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, loaded.puzzle_id);
+        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "review_error")));
+
+        let _ = app.update(Message::Search(SearchMesssage::SelectBase(SearchBase::Favorites)));
+        let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
+        assert!(app.search_tab.show_searching_msg);
+        assert_eq!(app.puzzle_tab.puzzles.len(), 1);
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, loaded.puzzle_id);
+    }
+
+    #[test]
+    fn lichess_search_without_a_project_starts_normally() {
+        let mut app = OfflinePuzzles::new(false);
+
+        let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
+
+        assert!(app.search_tab.show_searching_msg);
     }
 }
 

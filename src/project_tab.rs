@@ -2,11 +2,13 @@ use iced::widget::{Button, Column, Container, Scrollable, Text, TextInput};
 use iced::{Alignment, Element, Length, Task, alignment};
 use iced_aw::TabLabel;
 use rfd::AsyncFileDialog;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chess_material_studio::project::{
     ProjectChapter, ProjectMetadata, ProjectPuzzleDecision, clear_puzzle_decision, create_chapter,
     create_project, find_selected_puzzle_chapter, get_puzzle_decision, list_chapters,
+    list_reviewed_puzzle_ids_for_chapter,
     list_selected_puzzles_for_chapter, open_project, set_puzzle_decision,
 };
 
@@ -291,6 +293,18 @@ impl ProjectTab {
         };
         list_selected_puzzles_for_chapter(&active_project.path, chapter_id)
             .map(|puzzles| Some(puzzles.len()))
+    }
+
+    pub fn reviewed_puzzle_ids_for_active_chapter(
+        &self,
+    ) -> Result<Option<HashSet<String>>, String> {
+        let Some(active_project) = self.active_project.as_ref() else {
+            return Ok(None);
+        };
+        let Some(chapter_id) = active_project.active_chapter_id else {
+            return Ok(None);
+        };
+        list_reviewed_puzzle_ids_for_chapter(&active_project.path, chapter_id).map(Some)
     }
 
     pub fn refresh_puzzle_review(&mut self, puzzle: Option<&Puzzle>) {
@@ -750,6 +764,67 @@ mod tests {
         tab.open_project_path(&project.path);
 
         assert_eq!(tab.selected_count().unwrap(), Some(1));
+    }
+
+    #[test]
+    fn reviewed_puzzle_ids_follow_the_active_project_and_chapter() {
+        let first_project = TempProjectDb::new("reviewed-ids-first");
+        create_project(&first_project.path, "Primero").unwrap();
+        let first_chapter = create_chapter(&first_project.path, "A", None).unwrap();
+        let second_chapter = create_chapter(&first_project.path, "B", None).unwrap();
+        let first_puzzle = sample_puzzle();
+        let mut second_puzzle = sample_puzzle();
+        second_puzzle.puzzle_id = "cms-023f-second".into();
+        set_puzzle_decision(
+            &first_project.path,
+            first_chapter.id,
+            &project_puzzle(&first_puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &first_project.path,
+            second_chapter.id,
+            &project_puzzle(&second_puzzle),
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+
+        let mut tab = ProjectTab::new();
+        assert_eq!(tab.reviewed_puzzle_ids_for_active_chapter().unwrap(), None);
+        let empty_project = TempProjectDb::new("reviewed-ids-empty");
+        create_project(&empty_project.path, "Sin capítulos").unwrap();
+        tab.open_project_path(&empty_project.path);
+        assert_eq!(tab.reviewed_puzzle_ids_for_active_chapter().unwrap(), None);
+        tab.open_project_path(&first_project.path);
+        assert_eq!(
+            tab.reviewed_puzzle_ids_for_active_chapter().unwrap(),
+            Some(HashSet::from([first_puzzle.puzzle_id.clone()]))
+        );
+        tab.select_chapter(second_chapter.id);
+        assert_eq!(
+            tab.reviewed_puzzle_ids_for_active_chapter().unwrap(),
+            Some(HashSet::from([second_puzzle.puzzle_id.clone()]))
+        );
+
+        let second_project = TempProjectDb::new("reviewed-ids-second");
+        create_project(&second_project.path, "Segundo").unwrap();
+        let third_chapter = create_chapter(&second_project.path, "C", None).unwrap();
+        set_puzzle_decision(
+            &second_project.path,
+            third_chapter.id,
+            &project_puzzle(&first_puzzle),
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+        tab.open_project_path(&second_project.path);
+        assert_eq!(
+            tab.reviewed_puzzle_ids_for_active_chapter().unwrap(),
+            Some(HashSet::from([first_puzzle.puzzle_id]))
+        );
+
+        std::fs::remove_file(&second_project.path).unwrap();
+        assert!(tab.reviewed_puzzle_ids_for_active_chapter().is_err());
     }
 
     #[test]

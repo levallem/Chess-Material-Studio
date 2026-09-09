@@ -2,6 +2,7 @@ use iced::widget::svg::Handle;
 use iced::widget::{Container, Button, column as col, Text, Radio, row, Row, Svg, PickList, Slider, Scrollable, Space};
 use iced::widget::text::LineHeight;
 use iced::{alignment, Alignment, Element, Length, Task, Theme};
+use std::collections::HashSet;
 use std::path::Path;
 
 use diesel::Connection;
@@ -396,6 +397,22 @@ fn search_sqlite_from_path(
     Ok(results.into_iter().map(adapt_sqlite_puzzle).collect())
 }
 
+fn expanded_result_limit(result_limit: usize, excluded_count: usize) -> usize {
+    result_limit.saturating_add(excluded_count)
+}
+
+fn filter_excluded_puzzles(
+    puzzles: Vec<config::Puzzle>,
+    excluded_ids: &HashSet<String>,
+    result_limit: usize,
+) -> Vec<config::Puzzle> {
+    puzzles
+        .into_iter()
+        .filter(|puzzle| !excluded_ids.contains(&puzzle.puzzle_id))
+        .take(result_limit)
+        .collect()
+}
+
 pub fn search_with_config(
     config: &config::OfflinePuzzlesConfig,
     min_rating: i32,
@@ -429,6 +446,39 @@ pub fn search_with_config(
             )
         }
     }
+}
+
+fn search_with_config_excluding(
+    config: &config::OfflinePuzzlesConfig,
+    min_rating: i32,
+    max_rating: i32,
+    min_popularity: i32,
+    theme: TacticalThemes,
+    opening: Openings,
+    variation: Variation,
+    op_side: Option<OpeningSide>,
+    result_limit: usize,
+    excluded_ids: &HashSet<String>,
+) -> Option<Vec<config::Puzzle>> {
+    if excluded_ids.is_empty() {
+        return search_with_config(
+            config, min_rating, max_rating, min_popularity, theme, opening, variation, op_side,
+            result_limit,
+        );
+    }
+
+    search_with_config(
+        config,
+        min_rating,
+        max_rating,
+        min_popularity,
+        theme,
+        opening,
+        variation,
+        op_side,
+        expanded_result_limit(result_limit, excluded_ids.len()),
+    )
+    .map(|puzzles| filter_excluded_puzzles(puzzles, excluded_ids, result_limit))
 }
 
 impl SearchTab {
@@ -478,24 +528,10 @@ impl SearchTab {
                 self.piece_to_promote_to = piece;
                 Task::none()
             } SearchMesssage::ClickSearch => {
-                self.show_searching_msg = true;
-                SearchTab::save_search_settings(self.slider_min_rating_value,
-                    self.slider_max_rating_value, self.slider_min_popularity, self.theme.item,
-                    self.opening.item, self.variation.item.clone(), self.opening_side);
-
-                let config = load_config();
-                if self.base == Some(SearchBase::Favorites) {
-                    Task::perform(
-                        SearchTab::search_favs(self.slider_min_rating_value,
-                            self.slider_max_rating_value, self.slider_min_popularity,
-                            self.theme.item, self.opening.item, self.variation.item.clone(),
-                            self.opening_side, config.search_results_limit), Message::LoadPuzzle)
+                if self.is_favorites() {
+                    self.start_favorites_search()
                 } else {
-                    Task::perform(
-                        SearchTab::search(self.slider_min_rating_value,
-                            self.slider_max_rating_value, self.slider_min_popularity,
-                            self.theme.item, self.opening.item, self.variation.item.clone(),
-                            self.opening_side, config.search_results_limit), Message::LoadPuzzle)
+                    self.start_lichess_search(HashSet::new())
                 }
             } SearchMesssage::SelectBase(base) => {
                 self.base = Some(base);
@@ -546,12 +582,67 @@ impl SearchTab {
         db::get_favorites(min_rating, max_rating, min_popularity, theme, opening, variation, op_side, result_limit)
     }
 
-    pub async fn search(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation: Variation, op_side: Option<OpeningSide>, result_limit: usize) -> Option<Vec<config::Puzzle>> {
+    pub fn is_favorites(&self) -> bool {
+        self.base == Some(SearchBase::Favorites)
+    }
+
+    pub fn start_lichess_search(&mut self, excluded_ids: HashSet<String>) -> Task<Message> {
+        self.show_searching_msg = true;
+        self.save_current_search_settings();
         let config = load_config();
-        search_with_config(
+        Task::perform(
+            SearchTab::search(
+                self.slider_min_rating_value,
+                self.slider_max_rating_value,
+                self.slider_min_popularity,
+                self.theme.item,
+                self.opening.item,
+                self.variation.item.clone(),
+                self.opening_side,
+                config.search_results_limit,
+                excluded_ids,
+            ),
+            Message::LoadPuzzle,
+        )
+    }
+
+    fn start_favorites_search(&mut self) -> Task<Message> {
+        self.show_searching_msg = true;
+        self.save_current_search_settings();
+        let config = load_config();
+        Task::perform(
+            SearchTab::search_favs(
+                self.slider_min_rating_value,
+                self.slider_max_rating_value,
+                self.slider_min_popularity,
+                self.theme.item,
+                self.opening.item,
+                self.variation.item.clone(),
+                self.opening_side,
+                config.search_results_limit,
+            ),
+            Message::LoadPuzzle,
+        )
+    }
+
+    fn save_current_search_settings(&self) {
+        SearchTab::save_search_settings(
+            self.slider_min_rating_value,
+            self.slider_max_rating_value,
+            self.slider_min_popularity,
+            self.theme.item,
+            self.opening.item,
+            self.variation.item.clone(),
+            self.opening_side,
+        );
+    }
+
+    pub async fn search(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation: Variation, op_side: Option<OpeningSide>, result_limit: usize, excluded_ids: HashSet<String>) -> Option<Vec<config::Puzzle>> {
+        let config = load_config();
+        search_with_config_excluding(
             &config,
             min_rating, max_rating, min_popularity,
-            theme, opening, variation, op_side, result_limit,
+            theme, opening, variation, op_side, result_limit, &excluded_ids,
         )
     }
 }
@@ -748,6 +839,79 @@ mod tests {
 
     fn cleanup(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
+    }
+
+    fn excluded_test_puzzle(id: &str) -> config::Puzzle {
+        config::Puzzle {
+            puzzle_id: id.into(),
+            ..config::Puzzle::default()
+        }
+    }
+
+    #[test]
+    fn exclusions_filter_and_truncate_without_decision_details() {
+        let candidates = vec![
+            excluded_test_puzzle("selected"),
+            excluded_test_puzzle("discarded"),
+            excluded_test_puzzle("new-one"),
+            excluded_test_puzzle("new-two"),
+        ];
+        let excluded = std::collections::HashSet::from([
+            "selected".to_owned(),
+            "discarded".to_owned(),
+        ]);
+
+        let filtered = filter_excluded_puzzles(candidates.clone(), &excluded, 2);
+        assert_eq!(
+            filtered.into_iter().map(|puzzle| puzzle.puzzle_id).collect::<Vec<_>>(),
+            ["new-one", "new-two"]
+        );
+        assert_eq!(filter_excluded_puzzles(candidates, &std::collections::HashSet::new(), 3).len(), 3);
+    }
+
+    #[test]
+    fn expanded_result_limit_saturates_and_overfetches() {
+        assert_eq!(expanded_result_limit(2, 3), 5);
+        assert_eq!(expanded_result_limit(usize::MAX, 1), usize::MAX);
+    }
+
+    #[test]
+    fn exclusions_apply_equally_to_csv_and_sqlite() {
+        let db_path = setup_test_sqlite();
+        let csv_path = setup_test_csv();
+        let excluded = std::collections::HashSet::from(["00008".to_owned(), "00009".to_owned()]);
+        let mut csv_config = config::OfflinePuzzlesConfig::default();
+        csv_config.puzzle_db_location = csv_path.to_string_lossy().into_owned();
+        let mut sqlite_config = csv_config.clone();
+        sqlite_config.puzzle_sqlite_location = Some(db_path.to_string_lossy().into_owned());
+
+        let csv_results = search_with_config_excluding(
+            &csv_config, 0, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 2, &excluded,
+        )
+        .unwrap();
+        let sqlite_results = search_with_config_excluding(
+            &sqlite_config, 0, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 2, &excluded,
+        )
+        .unwrap();
+        let expected = std::collections::HashSet::from(["00010", "00011"]);
+        assert_eq!(
+            csv_results
+                .iter()
+                .map(|puzzle| puzzle.puzzle_id.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            sqlite_results
+                .iter()
+                .map(|puzzle| puzzle.puzzle_id.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+        cleanup(&db_path);
+        cleanup(&csv_path);
     }
 
     #[test]
