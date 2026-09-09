@@ -47,6 +47,24 @@ struct CachedPuzzleReview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedPuzzlesContext {
+    path: PathBuf,
+    chapter_id: i32,
+}
+
+#[derive(Debug, Clone)]
+enum CachedSelectedPuzzles {
+    Loaded(Vec<chess_material_studio::models::Puzzle>),
+    Failed { status: String },
+}
+
+#[derive(Debug, Clone)]
+struct SelectedPuzzlesCache {
+    context: SelectedPuzzlesContext,
+    state: CachedSelectedPuzzles,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PuzzleReviewView {
     pub chapter_name: String,
     pub decision: Option<ProjectPuzzleDecision>,
@@ -78,6 +96,7 @@ pub struct ProjectTab {
     target_puzzle_count: String,
     status: String,
     review_cache: Option<CachedPuzzleReview>,
+    selected_puzzles_cache: Option<SelectedPuzzlesCache>,
 }
 
 impl ProjectTab {
@@ -91,6 +110,7 @@ impl ProjectTab {
             target_puzzle_count: String::new(),
             status: String::new(),
             review_cache: None,
+            selected_puzzles_cache: None,
         }
     }
 
@@ -130,6 +150,7 @@ impl ProjectTab {
                 self.target_puzzle_count.clear();
                 self.status.clear();
                 self.clear_puzzle_review_cache();
+                self.clear_selected_puzzles_cache();
                 Task::none()
             }
             ProjectMessage::ChapterNameChanged(value) => {
@@ -198,6 +219,7 @@ impl ProjectTab {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
                 self.clear_puzzle_review_cache();
+                self.refresh_selected_puzzles();
                 self.project_name.clear();
                 self.new_project_path = None;
                 self.status.clear();
@@ -213,6 +235,7 @@ impl ProjectTab {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
                 self.clear_puzzle_review_cache();
+                self.refresh_selected_puzzles();
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
                 self.status.clear();
@@ -251,6 +274,7 @@ impl ProjectTab {
             Ok(active_project) => {
                 self.active_project = Some(active_project);
                 self.clear_puzzle_review_cache();
+                self.refresh_selected_puzzles();
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
                 self.status.clear();
@@ -272,6 +296,7 @@ impl ProjectTab {
             active_project.active_chapter_id = Some(chapter_id);
             self.status.clear();
             self.clear_puzzle_review_cache();
+            self.refresh_selected_puzzles();
         }
     }
 
@@ -284,15 +309,8 @@ impl ProjectTab {
             .find(|chapter| chapter.id == chapter_id)
     }
 
-    fn selected_count(&self) -> Result<Option<usize>, String> {
-        let Some(active_project) = self.active_project.as_ref() else {
-            return Ok(None);
-        };
-        let Some(chapter_id) = active_project.active_chapter_id else {
-            return Ok(None);
-        };
-        list_selected_puzzles_for_chapter(&active_project.path, chapter_id)
-            .map(|puzzles| Some(puzzles.len()))
+    fn selected_count(&self) -> Option<usize> {
+        self.selected_puzzles().map(|puzzles| puzzles.len())
     }
 
     pub fn reviewed_puzzle_ids_for_active_chapter(
@@ -329,11 +347,14 @@ impl ProjectTab {
         };
         let stored_puzzle = project_puzzle(puzzle);
         match set_puzzle_decision(&context.path, context.chapter_id, &stored_puzzle, decision) {
-            Ok(()) => self.review_cache = Some(CachedPuzzleReview {
-                context,
-                decision: CachedPuzzleReviewDecision::Loaded(Some(decision)),
-                status: String::new(),
-            }),
+            Ok(()) => {
+                self.review_cache = Some(CachedPuzzleReview {
+                    context,
+                    decision: CachedPuzzleReviewDecision::Loaded(Some(decision)),
+                    status: String::new(),
+                });
+                self.refresh_selected_puzzles();
+            }
             Err(error) if decision == ProjectPuzzleDecision::Selected && error == "puzzle is already selected in another chapter" => {
                 self.set_duplicate_selection_status(&context, puzzle, error);
             }
@@ -347,11 +368,14 @@ impl ProjectTab {
             return;
         };
         match clear_puzzle_decision(&context.path, context.chapter_id, &puzzle.puzzle_id) {
-            Ok(()) => self.review_cache = Some(CachedPuzzleReview {
-                context,
-                decision: CachedPuzzleReviewDecision::Loaded(None),
-                status: String::new(),
-            }),
+            Ok(()) => {
+                self.review_cache = Some(CachedPuzzleReview {
+                    context,
+                    decision: CachedPuzzleReviewDecision::Loaded(None),
+                    status: String::new(),
+                });
+                self.refresh_selected_puzzles();
+            }
             Err(error) => self.load_puzzle_review_after_error(context, error),
         }
     }
@@ -420,6 +444,54 @@ impl ProjectTab {
     }
 
     fn clear_puzzle_review_cache(&mut self) { self.review_cache = None; }
+
+    fn selected_puzzles_context(&self) -> Option<SelectedPuzzlesContext> {
+        let active_project = self.active_project.as_ref()?;
+        Some(SelectedPuzzlesContext {
+            path: active_project.path.clone(),
+            chapter_id: active_project.active_chapter_id?,
+        })
+    }
+
+    fn refresh_selected_puzzles(&mut self) {
+        let Some(context) = self.selected_puzzles_context() else {
+            self.clear_selected_puzzles_cache();
+            return;
+        };
+        let state = match list_selected_puzzles_for_chapter(&context.path, context.chapter_id) {
+            Ok(puzzles) => CachedSelectedPuzzles::Loaded(puzzles),
+            Err(error) => CachedSelectedPuzzles::Failed {
+                status: format!("{}: {error}", lang::tr(&self.lang, "selected_puzzles_error")),
+            },
+        };
+        self.selected_puzzles_cache = Some(SelectedPuzzlesCache { context, state });
+    }
+
+    fn selected_puzzles(&self) -> Option<&[chess_material_studio::models::Puzzle]> {
+        let context = self.selected_puzzles_context()?;
+        let cache = self.selected_puzzles_cache.as_ref()?;
+        if cache.context != context {
+            return None;
+        }
+        match &cache.state {
+            CachedSelectedPuzzles::Loaded(puzzles) => Some(puzzles),
+            CachedSelectedPuzzles::Failed { .. } => None,
+        }
+    }
+
+    fn selected_puzzles_error(&self) -> Option<&str> {
+        let context = self.selected_puzzles_context()?;
+        let cache = self.selected_puzzles_cache.as_ref()?;
+        if cache.context != context {
+            return None;
+        }
+        match &cache.state {
+            CachedSelectedPuzzles::Loaded(_) => None,
+            CachedSelectedPuzzles::Failed { status } => Some(status),
+        }
+    }
+
+    fn clear_selected_puzzles_cache(&mut self) { self.selected_puzzles_cache = None; }
 }
 
 fn load_active_project(path: PathBuf, metadata: ProjectMetadata) -> Result<ActiveProject, String> {
@@ -548,7 +620,7 @@ impl ProjectTab {
         }
 
         let progress = match (self.active_chapter(), self.selected_count()) {
-            (Some(chapter), Ok(Some(selected))) => match chapter.target_puzzle_count {
+            (Some(chapter), Some(selected)) => match chapter.target_puzzle_count {
                 Some(target) => format!(
                     "{} — {selected} / {target} {}",
                     chapter.name,
@@ -560,11 +632,14 @@ impl ProjectTab {
                     lang::tr(&self.lang, "selected")
                 ),
             },
-            (_, Err(error)) => error,
+            (Some(_), None) => self
+                .selected_puzzles_error()
+                .map(str::to_owned)
+                .unwrap_or_else(|| lang::tr(&self.lang, "selected_puzzles_error")),
             _ => lang::tr(&self.lang, "no_active_chapter"),
         };
 
-        Column::new()
+        let mut content = Column::new()
             .padding([0, 30])
             .spacing(10)
             .align_x(Alignment::Center)
@@ -585,7 +660,13 @@ impl ProjectTab {
             )
             .push(Text::new(lang::tr(&self.lang, "chapters")))
             .push(chapters)
-            .push(Text::new(progress))
+            .push(Text::new(progress));
+
+        if let Some(selected_puzzles) = self.selected_puzzles_content() {
+            content = content.push(selected_puzzles);
+        }
+
+        content
             .push(Text::new(lang::tr(&self.lang, "new_chapter")))
             .push(
                 TextInput::new(&lang::tr(&self.lang, "chapter_name"), &self.chapter_name)
@@ -604,6 +685,41 @@ impl ProjectTab {
                     .style(btn_style_simple),
             )
             .push(Text::new(&self.status))
+    }
+
+    fn selected_puzzles_content(&self) -> Option<Column<'_, ProjectMessage>> {
+        self.active_chapter()?;
+        let mut content = Column::new()
+            .spacing(5)
+            .push(Text::new(lang::tr(&self.lang, "selected_puzzles")));
+
+        if let Some(puzzles) = self.selected_puzzles() {
+            if puzzles.is_empty() {
+                return Some(content.push(Text::new(lang::tr(
+                    &self.lang,
+                    "no_selected_puzzles",
+                ))));
+            }
+
+            for (index, puzzle) in puzzles.iter().enumerate() {
+                content = content.push(Text::new(format!(
+                    "{}. {} — {}{}   {} {}",
+                    index + 1,
+                    puzzle.puzzle_id,
+                    lang::tr(&self.lang, "rating"),
+                    puzzle.rating,
+                    lang::tr(&self.lang, "themes"),
+                    puzzle.themes,
+                )));
+            }
+            return Some(content);
+        }
+
+        Some(content.push(Text::new(
+            self.selected_puzzles_error()
+                .map(str::to_owned)
+                .unwrap_or_else(|| lang::tr(&self.lang, "selected_puzzles_error")),
+        )))
     }
 }
 
@@ -662,7 +778,7 @@ mod tests {
         let tab = ProjectTab::new();
 
         assert!(tab.active_project.is_none());
-        assert_eq!(tab.selected_count().unwrap(), None);
+        assert_eq!(tab.selected_count(), None);
     }
 
     #[test]
@@ -749,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_count_is_derived_from_persisted_reviews() {
+    fn selected_count_is_derived_from_the_loaded_snapshot_cache() {
         let project = TempProjectDb::new("selected-count");
         create_project(&project.path, "Progreso").unwrap();
         let chapter = create_chapter(&project.path, "Pieza colgante", Some(20)).unwrap();
@@ -763,7 +879,198 @@ mod tests {
         let mut tab = ProjectTab::new();
         tab.open_project_path(&project.path);
 
-        assert_eq!(tab.selected_count().unwrap(), Some(1));
+        assert_eq!(tab.selected_count(), Some(1));
+    }
+
+    #[test]
+    fn selected_puzzles_are_loaded_from_the_active_chapter_snapshot_cache() {
+        let project = TempProjectDb::new("selected-cache");
+        create_project(&project.path, "Selección").unwrap();
+        let chapter = create_chapter(&project.path, "Ataques", Some(20)).unwrap();
+        let selected = sample_puzzle();
+        let mut discarded = sample_puzzle();
+        discarded.puzzle_id = "cms-023g-discarded".into();
+        let mut second_selected = sample_puzzle();
+        second_selected.puzzle_id = "cms-023g-second-selected".into();
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &project_puzzle(&selected),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &project_puzzle(&second_selected),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &project_puzzle(&discarded),
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
+
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let selected_puzzles = tab.selected_puzzles().unwrap();
+        assert_eq!(selected_puzzles.len(), 2);
+        assert_eq!(selected_puzzles[0].puzzle_id, selected.puzzle_id);
+        assert_eq!(selected_puzzles[0].fen, selected.fen);
+        assert_eq!(selected_puzzles[0].moves, selected.moves);
+        assert_eq!(selected_puzzles[0].rating, selected.rating);
+        assert_eq!(selected_puzzles[0].rating_deviation, selected.rating_deviation);
+        assert_eq!(selected_puzzles[0].popularity, selected.popularity);
+        assert_eq!(selected_puzzles[0].nb_plays, selected.nb_plays);
+        assert_eq!(selected_puzzles[0].themes, selected.themes);
+        assert_eq!(selected_puzzles[0].game_url, selected.game_url);
+        assert_eq!(selected_puzzles[0].opening, selected.opening);
+        assert_eq!(selected_puzzles[1].puzzle_id, second_selected.puzzle_id);
+        assert_eq!(tab.selected_count(), Some(2));
+    }
+
+    #[test]
+    fn selected_puzzle_cache_is_absent_without_an_active_chapter_and_loaded_empty_for_a_new_one() {
+        let project = TempProjectDb::new("selected-cache-empty");
+        create_project(&project.path, "Vacío").unwrap();
+        let mut tab = ProjectTab::new();
+
+        tab.open_project_path(&project.path);
+        assert!(tab.selected_puzzles().is_none());
+        assert_eq!(tab.selected_count(), None);
+
+        tab.chapter_name = "Capítulo".into();
+        tab.create_chapter_from_draft();
+        assert!(tab.selected_puzzles().unwrap().is_empty());
+        assert_eq!(tab.selected_count(), Some(0));
+    }
+
+    #[test]
+    fn switching_chapters_projects_and_closing_replaces_or_clears_selected_puzzle_cache() {
+        let first_project = TempProjectDb::new("selected-cache-first");
+        create_project(&first_project.path, "Primero").unwrap();
+        let first_chapter = create_chapter(&first_project.path, "A", None).unwrap();
+        let second_chapter = create_chapter(&first_project.path, "B", None).unwrap();
+        let first_puzzle = sample_puzzle();
+        let mut second_puzzle = sample_puzzle();
+        second_puzzle.puzzle_id = "cms-023g-second-chapter".into();
+        set_puzzle_decision(
+            &first_project.path,
+            first_chapter.id,
+            &project_puzzle(&first_puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            &first_project.path,
+            second_chapter.id,
+            &project_puzzle(&second_puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+
+        let second_project = TempProjectDb::new("selected-cache-second");
+        create_project(&second_project.path, "Segundo").unwrap();
+        let third_chapter = create_chapter(&second_project.path, "C", None).unwrap();
+        let mut third_puzzle = sample_puzzle();
+        third_puzzle.puzzle_id = "cms-023g-second-project".into();
+        set_puzzle_decision(
+            &second_project.path,
+            third_chapter.id,
+            &project_puzzle(&third_puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&first_project.path);
+        assert_eq!(tab.selected_puzzles().unwrap()[0].puzzle_id, first_puzzle.puzzle_id);
+        tab.select_chapter(second_chapter.id);
+        assert_eq!(tab.selected_puzzles().unwrap()[0].puzzle_id, second_puzzle.puzzle_id);
+        tab.open_project_path(&second_project.path);
+        assert_eq!(tab.selected_puzzles().unwrap()[0].puzzle_id, third_puzzle.puzzle_id);
+        let _ = tab.update(ProjectMessage::CloseProject);
+        assert!(tab.selected_puzzles().is_none());
+        assert_eq!(tab.selected_count(), None);
+    }
+
+    #[test]
+    fn failed_selected_puzzle_load_replaces_the_old_context_with_an_error() {
+        let project = TempProjectDb::new("selected-cache-error");
+        create_project(&project.path, "Errores").unwrap();
+        let first = create_chapter(&project.path, "Primero", None).unwrap();
+        let second = create_chapter(&project.path, "Segundo", None).unwrap();
+        let puzzle = sample_puzzle();
+        set_puzzle_decision(
+            &project.path,
+            first.id,
+            &project_puzzle(&puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        assert_eq!(tab.selected_count(), Some(1));
+
+        std::fs::remove_file(&project.path).unwrap();
+        tab.select_chapter(second.id);
+
+        assert!(tab.selected_puzzles().is_none());
+        assert_eq!(tab.selected_count(), None);
+        assert!(tab.selected_puzzles_error().is_some());
+    }
+
+    #[test]
+    fn failed_refresh_after_a_successful_persistence_replaces_the_cache_with_an_error() {
+        let project = TempProjectDb::new("selected-cache-refresh-error");
+        create_project(&project.path, "Errores").unwrap();
+        let chapter = create_chapter(&project.path, "Capítulo", None).unwrap();
+        let puzzle = sample_puzzle();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        assert_eq!(tab.selected_count(), Some(0));
+
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &project_puzzle(&puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        std::fs::remove_file(&project.path).unwrap();
+        tab.refresh_selected_puzzles();
+
+        assert!(tab.selected_puzzles().is_none());
+        assert_eq!(tab.selected_count(), None);
+        assert!(tab.selected_puzzles_error().is_some());
+    }
+
+    #[test]
+    fn selected_puzzle_cache_survives_a_failed_mutation_and_needs_no_database_read_for_render_data() {
+        let project = TempProjectDb::new("selected-cache-failed-mutation");
+        create_project(&project.path, "Persistencia").unwrap();
+        let chapter = create_chapter(&project.path, "Capítulo", None).unwrap();
+        let puzzle = sample_puzzle();
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &project_puzzle(&puzzle),
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        std::fs::remove_file(&project.path).unwrap();
+
+        tab.set_puzzle_review(&puzzle, ProjectPuzzleDecision::Discarded);
+
+        assert_eq!(tab.selected_count(), Some(1));
+        assert_eq!(tab.selected_puzzles().unwrap()[0].puzzle_id, puzzle.puzzle_id);
+        let _ = tab.content();
     }
 
     #[test]
@@ -888,14 +1195,26 @@ mod tests {
         assert_eq!(tab.review_view().unwrap().decision, None);
         tab.set_puzzle_review(&puzzle, ProjectPuzzleDecision::Selected);
         assert_eq!(tab.review_view().unwrap().decision, Some(ProjectPuzzleDecision::Selected));
-        assert_eq!(tab.selected_count().unwrap(), Some(1));
+        assert_eq!(tab.selected_count(), Some(1));
+        assert_eq!(tab.selected_puzzles().unwrap()[0].puzzle_id, puzzle.puzzle_id);
         assert_eq!(chess_material_studio::project::get_puzzle_decision(&project.path, chapter.id, &puzzle.puzzle_id).unwrap(), Some(ProjectPuzzleDecision::Selected));
         tab.set_puzzle_review(&puzzle, ProjectPuzzleDecision::Discarded);
         assert_eq!(tab.review_view().unwrap().decision, Some(ProjectPuzzleDecision::Discarded));
-        assert_eq!(tab.selected_count().unwrap(), Some(0));
+        assert_eq!(tab.selected_count(), Some(0));
+        assert!(tab.selected_puzzles().unwrap().is_empty());
+        tab.set_puzzle_review(&puzzle, ProjectPuzzleDecision::Selected);
+        assert_eq!(tab.selected_count(), Some(1));
+        assert_eq!(tab.selected_puzzles().unwrap()[0].puzzle_id, puzzle.puzzle_id);
         tab.clear_puzzle_review(&puzzle);
         assert_eq!(tab.review_view().unwrap().decision, None);
-        assert_eq!(tab.selected_count().unwrap(), Some(0));
+        assert_eq!(tab.selected_count(), Some(0));
+        assert!(tab.selected_puzzles().unwrap().is_empty());
+        tab.set_puzzle_review(&puzzle, ProjectPuzzleDecision::Discarded);
+        assert_eq!(tab.selected_count(), Some(0));
+        tab.clear_puzzle_review(&puzzle);
+        assert_eq!(tab.review_view().unwrap().decision, None);
+        assert_eq!(tab.selected_count(), Some(0));
+        assert!(tab.selected_puzzles().unwrap().is_empty());
         assert_eq!(chess_material_studio::project::get_puzzle_decision(&project.path, chapter.id, &puzzle.puzzle_id).unwrap(), None);
     }
 
@@ -1006,7 +1325,7 @@ mod tests {
 
     #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 32] = [
+        const PROJECT_KEYS: [&str; 35] = [
             "project",
             "new_project",
             "project_name",
@@ -1030,6 +1349,9 @@ mod tests {
             "chapter_name_required",
             "no_project_open",
             "no_active_chapter",
+            "selected_puzzles",
+            "no_selected_puzzles",
+            "selected_puzzles_error",
             "review_status",
             "unreviewed",
             "discarded",
