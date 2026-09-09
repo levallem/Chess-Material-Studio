@@ -1,9 +1,11 @@
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use lopdf::dictionary;
 use lopdf::{Document, Object, Stream};
 use lopdf::content::{Content, Operation};
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Rank, Square};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{config, lang};
 
@@ -525,25 +527,123 @@ fn uci_move_to_pdf_spans(board: &Board, uci: &str) -> Result<Vec<PdfSolutionSpan
 ///
 /// Each span emits Tf (font switch), Ts (text rise), then Tj (show text).
 /// Figurine spans use Ts -2 to lower the glyph 2pt; Regular spans use Ts 0.
-fn append_pdf_solution_spans(ops: &mut Vec<Operation>, spans: &[PdfSolutionSpan]) {
+fn append_pdf_solution_spans(
+    ops: &mut Vec<Operation>,
+    spans: &[PdfSolutionSpan],
+) -> Result<(), String> {
     for span in spans {
         let (font_name, rise) = match span.font {
             PdfSolutionFont::Regular => ("Regular", 0),
             PdfSolutionFont::Figurine => ("Chess Alpha", -1),
         };
+        let text = match span.font {
+            PdfSolutionFont::Regular => encode_pdf_regular_text(&span.text)?,
+            PdfSolutionFont::Figurine => Object::string_literal(span.text.clone()),
+        };
         ops.push(Operation::new("Tf", vec![font_name.into(), 12.into()]));
         ops.push(Operation::new("Ts", vec![rise.into()]));
-        ops.push(Operation::new(
-            "Tj",
-            vec![Object::string_literal(span.text.clone())],
-        ));
+        ops.push(Operation::new("Tj", vec![text]));
     }
     ops.push(Operation::new("Ts", vec![0.into()]));
+    Ok(())
 }
 
 // ─── PDF ───────────────────────────────────────────────────────────────────
 
 const PDF_PUZZLES_PER_PAGE: usize = 6;
+const PDF_TEXT_ENCODING: &[u8] = b"WinAnsiEncoding";
+static PDF_TEXT_FONT_FACE: LazyLock<Result<ttf_parser::Face<'static>, String>> = LazyLock::new(|| {
+    ttf_parser::Face::parse(config::PDF_TEXT_FONT_BYTES, 0)
+        .map_err(|error| format!("Error parsing embedded PDF text font: {error:?}"))
+});
+
+fn pdf_text_font() -> Result<&'static ttf_parser::Face<'static>, String> {
+    PDF_TEXT_FONT_FACE.as_ref().map_err(Clone::clone)
+}
+
+fn normalized_pdf_text(text: &str) -> String {
+    text.nfc().collect()
+}
+
+fn unsupported_pdf_text_character(text: &str, encoding: &lopdf::Encoding<'_>) -> Option<char> {
+    text.chars().find(|character| {
+        let character_text = character.to_string();
+        let encoded = Document::encode_text(encoding, &character_text);
+        encoding
+            .bytes_to_string(&encoded)
+            .map(|decoded| decoded != character_text)
+            .unwrap_or(true)
+    })
+}
+
+fn encode_pdf_regular_text(text: &str) -> Result<Object, String> {
+    let normalized = normalized_pdf_text(text);
+    let font = pdf_text_font()?;
+
+    for character in normalized.chars() {
+        if font.glyph_index(character).is_none_or(|glyph| glyph.0 == 0) {
+            return Err(format!(
+                "Embedded PDF text font has no glyph for U+{:04X} ('{}')",
+                character as u32, character
+            ));
+        }
+    }
+
+    let encoding = lopdf::Encoding::SimpleEncoding(PDF_TEXT_ENCODING);
+    let encoded = Document::encode_text(&encoding, &normalized);
+    let decoded = encoding
+        .bytes_to_string(&encoded)
+        .map_err(|error| format!("Error decoding WinAnsi PDF text: {error}"))?;
+    if decoded != normalized {
+        let character =
+            unsupported_pdf_text_character(&normalized, &encoding).unwrap_or('\u{FFFD}');
+        return Err(format!(
+            "PDF text character U+{:04X} ('{}') is not representable by WinAnsiEncoding",
+            character as u32, character
+        ));
+    }
+
+    Ok(Object::string_literal(encoded))
+}
+
+fn pdf_text_font_data() -> Result<lopdf::FontData, String> {
+    let font = pdf_text_font()?;
+    let encoding = lopdf::Encoding::SimpleEncoding(PDF_TEXT_ENCODING);
+    let widths = (32_u8..=255)
+        .map(|code| {
+            let character = encoding
+                .bytes_to_string(&[code])
+                .map_err(|error| format!("Error decoding WinAnsi font width: {error}"))?;
+            let Some(character) = character.chars().next() else {
+                return Ok(0);
+            };
+            let glyph = font.glyph_index(character).ok_or_else(|| {
+                format!(
+                    "Embedded PDF text font has no glyph for WinAnsi U+{:04X}",
+                    character as u32,
+                )
+            })?;
+            font.glyph_hor_advance(glyph).map(i64::from).ok_or_else(|| {
+                format!(
+                    "Embedded PDF text font has no advance for U+{:04X}",
+                    character as u32
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut font_data = lopdf::FontData::new(
+        config::PDF_TEXT_FONT_BYTES,
+        config::PDF_TEXT_FONT_NAME.to_string(),
+    );
+    font_data
+        .set_flags(32)
+        .set_first_char(32)
+        .set_last_char(255)
+        .set_widths(widths)
+        .set_encoding("WinAnsiEncoding".to_string());
+    Ok(font_data)
+}
 
 fn editorial_diagram_pages(puzzle_count: usize) -> usize {
     puzzle_count.div_ceil(PDF_PUZZLES_PER_PAGE)
@@ -684,11 +784,9 @@ fn write_pdf(
     }
 
     let mut doc = Document::with_version("1.5");
-    let regular_font_id = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "TrueType",
-        "BaseFont" => "Arial",
-    });
+    let regular_font_id = doc
+        .add_font(pdf_text_font_data()?)
+        .map_err(|error| format!("Error adding PDF text font: {error}"))?;
     let pages_id = doc.new_object_id();
     let font_name = "Chess Alpha".to_string();
     let mut font_data = lopdf::FontData::new(config::CHESS_ALPHA_BYTES, font_name.clone());
@@ -743,7 +841,7 @@ fn write_pdf(
             Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
             Operation::new("Td", vec![pos_y.into(), pos_x.into()]),
         ]);
-        append_pdf_solution_spans(&mut ops, &move_spans);
+        append_pdf_solution_spans(&mut ops, &move_spans)?;
         ops.push(Operation::new("ET", vec![]));
         pos_x -= 18;
         if pos_x < 18 {
@@ -836,6 +934,7 @@ fn gen_diagram_operations(
     let mut ops = vec![];
 
     let number_str = index.to_string();
+    let number_text = encode_pdf_regular_text(&number_str)?;
     let num_width = number_str.len() as i32 * 7;
     let icon_diameter = 10;
     let gap = 4;
@@ -850,7 +949,7 @@ fn gen_diagram_operations(
         Operation::new("Tf", vec!["Regular".into(), 12.into()]),
         Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
         Operation::new("Td", vec![header_x.into(), header_y.into()]),
-        Operation::new("Tj", vec![Object::string_literal(number_str)]),
+        Operation::new("Tj", vec![number_text]),
         Operation::new("ET", vec![]),
     ]);
 
@@ -860,12 +959,13 @@ fn gen_diagram_operations(
         let label_y = start_x - (i as i32) * 25 + 5;
         let label_x = start_y - 10;
         let rank_char = (b'0' + (rank + 1) as u8) as char;
+        let rank_text = encode_pdf_regular_text(&rank_char.to_string())?;
         ops.extend_from_slice(&[
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["Regular".into(), 8.into()]),
             Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
             Operation::new("Td", vec![label_x.into(), label_y.into()]),
-            Operation::new("Tj", vec![Object::string_literal(rank_char.to_string())]),
+            Operation::new("Tj", vec![rank_text]),
             Operation::new("ET", vec![]),
         ]);
     }
@@ -929,12 +1029,13 @@ fn gen_diagram_operations(
         let label_x = start_y + (i as i32) * 25 + 10;
         let label_y = start_x - 190;
         let file_char = (b'a' + file as u8) as char;
+        let file_text = encode_pdf_regular_text(&file_char.to_string())?;
         ops.extend_from_slice(&[
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["Regular".into(), 8.into()]),
             Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
             Operation::new("Td", vec![label_x.into(), label_y.into()]),
-            Operation::new("Tj", vec![Object::string_literal(file_char.to_string())]),
+            Operation::new("Tj", vec![file_text]),
             Operation::new("ET", vec![]),
         ]);
     }
@@ -2301,7 +2402,7 @@ mod tests {
         let mut ops: Vec<Operation> = vec![];
         ops.push(Operation::new("BT", vec![]));
         ops.push(Operation::new("Td", vec![75.into(), 800.into()]));
-        append_pdf_solution_spans(&mut ops, &spans);
+        append_pdf_solution_spans(&mut ops, &spans).unwrap();
         ops.push(Operation::new("ET", vec![]));
 
         let has_chess_alpha = ops.iter().any(|op| {
@@ -2321,7 +2422,7 @@ mod tests {
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xf7#".into() },
         ];
         let mut ops: Vec<Operation> = vec![];
-        append_pdf_solution_spans(&mut ops, &spans);
+        append_pdf_solution_spans(&mut ops, &spans).unwrap();
 
         // Find Ts operations and their values in order
         let ts_values: Vec<i32> = ops.iter()
@@ -2395,6 +2496,170 @@ mod tests {
             .join("cms_test_tmp");
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(format!("{name}-{}.pdf", std::process::id()))
+    }
+
+    fn write_pdf_text_fixture(texts: &[&str], path: &Path) -> Result<(), String> {
+        let mut doc = Document::with_version("1.5");
+        let regular_font_id = doc
+            .add_font(pdf_text_font_data()?)
+            .map_err(|error| format!("Error adding PDF text fixture font: {error}"))?;
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "Regular" => regular_font_id,
+            },
+        });
+        let mut operations = vec![];
+        for (index, text) in texts.iter().enumerate() {
+            operations.extend([
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["Regular".into(), 12.into()]),
+                Operation::new("Td", vec![72.into(), (760 - index as i32 * 24).into()]),
+                Operation::new("Tj", vec![encode_pdf_regular_text(text)?]),
+                Operation::new("ET", vec![]),
+            ]);
+        }
+        let mut page_ids = vec![];
+        add_pdf_page(
+            &mut doc,
+            &mut page_ids,
+            pages_id,
+            Some(resources_id),
+            operations,
+        )?;
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Count" => Object::Integer(page_ids.len() as i64),
+                "Kids" => page_ids,
+                "MediaBox" => vec![0.into(), 0.into(), 600.into(), 850.into()],
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        doc.compress();
+        doc.save(path).map(|_| ()).map_err(|error| {
+            format!(
+                "Error writing PDF text fixture '{}': {error}",
+                path.display()
+            )
+        })
+    }
+
+    #[test]
+    fn pdf_regular_text_encodes_supported_western_text_without_loss() {
+        let encoding = lopdf::Encoding::SimpleEncoding(PDF_TEXT_ENCODING);
+        for text in [
+            "ASCII text",
+            "Capítulo táctico",
+            "Français",
+            "Português",
+            "Nederlands",
+            "\\\\ path and \"quotes\"",
+            "Cafe\u{301}",
+        ] {
+            let encoded = encode_pdf_regular_text(text).unwrap();
+            let Object::String(bytes, _) = encoded else {
+                panic!("PDF text helper must create a string literal");
+            };
+            assert_eq!(
+                encoding.bytes_to_string(&bytes).unwrap(),
+                normalized_pdf_text(text),
+                "PDF text must round-trip without replacement: {text}",
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_regular_text_rejects_characters_outside_font_or_winansi() {
+        let chinese = encode_pdf_regular_text("中文").unwrap_err();
+        assert!(chinese.contains("U+4E2D"), "unexpected error: {chinese}");
+
+        let winansi = encode_pdf_regular_text("Ā").unwrap_err();
+        assert!(
+            winansi.contains("WinAnsiEncoding"),
+            "unexpected error: {winansi}"
+        );
+    }
+
+    #[test]
+    fn pdf_text_fixture_embeds_noto_and_reopens_with_exact_text() {
+        let texts = [
+            "Capítulo táctico",
+            "Français",
+            "Português",
+            "\\\\ path and \"quotes\"",
+        ];
+        let path = pdf_test_path("embedded-unicode-text");
+        write_pdf_text_fixture(&texts, &path).unwrap();
+
+        let document = Document::load(&path).expect("PDF text fixture should be readable");
+        let (&page_number, &page_id) = document
+            .get_pages()
+            .iter()
+            .next()
+            .expect("PDF text fixture should have one page");
+        assert_eq!(page_number, 1);
+        let page = document.get_object(page_id).unwrap().as_dict().unwrap();
+        let resources_id = page.get(b"Resources").unwrap().as_reference().unwrap();
+        let resources = document
+            .get_object(resources_id)
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        let fonts = resources.get(b"Font").unwrap().as_dict().unwrap();
+        let regular_font_id = fonts.get(b"Regular").unwrap().as_reference().unwrap();
+        let regular_font = document
+            .get_object(regular_font_id)
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        assert_eq!(
+            regular_font.get(b"BaseFont").unwrap(),
+            &config::PDF_TEXT_FONT_NAME.into()
+        );
+        let descriptor_id = regular_font
+            .get(b"FontDescriptor")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let descriptor = document
+            .get_object(descriptor_id)
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        let font_file_id = descriptor
+            .get(b"FontFile2")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let font_file = document
+            .get_object(font_file_id)
+            .unwrap()
+            .as_stream()
+            .unwrap();
+        assert_eq!(
+            font_file.decompressed_content().unwrap(),
+            config::PDF_TEXT_FONT_BYTES,
+            "PDF must contain the complete embedded Noto Sans bytes",
+        );
+
+        let content = Content::decode(&document.get_page_content(page_id)).unwrap();
+        let encoding = lopdf::Encoding::SimpleEncoding(PDF_TEXT_ENCODING);
+        let decoded_text = content
+            .operations
+            .iter()
+            .filter(|operation| operation.operator == "Tj")
+            .map(|operation| match operation.operands.first() {
+                Some(Object::String(bytes, _)) => encoding.bytes_to_string(bytes).unwrap(),
+                other => panic!("expected PDF text string, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decoded_text, texts);
     }
 
     #[test]

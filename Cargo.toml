@@ -27,6 +27,8 @@ unic-langid = { version = "0.9.6", features = ["macros"] }
 diesel = { version = "2.3.12", features = ["sqlite"] }
 diesel_migrations = "2.3.2"
 lopdf = { git="https://github.com/J-F-Liu/lopdf.git", rev="ed42c15d297c8bf55240502222d7273cffb41392", features = ["font_embedding"] }
+ttf-parser = "0.25.1"
+unicode-normalization = "0.1.25"
 
 open = "5.4.1"
 #rfd = { version = "0.13.0", default-features = false, features = ["xdg-portal", "tokio"] }
