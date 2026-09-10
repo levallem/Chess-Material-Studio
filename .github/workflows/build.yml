@@ -13,8 +13,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+
+    runs-on: ubuntu-latest
+
+    name: Test
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install libasound2-dev libgtk-3-dev libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
   build-linux:
 
+    needs: test
     runs-on: ubuntu-latest
 
     name: Build Linux
@@ -46,6 +61,7 @@ jobs:
 
   build-mac:
 
+    needs: test
     runs-on: macos-latest
 
     name: Build mac
@@ -73,6 +89,7 @@ jobs:
 
   build-windows-64:
 
+    needs: test
     runs-on: windows-latest
 
     name: Build Windows 64-bit
@@ -108,6 +125,7 @@ jobs:
 
   build-windows-32:
 
+    needs: test
     runs-on: windows-latest
 
     name: Build Windows 32-bit
