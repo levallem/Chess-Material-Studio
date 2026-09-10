@@ -578,7 +578,7 @@ impl SearchTab {
         }
     }
 
-    pub async fn search_favs(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation:Variation, op_side: Option<OpeningSide>, result_limit: usize) -> Option<Vec<config::Puzzle>> {
+    pub async fn search_favs(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation:Variation, op_side: Option<OpeningSide>, result_limit: usize) -> Result<Vec<config::Puzzle>, String> {
         db::get_favorites(min_rating, max_rating, min_popularity, theme, opening, variation, op_side, result_limit)
     }
 
@@ -621,7 +621,7 @@ impl SearchTab {
                 self.opening_side,
                 config.search_results_limit,
             ),
-            Message::LoadPuzzle,
+            Message::LoadFavorites,
         )
     }
 

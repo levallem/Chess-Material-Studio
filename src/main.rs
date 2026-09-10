@@ -115,6 +115,17 @@ pub enum Message {
     SaveScreenshot(Option<(Screenshot, String)>),
     ExportPDF(Option<String>),
     LoadPuzzle(Option<Vec<config::Puzzle>>),
+    LoadFavorites(Result<Vec<config::Puzzle>, String>),
+    FavoriteStatusLoaded {
+        puzzle_id: String,
+        generation: u64,
+        result: Result<bool, String>,
+    },
+    FavoriteToggled {
+        puzzle_id: String,
+        generation: u64,
+        result: Result<bool, String>,
+    },
     LoadProjectPuzzles(Vec<config::Puzzle>),
     ExportPGN(Option<String>),
     ChangeSettings(Option<config::OfflinePuzzlesConfig>),
@@ -264,6 +275,8 @@ struct OfflinePuzzles {
     hint_square: Option<Square>,
     puzzle_status: String,
     puzzle_number_ui: String,
+    current_favorite: Option<bool>,
+    favorite_generation: u64,
 
     analysis: Game,
     analysis_history: Vec<Board>,
@@ -323,6 +336,8 @@ impl OfflinePuzzles {
             download_progress: String::new(),
             puzzle_status: lang::tr(&config::SETTINGS.lang, "use_search"),
             puzzle_number_ui: String::from("1"),
+            current_favorite: None,
+            favorite_generation: 0,
             search_tab: SearchTab::new(),
             settings_tab: SettingsTab::new(),
             puzzle_tab: PuzzleTab::new(),
@@ -339,7 +354,8 @@ impl OfflinePuzzles {
         }
     }
 
-    fn verify_and_make_move(&mut self, from: Square, to: Square) {
+    fn verify_and_make_move(&mut self, from: Square, to: Square) -> bool {
+        let mut current_puzzle_changed = false;
         let side =
         match self.game_mode {
             config::GameMode::Analysis => { self.analysis.side_to_move() }
@@ -354,7 +370,7 @@ impl OfflinePuzzles {
         // just replace the previous selection and exit
         if self.puzzle_tab.game_status == GameStatus::Playing && color == Some(side) {
             self.from_square = Some(to);
-            return;
+            return false;
         }
         self.from_square = None;
 
@@ -410,6 +426,7 @@ impl OfflinePuzzles {
                     if self.puzzle_tab.current_puzzle < self.puzzle_tab.puzzles.len() - 1 {
                         if self.settings_tab.saved_configs.auto_load_next {
                             self.load_puzzle(true);
+                            current_puzzle_changed = true;
                         } else {
                             self.puzzle_tab.game_status = GameStatus::PuzzleEnded;
                             self.puzzle_status = lang::tr(&self.lang, "correct_puzzle");
@@ -422,6 +439,7 @@ impl OfflinePuzzles {
                             self.analysis_history = vec![self.board];
                             self.puzzle_tab.current_puzzle_move = 1;
                             self.puzzle_tab.game_status = GameStatus::NoPuzzles;
+                            self.current_favorite = None;
                             self.refresh_current_puzzle_review();
                         } else {
                             self.puzzle_tab.game_status = GameStatus::PuzzleEnded;
@@ -457,6 +475,7 @@ impl OfflinePuzzles {
                 }
             }
         }
+        current_puzzle_changed
     }
 
     fn load_puzzle(&mut self, inc_counter: bool) {
@@ -515,6 +534,48 @@ impl OfflinePuzzles {
         self.project_tab.refresh_puzzle_review(puzzle.as_ref());
     }
 
+    fn favorite_error_status(&self, error: &str) -> String {
+        format!("{}: {error}", lang::tr(&self.lang, "my_favories"))
+    }
+
+    fn current_puzzle_matches(&self, puzzle_id: &str) -> bool {
+        self.current_reviewable_puzzle()
+            .is_some_and(|puzzle| puzzle.puzzle_id == puzzle_id)
+    }
+
+    fn next_favorite_generation(&mut self) -> u64 {
+        self.favorite_generation = self.favorite_generation.wrapping_add(1);
+        self.favorite_generation
+    }
+
+    fn favorite_response_is_current(&self, puzzle_id: &str, generation: u64) -> bool {
+        self.favorite_generation == generation && self.current_puzzle_matches(puzzle_id)
+    }
+
+    fn refresh_current_favorite_status(&mut self) -> Task<Message> {
+        let Some(puzzle_id) = self
+            .current_reviewable_puzzle()
+            .map(|puzzle| puzzle.puzzle_id.clone())
+        else {
+            self.current_favorite = None;
+            return Task::none();
+        };
+        let generation = self.next_favorite_generation();
+        self.current_favorite = None;
+
+        Task::perform(
+            {
+                let puzzle_id = puzzle_id.clone();
+                async move { db::is_favorite(&puzzle_id) }
+            },
+            move |result| Message::FavoriteStatusLoaded {
+                puzzle_id,
+                generation,
+                result,
+            },
+        )
+    }
+
     fn inc_puzzle_counter(&mut self) {
         self.puzzle_tab.current_puzzle += 1;
         self.puzzle_number_ui = (self.puzzle_tab.current_puzzle + 1).to_string();
@@ -556,8 +617,11 @@ impl OfflinePuzzles {
                 }
                 Task::none()
             } (Some(from), Message::SelectSquare(to)) if from != to => {
-                self.verify_and_make_move(from, to);
-                Task::none()
+                if self.verify_and_make_move(from, to) {
+                    self.refresh_current_favorite_status()
+                } else {
+                    Task::none()
+                }
             } (Some(_), Message::SelectSquare(to)) => {
                 self.from_square = Some(to);
                 Task::none()
@@ -597,13 +661,15 @@ impl OfflinePuzzles {
             } (_, Message::ShowNextPuzzle) => {
                 self.inc_puzzle_counter();
                 self.load_puzzle(false);
-                Task::none()
+                self.refresh_current_favorite_status()
             } (_, Message::ShowPreviousPuzzle) => {
                 if self.puzzle_tab.current_puzzle > 0 && self.game_mode == config::GameMode::Puzzle {
                     self.dec_puzzle_counter();
                     self.load_puzzle(false);
+                    self.refresh_current_favorite_status()
+                } else {
+                    Task::none()
                 }
-                Task::none()
             } (_, Message::GoBackMove) => {
                 if self.game_mode == config::GameMode::Analysis && self.analysis_history.len() > self.puzzle_tab.current_puzzle_move {
                     self.analysis_history.pop();
@@ -628,7 +694,7 @@ impl OfflinePuzzles {
                         sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
                 }
                 self.replace_puzzle_batch(puzzles_vec, false);
-                Task::none()
+                self.refresh_current_favorite_status()
             } (_, Message::LoadPuzzle(puzzles_vec)) => {
                 self.from_square = None;
                 self.search_tab.show_searching_msg = false;
@@ -640,6 +706,7 @@ impl OfflinePuzzles {
                 if let Some(puzzles_vec) = puzzles_vec {
                     if !puzzles_vec.is_empty() {
                         self.replace_puzzle_batch(puzzles_vec, true);
+                        return self.refresh_current_favorite_status();
                     } else {
                         // Just putting the default position to make it obvious the search ended.
                         self.board = Board::default();
@@ -647,6 +714,7 @@ impl OfflinePuzzles {
                         self.last_move_to = None;
                         self.puzzle_tab.game_status = GameStatus::NoPuzzles;
                         self.puzzle_status = lang::tr(&self.lang, "no_puzzle_found");
+                        self.current_favorite = None;
                     }
                 } else {
                     self.board = Board::default();
@@ -654,8 +722,62 @@ impl OfflinePuzzles {
                     self.last_move_to = None;
                     self.puzzle_tab.game_status = GameStatus::NoPuzzles;
                     self.puzzle_status = lang::tr(&self.lang, "no_puzzle_found");
+                    self.current_favorite = None;
                 }
                 self.refresh_current_puzzle_review();
+                Task::none()
+            } (_, Message::LoadFavorites(result)) => {
+                self.search_tab.show_searching_msg = false;
+                match result {
+                    Ok(puzzles_vec) => {
+                        self.from_square = None;
+                        self.game_mode = config::GameMode::Puzzle;
+                        if self.engine_state != EngineStatus::TurnedOff
+                            && let Some(sender) = &self.engine_sender {
+                                if let Err(error) = sender.blocking_send(String::from(eval::STOP_COMMAND)) {
+                                    eprintln!("Lost contact with the engine: {error}");
+                                }
+                        }
+                        if !puzzles_vec.is_empty() {
+                            self.replace_puzzle_batch(puzzles_vec, true);
+                            self.refresh_current_favorite_status()
+                        } else {
+                            self.board = Board::default();
+                            self.last_move_from = None;
+                            self.last_move_to = None;
+                            self.puzzle_tab.game_status = GameStatus::NoPuzzles;
+                            self.puzzle_status = lang::tr(&self.lang, "no_puzzle_found");
+                            self.current_favorite = None;
+                            self.refresh_current_puzzle_review();
+                            Task::none()
+                        }
+                    }
+                    Err(error) => {
+                        self.puzzle_status = self.favorite_error_status(&error);
+                        Task::none()
+                    }
+                }
+            } (_, Message::FavoriteStatusLoaded { puzzle_id, generation, result }) => {
+                if self.favorite_response_is_current(&puzzle_id, generation) {
+                    match result {
+                        Ok(is_favorite) => self.current_favorite = Some(is_favorite),
+                        Err(error) => {
+                            self.current_favorite = None;
+                            self.puzzle_status = self.favorite_error_status(&error);
+                        }
+                    }
+                }
+                Task::none()
+            } (_, Message::FavoriteToggled { puzzle_id, generation, result }) => {
+                if self.favorite_response_is_current(&puzzle_id, generation) {
+                    match result {
+                        Ok(is_favorite) => self.current_favorite = Some(is_favorite),
+                        Err(error) => {
+                            self.current_favorite = None;
+                            self.puzzle_status = self.favorite_error_status(&error);
+                        }
+                    }
+                }
                 Task::none()
             } (_, Message::ChangeSettings(message)) => {
                 if let Some(settings) = message {
@@ -700,7 +822,7 @@ impl OfflinePuzzles {
                         self.puzzle_tab.current_puzzle = index - 1;
                 }
                 self.load_puzzle(false);
-                Task::none()
+                self.refresh_current_favorite_status()
             } (_, Message::SetPuzzleReview(decision)) => {
                 if let Some(puzzle) = self.current_reviewable_puzzle().cloned() {
                     self.project_tab.set_puzzle_review(&puzzle, decision);
@@ -861,8 +983,24 @@ impl OfflinePuzzles {
                 self.download_progress = progress;
                 Task::none()
             } (_, Message::FavoritePuzzle) => {
-                db::toggle_favorite(self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle].clone());
-                Task::none()
+                let Some(puzzle) = self.current_reviewable_puzzle().cloned() else {
+                    return Task::none();
+                };
+                if self.current_favorite.is_none() {
+                    return Task::none();
+                }
+
+                let puzzle_id = puzzle.puzzle_id.clone();
+                let generation = self.next_favorite_generation();
+                self.current_favorite = None;
+                Task::perform(
+                    async move { db::toggle_favorite(puzzle) },
+                    move |result| Message::FavoriteToggled {
+                        puzzle_id,
+                        generation,
+                        result,
+                    },
+                )
             } (_, Message::WindowInitialized(id)) => {
                 self.window_id = id;
                 self.puzzle_tab.window_id = id;
@@ -897,7 +1035,9 @@ impl OfflinePuzzles {
                 if !zones.is_empty() {
                     let id: &GenericId = &zones[0].0.clone();
                     if let Some(to) = self.square_ids.get(id) {
-                        self.verify_and_make_move(from, *to);
+                        if self.verify_and_make_move(from, *to) {
+                            return self.refresh_current_favorite_status();
+                        }
                     }
                 }
                 Task::none()
@@ -929,11 +1069,7 @@ impl OfflinePuzzles {
         if self.has_db {
             let has_previous = !self.puzzle_tab.puzzles.is_empty() && self.puzzle_tab.current_puzzle > 0;
             let has_more_puzzles = !self.puzzle_tab.puzzles.is_empty() && self.puzzle_tab.current_puzzle < self.puzzle_tab.puzzles.len() - 1;
-            let is_fav = if self.puzzle_tab.puzzles.is_empty() {
-                false
-            } else {
-                db::is_favorite(&self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle].puzzle_id)
-            };
+            let is_fav = self.current_reviewable_puzzle().and(self.current_favorite);
             let puzzle_review = self
                 .current_reviewable_puzzle()
                 .and_then(|_| self.project_tab.review_view());
@@ -1095,6 +1231,21 @@ mod tests {
             puzzle_id: id.into(),
             fen: "8/8/8/8/8/8/8/K6k w - - 0 1".into(),
             moves: "a1a2".into(),
+            rating: 1500,
+            rating_deviation: 80,
+            popularity: 50,
+            nb_plays: 10,
+            themes: "hangingPiece".into(),
+            game_url: "https://lichess.org/game".into(),
+            opening: String::new(),
+        }
+    }
+
+    fn auto_advance_puzzle(id: &str) -> config::Puzzle {
+        config::Puzzle {
+            puzzle_id: id.into(),
+            fen: "8/8/8/8/8/8/8/K6k b - - 0 1".into(),
+            moves: "h1h2 a1a2".into(),
             rating: 1500,
             rating_deviation: 80,
             popularity: 50,
@@ -1322,6 +1473,306 @@ mod tests {
 
         assert!(app.search_tab.show_searching_msg);
     }
+
+    fn app_with_current_puzzle(id: &str) -> OfflinePuzzles {
+        let mut app = OfflinePuzzles::new(false);
+        app.puzzle_tab.puzzles = vec![navigation_puzzle(id)];
+        app.puzzle_tab.current_puzzle = 0;
+        app.load_puzzle(false);
+        app
+    }
+
+    #[test]
+    fn favorite_search_error_preserves_the_loaded_puzzle() {
+        let mut app = app_with_current_puzzle("loaded-favorite");
+        let board = app.board;
+        app.search_tab.show_searching_msg = true;
+
+        let _ = app.update(Message::LoadFavorites(Err("controlled search failure".into())));
+
+        assert!(!app.search_tab.show_searching_msg);
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "loaded-favorite");
+        assert_eq!(app.board, board);
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "my_favories")));
+        assert!(app.puzzle_status.contains("controlled search failure"));
+    }
+
+    #[test]
+    fn empty_favorite_search_keeps_the_historical_no_puzzles_behavior() {
+        let mut app = app_with_current_puzzle("loaded-favorite");
+
+        let _ = app.update(Message::LoadFavorites(Ok(Vec::new())));
+
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::NoPuzzles);
+        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "no_puzzle_found"));
+        assert_eq!(app.current_favorite, None);
+    }
+
+    #[test]
+    fn current_favorite_status_result_updates_only_the_current_puzzle() {
+        let mut app = app_with_current_puzzle("current-favorite");
+        let generation = app.next_favorite_generation();
+
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "current-favorite".into(),
+            generation,
+            result: Ok(true),
+        });
+        assert_eq!(app.current_favorite, Some(true));
+
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "stale-favorite".into(),
+            generation,
+            result: Ok(false),
+        });
+        assert_eq!(app.current_favorite, Some(true));
+    }
+
+    #[test]
+    fn favorite_status_error_stays_indeterminate_and_visible() {
+        let mut app = app_with_current_puzzle("favorite-error");
+        let generation = app.next_favorite_generation();
+
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "favorite-error".into(),
+            generation,
+            result: Err("controlled status failure".into()),
+        });
+
+        assert_eq!(app.current_favorite, None);
+        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "my_favories")));
+        assert!(app.puzzle_status.contains("controlled status failure"));
+    }
+
+    #[test]
+    fn favorite_action_is_safe_without_a_current_puzzle_or_known_status() {
+        let mut empty_app = OfflinePuzzles::new(false);
+        let _ = empty_app.update(Message::FavoritePuzzle);
+        assert_eq!(empty_app.current_favorite, None);
+
+        let mut unknown_app = app_with_current_puzzle("unknown-favorite");
+        let _ = unknown_app.update(Message::FavoritePuzzle);
+        assert_eq!(unknown_app.current_favorite, None);
+    }
+
+    #[test]
+    fn favorite_action_marks_a_known_state_indeterminate_before_its_task_completes() {
+        let mut app = app_with_current_puzzle("pending-toggle");
+        app.current_favorite = Some(false);
+
+        let _ = app.update(Message::FavoritePuzzle);
+
+        assert_eq!(app.current_favorite, None);
+    }
+
+    #[test]
+    fn favorite_toggle_result_updates_only_the_matching_puzzle() {
+        let mut app = app_with_current_puzzle("toggle-current");
+        let generation = app.next_favorite_generation();
+
+        let _ = app.update(Message::FavoriteToggled {
+            puzzle_id: "toggle-current".into(),
+            generation,
+            result: Ok(true),
+        });
+        assert_eq!(app.current_favorite, Some(true));
+
+        let _ = app.update(Message::FavoriteToggled {
+            puzzle_id: "toggle-stale".into(),
+            generation,
+            result: Ok(false),
+        });
+        assert_eq!(app.current_favorite, Some(true));
+    }
+
+    #[test]
+    fn favorite_toggle_error_stays_indeterminate_and_visible() {
+        let mut app = app_with_current_puzzle("toggle-error");
+        let generation = app.next_favorite_generation();
+
+        let _ = app.update(Message::FavoriteToggled {
+            puzzle_id: "toggle-error".into(),
+            generation,
+            result: Err("controlled toggle failure".into()),
+        });
+
+        assert_eq!(app.current_favorite, None);
+        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "my_favories")));
+        assert!(app.puzzle_status.contains("controlled toggle failure"));
+    }
+
+    #[test]
+    fn stale_status_for_the_same_puzzle_cannot_overwrite_a_newer_status() {
+        let mut app = app_with_current_puzzle("same-status");
+        let first_generation = app.next_favorite_generation();
+        let second_generation = app.next_favorite_generation();
+
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "same-status".into(),
+            generation: second_generation,
+            result: Ok(true),
+        });
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "same-status".into(),
+            generation: first_generation,
+            result: Ok(false),
+        });
+
+        assert_eq!(app.current_favorite, Some(true));
+    }
+
+    #[test]
+    fn stale_status_error_for_the_same_puzzle_is_invisible() {
+        let mut app = app_with_current_puzzle("same-status-error");
+        let first_generation = app.next_favorite_generation();
+        let second_generation = app.next_favorite_generation();
+        let status_before_stale_error = app.puzzle_status.clone();
+
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "same-status-error".into(),
+            generation: second_generation,
+            result: Ok(true),
+        });
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "same-status-error".into(),
+            generation: first_generation,
+            result: Err("stale status failure".into()),
+        });
+
+        assert_eq!(app.current_favorite, Some(true));
+        assert_eq!(app.puzzle_status, status_before_stale_error);
+    }
+
+    #[test]
+    fn stale_status_after_a_same_puzzle_toggle_cannot_revert_the_toggle() {
+        let mut app = app_with_current_puzzle("status-then-toggle");
+        let status_generation = app.next_favorite_generation();
+        let toggle_generation = app.next_favorite_generation();
+
+        let _ = app.update(Message::FavoriteToggled {
+            puzzle_id: "status-then-toggle".into(),
+            generation: toggle_generation,
+            result: Ok(true),
+        });
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "status-then-toggle".into(),
+            generation: status_generation,
+            result: Ok(false),
+        });
+
+        assert_eq!(app.current_favorite, Some(true));
+    }
+
+    #[test]
+    fn stale_toggle_for_the_same_puzzle_is_invisible() {
+        let mut app = app_with_current_puzzle("stale-toggle");
+        let toggle_generation = app.next_favorite_generation();
+        let newer_generation = app.next_favorite_generation();
+        let status_before_stale_error = app.puzzle_status.clone();
+
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "stale-toggle".into(),
+            generation: newer_generation,
+            result: Ok(false),
+        });
+        let _ = app.update(Message::FavoriteToggled {
+            puzzle_id: "stale-toggle".into(),
+            generation: toggle_generation,
+            result: Err("stale toggle failure".into()),
+        });
+
+        assert_eq!(app.current_favorite, Some(false));
+        assert_eq!(app.puzzle_status, status_before_stale_error);
+    }
+
+    #[test]
+    fn returning_to_a_puzzle_does_not_accept_its_first_visit_response() {
+        let mut app = app_with_current_puzzle("first-a");
+        app.puzzle_tab.puzzles = vec![
+            navigation_puzzle("first-a"),
+            navigation_puzzle("middle-b"),
+            navigation_puzzle("first-a"),
+        ];
+        app.puzzle_tab.current_puzzle = 0;
+        app.load_puzzle(false);
+        let first_a_generation = app.next_favorite_generation();
+
+        let _ = app.update(Message::ShowNextPuzzle);
+        let _ = app.update(Message::ShowNextPuzzle);
+        let returning_a_generation = app.favorite_generation;
+        assert_ne!(returning_a_generation, first_a_generation);
+        app.current_favorite = Some(true);
+        let status_before_stale_response = app.puzzle_status.clone();
+
+        let _ = app.update(Message::FavoriteStatusLoaded {
+            puzzle_id: "first-a".into(),
+            generation: first_a_generation,
+            result: Err("first visit failure".into()),
+        });
+
+        assert_eq!(app.current_favorite, Some(true));
+        assert_eq!(app.puzzle_status, status_before_stale_response);
+    }
+
+    #[test]
+    fn redo_keeps_known_favorite_state_and_generation_for_the_same_puzzle() {
+        let mut app = app_with_current_puzzle("redo-favorite");
+        app.current_favorite = Some(true);
+        let generation_before_redo = app.favorite_generation;
+        let puzzle_id_before_redo = app.current_reviewable_puzzle().unwrap().puzzle_id.clone();
+
+        let _ = app.update(Message::RedoPuzzle);
+
+        assert_eq!(app.current_reviewable_puzzle().unwrap().puzzle_id, puzzle_id_before_redo);
+        assert_eq!(app.current_favorite, Some(true));
+        assert_eq!(app.favorite_generation, generation_before_redo);
+    }
+
+    #[test]
+    fn drag_auto_advance_refreshes_favorites_for_the_new_puzzle() {
+        let mut app = OfflinePuzzles::new(false);
+        app.puzzle_tab.puzzles = vec![
+            auto_advance_puzzle("drag-first"),
+            auto_advance_puzzle("drag-second"),
+        ];
+        app.load_puzzle(false);
+        app.settings_tab.saved_configs.auto_load_next = true;
+        app.current_favorite = Some(true);
+        app.favorite_generation = 41;
+
+        let _ = app.update(Message::HandleDropZones(
+            Square::A1,
+            vec![(GenericId::new(config::BTN_IDS[Square::A2.to_index()]), Rectangle::default())],
+        ));
+
+        assert_eq!(app.puzzle_tab.current_puzzle, 1);
+        assert_eq!(app.current_reviewable_puzzle().unwrap().puzzle_id, "drag-second");
+        assert_eq!(app.current_favorite, None);
+        assert_eq!(app.favorite_generation, 42);
+    }
+
+    #[test]
+    fn drag_without_auto_advance_preserves_favorites_state() {
+        let mut app = OfflinePuzzles::new(false);
+        app.puzzle_tab.puzzles = vec![
+            auto_advance_puzzle("drag-first"),
+            auto_advance_puzzle("drag-second"),
+        ];
+        app.load_puzzle(false);
+        app.settings_tab.saved_configs.auto_load_next = true;
+        app.current_favorite = Some(true);
+        app.favorite_generation = 41;
+
+        let _ = app.update(Message::HandleDropZones(
+            Square::A1,
+            vec![(GenericId::new(config::BTN_IDS[Square::B1.to_index()]), Rectangle::default())],
+        ));
+
+        assert_eq!(app.puzzle_tab.current_puzzle, 0);
+        assert_eq!(app.current_favorite, Some(true));
+        assert_eq!(app.favorite_generation, 41);
+    }
 }
 
 pub async fn screenshot_save_dialog(img: Screenshot) -> Option<(Screenshot, String)> {
@@ -1343,7 +1794,7 @@ fn gen_view<'a>(
     piece_theme: styles::PieceTheme,
     board_theme: styles::BoardTheme,
     puzzle_status: &'a str,
-    is_fav: bool,
+    is_fav: Option<bool>,
     has_more_puzzles: bool,
     has_previous: bool,
     analysis_history_len: usize,
@@ -1609,10 +2060,18 @@ fn gen_view<'a>(
         Radio::new(lang::tr(lang, "mode_analysis"), config::GameMode::Analysis, Some(game_mode), Message::SelectMode).style(styles::radio_style)
     ].spacing(10).padding(10).align_y(Alignment::Center);
 
-    let fav_label = if is_fav {
-        lang::tr(lang, "unfav")
-    } else {
-        lang::tr(lang, "fav")
+    let fav_label = match is_fav {
+        Some(true) => lang::tr(lang, "unfav"),
+        Some(false) => lang::tr(lang, "fav"),
+        None => lang::tr(lang, "my_favories"),
+    };
+    let favorite_button = {
+        let button = Button::new(Text::new(fav_label)).style(btn_style_simple);
+        if is_fav.is_some() {
+            button.on_press(Message::FavoritePuzzle)
+        } else {
+            button
+        }
     };
     let mut navigation_row = Row::new().padding(3).spacing(10);
     if game_mode == config::GameMode::Analysis {
@@ -1640,17 +2099,17 @@ fn gen_view<'a>(
         if game_status == GameStatus::NoPuzzles {
             navigation_row = navigation_row
                 .push(Button::new(Text::new(lang::tr(lang, "redo"))).style(btn_style_simple))
-                .push(Button::new(Text::new(fav_label)).style(btn_style_simple))
+                .push(favorite_button)
                 .push(Button::new(Text::new(lang::tr(lang, "hint"))).style(btn_style_simple));
         } else if game_status == GameStatus::PuzzleEnded {
             navigation_row = navigation_row
                 .push(Button::new(Text::new(lang::tr(lang, "redo"))).on_press(Message::RedoPuzzle).style(btn_style_simple))
-                .push(Button::new(Text::new(fav_label)).on_press(Message::FavoritePuzzle).style(btn_style_simple))
+                .push(favorite_button)
                 .push(Button::new(Text::new(lang::tr(lang, "hint"))).style(btn_style_simple));
         } else {
             navigation_row = navigation_row
                 .push(Button::new(Text::new(lang::tr(lang, "redo"))).on_press(Message::RedoPuzzle).style(btn_style_simple))
-                .push(Button::new(Text::new(fav_label)).on_press(Message::FavoritePuzzle).style(btn_style_simple))
+                .push(favorite_button)
                 .push(Button::new(Text::new(lang::tr(lang, "hint"))).on_press(Message::ShowHint).style(btn_style_simple));
         }
     }
