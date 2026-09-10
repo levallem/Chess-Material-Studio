@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
@@ -164,111 +164,101 @@ fn parse_args() -> Result<ParseOutcome, String> {
     parse_args_from(&args)
 }
 
-fn canonicalize_if_exists(path: &std::path::Path) -> Result<PathBuf, String> {
-    if path.exists() {
-        std::fs::canonicalize(path)
-            .map_err(|e| format!("cannot canonicalize {}: {}", path.display(), e))
-    } else {
-        let abs = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|e| format!("cannot get cwd: {}", e))?
-                .join(path)
-        };
-        Ok(abs)
-    }
+fn canonicalize_if_exists(path: &Path) -> Result<PathBuf, String> {
+    normalize_path(path)
 }
 
 /// Check whether a given path resolves to the project's `ocp.db`.
 ///
 /// Anchored to `CARGO_MANIFEST_DIR`, not the current working directory.
-fn is_ocp_db(path: &std::path::Path) -> bool {
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let project_ocp = project_root.join("ocp.db");
+fn is_ocp_db(path: &Path) -> Result<bool, String> {
+    let project_ocp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ocp.db");
+    let protected = normalize_path(&project_ocp)
+        .map_err(|e| format!("cannot normalize protected database: {}", e))?;
+    let target = normalize_path(path)
+        .map_err(|e| format!("cannot normalize {}: {}", path.display(), e))?;
 
-    let target = match std::fs::canonicalize(path) {
-        Ok(c) => c,
-        Err(_) => {
-            let abs = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                match std::env::current_dir() {
-                    Ok(cwd) => cwd.join(path),
-                    Err(_) => return false,
-                }
-            };
-            abs
-        }
-    };
-
-    let protected = match std::fs::canonicalize(&project_ocp) {
-        Ok(c) => c,
-        Err(_) => project_ocp,
-    };
-
-    target == protected
+    Ok(target == protected)
 }
 
-/// Normalize a path by canonicalizing the closest existing ancestor
-/// and re-joining remaining non-existing suffix components.
+/// Normalize a path by resolving existing components with `canonicalize` and
+/// lexically resolving any remaining components.
 ///
-/// This avoids the Windows `\\?\` prefix mismatch that occurs when
-/// mixing `canonicalize` (returns UNC) with `cwd.join()` (returns regular).
+/// Existing components are canonicalized as they are encountered, so symlinks
+/// cannot escape a later containment check. Missing suffix components are
+/// normalized one at a time: `.` is ignored, `..` pops one component, and
+/// normal components are appended without requiring them to exist.
 fn normalize_path(path: &Path) -> Result<PathBuf, String> {
-    if path.exists() {
-        return std::fs::canonicalize(path)
-            .map_err(|e| format!("cannot canonicalize {}: {}", path.display(), e));
-    }
-
-    // Collect non-existing suffix components bottom-up
-    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-    let mut current = path;
-
-    while !current.exists() {
-        match current.file_name() {
-            Some(name) => suffix.push(name.to_os_string()),
-            None => break,
-        }
-        current = match current.parent() {
-            Some(p) => p,
-            None => break,
-        };
-    }
-
-    // Empty path "" is semantically cwd — canonicalize "." instead
-    let base = if current.as_os_str().is_empty() {
-        std::fs::canonicalize(".")
-            .map_err(|e| format!("cannot canonicalize current dir: {}", e))?
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        std::fs::canonicalize(current)
-            .map_err(|e| format!("cannot canonicalize base {}: {}", current.display(), e))?
+        std::env::current_dir()
+            .map_err(|e| format!("cannot get cwd: {}", e))?
+            .join(path)
     };
 
-    let mut result = base;
-    for component in suffix.iter().rev() {
-        result = result.join(component);
+    let mut result = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => result.push(prefix.as_os_str()),
+            Component::RootDir => result.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
+            }
+            Component::Normal(name) => {
+                result.push(name);
+                if result.try_exists().map_err(|e| {
+                    format!("cannot inspect path component {}: {}", result.display(), e)
+                })? {
+                    result = std::fs::canonicalize(&result).map_err(|e| {
+                        format!("cannot canonicalize {}: {}", result.display(), e)
+                    })?;
+                }
+            }
+        }
     }
-    Ok(result)
+
+    if result.as_os_str().is_empty() {
+        std::fs::canonicalize(".")
+            .map_err(|e| format!("cannot canonicalize current dir: {}", e))
+    } else {
+        Ok(result)
+    }
 }
-
-/// Check whether a DB path is within `<CARGO_MANIFEST_DIR>/target/cms_full_import/`.
+/// Check whether a DB path is within `project_root/target/cms_full_import/`.
 ///
-/// Both the allowed dir and the candidate are normalized through the same
-/// `normalize_path` function (canonicalize closest existing ancestor, re-join
-/// suffix) to ensure consistent representation on Windows.
-fn is_path_within_full_import_dir(path: &Path) -> Result<bool, String> {
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let allowed_dir = project_root.join("target").join("cms_full_import");
+/// The canonical target and allowed directories must remain physically within
+/// their parent security boundaries before either can be used for containment.
+fn is_path_within_full_import_dir_from_root(
+    path: &Path,
+    project_root: &Path,
+) -> Result<bool, String> {
+    let project_root_canon = normalize_path(project_root)
+        .map_err(|e| format!("cannot normalize project root: {}", e))?;
+    let target_dir = project_root.join("target");
+    let target_canon = normalize_path(&target_dir)
+        .map_err(|e| format!("cannot normalize target dir: {}", e))?;
+    if !target_canon.starts_with(&project_root_canon) {
+        return Ok(false);
+    }
 
+    let allowed_dir = target_dir.join("cms_full_import");
     let allowed_canon = normalize_path(&allowed_dir)
         .map_err(|e| format!("cannot normalize allowed dir: {}", e))?;
+    if !allowed_canon.starts_with(&target_canon) {
+        return Ok(false);
+    }
+
     let target_canon = normalize_path(path)
         .map_err(|e| format!("cannot normalize {}: {}", path.display(), e))?;
 
     Ok(target_canon.starts_with(&allowed_canon))
 }
 
+fn is_path_within_full_import_dir(path: &Path) -> Result<bool, String> {
+    is_path_within_full_import_dir_from_root(path, Path::new(env!("CARGO_MANIFEST_DIR")))
+}
 fn validate_args(args: &Args) -> Result<(), String> {
     let csv_canon = canonicalize_if_exists(&args.csv)?;
     let db_canon = canonicalize_if_exists(&args.db)?;
@@ -277,7 +267,7 @@ fn validate_args(args: &Args) -> Result<(), String> {
         return Err("--csv and --db cannot resolve to the same file".into());
     }
 
-    if is_ocp_db(&args.db) {
+    if is_ocp_db(&args.db)? {
         return Err("Refusing to use protected database: ocp.db".into());
     }
 
@@ -889,6 +879,86 @@ mod tests {
         let p = PathBuf::from("target/cms_full_import/../../ocp.db");
         assert!(!is_path_within_full_import_dir(&p).unwrap());
     }
+    #[test]
+    fn test_full_import_path_internal_normalization_allowed() {
+        let p = PathBuf::from("target/cms_full_import/sub/../test.sqlite");
+        assert!(is_path_within_full_import_dir(&p).unwrap());
+    }
+
+    #[test]
+    fn test_full_import_path_multiple_parent_dirs_rejected() {
+        let p = PathBuf::from("target/cms_full_import/sub/../../../outside.sqlite");
+        assert!(!is_path_within_full_import_dir(&p).unwrap());
+    }
+
+    #[test]
+    fn test_normalize_path_lexically_resolves_missing_suffix_components() {
+        let missing_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("cms_normalize_missing_{}", std::process::id()));
+        assert!(!missing_dir.exists(), "test directory must not exist");
+
+        let normalized = normalize_path(&missing_dir.join("sub").join("..").join("test.sqlite"))
+            .unwrap();
+        let expected = normalize_path(&missing_dir.join("test.sqlite")).unwrap();
+
+        assert_eq!(normalized, expected);
+    }
+
+    #[cfg(unix)]
+    struct TestDirCleanup(Vec<PathBuf>);
+
+    #[cfg(unix)]
+    impl Drop for TestDirCleanup {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                std::fs::remove_dir_all(path).ok();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_full_import_allowed_dir_symlink_outside_target_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let project_root = tmp_path("full_import_symlink_project");
+        let external_dir = tmp_path("full_import_symlink_external");
+        let _cleanup = TestDirCleanup(vec![project_root.clone(), external_dir.clone()]);
+        let target_dir = project_root.join("target");
+        let allowed_dir = target_dir.join("cms_full_import");
+
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::create_dir_all(&external_dir).unwrap();
+        symlink(&external_dir, &allowed_dir).unwrap();
+
+        assert!(!is_path_within_full_import_dir_from_root(
+            &allowed_dir.join("external.sqlite"),
+            &project_root,
+        )
+        .unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_full_import_candidate_symlink_outside_target_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let project_root = tmp_path("full_import_candidate_symlink_project");
+        let external_dir = tmp_path("full_import_candidate_symlink_external");
+        let _cleanup = TestDirCleanup(vec![project_root.clone(), external_dir.clone()]);
+        let allowed_dir = project_root.join("target").join("cms_full_import");
+
+        std::fs::create_dir_all(&allowed_dir).unwrap();
+        std::fs::create_dir_all(&external_dir).unwrap();
+        symlink(&external_dir, allowed_dir.join("outside")).unwrap();
+
+        assert!(!is_path_within_full_import_dir_from_root(
+            &allowed_dir.join("outside").join("external.sqlite"),
+            &project_root,
+        )
+        .unwrap());
+    }
 
     #[test]
     fn test_full_import_sibling_prefix_rejected() {
@@ -930,6 +1000,23 @@ mod tests {
             resume: false,
         };
         assert!(validate_args(&args).is_err());
+    }
+    #[test]
+    fn test_validate_ocp_db_through_missing_parent_rejected() {
+        let missing_parent = format!("cms_ocp_missing_{}", std::process::id());
+        assert!(!Path::new(&missing_parent).exists());
+        let args = Args {
+            csv: PathBuf::from("tests/fixtures/lichess_puzzles_sample.csv"),
+            db: PathBuf::from(missing_parent).join("..").join("ocp.db"),
+            mode: ImportMode::Limited { max_rows: 100 },
+            chunk_size: 10,
+            resume: false,
+        };
+
+        assert_eq!(
+            validate_args(&args).unwrap_err(),
+            "Refusing to use protected database: ocp.db"
+        );
     }
 
     #[test]
