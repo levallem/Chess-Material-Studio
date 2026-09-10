@@ -63,7 +63,6 @@ pub struct SettingsTab {
     pub interface_theme: styles::InterfaceTheme,
     pub lang: PickListWrapper<lang::Language>,
     pub export_pgs: String,
-    theme: styles::BoardTheme,
     play_sound: bool,
     auto_load_next: bool,
     pub flip_board: bool,
@@ -78,25 +77,31 @@ pub struct SettingsTab {
 
 impl SettingsTab {
     pub fn new() -> Self {
+        Self::from_config(&config::SETTINGS, config::load_config())
+    }
+
+    fn from_config(
+        config: &config::OfflinePuzzlesConfig,
+        saved_configs: config::OfflinePuzzlesConfig,
+    ) -> Self {
         SettingsTab {
-            engine_path: config::SETTINGS.engine_path.clone().unwrap_or_default(),
-            window_width: config::SETTINGS.window_width,
-            window_height: config::SETTINGS.window_width,
-            maximized: config::SETTINGS.maximized,
-            piece_theme: config::SETTINGS.piece_theme,
-            board_theme: config::SETTINGS.board_theme,
-            interface_theme: config::SETTINGS.interface_theme,
-            lang: PickListWrapper::new_lang(config::SETTINGS.lang, config::SETTINGS.lang),
-            export_pgs: config::SETTINGS.export_pgs.to_string(),
-            theme: styles::BoardTheme::Blue,
-            play_sound: config::SETTINGS.play_sound,
-            auto_load_next: config::SETTINGS.auto_load_next,
-            flip_board: config::SETTINGS.flip_board,
-            show_coordinates: config::SETTINGS.show_coordinates,
-            puzzle_db_location_value: String::from(&config::SETTINGS.puzzle_db_location),
-            search_results_limit_value: config::SETTINGS.search_results_limit.to_string(),
+            engine_path: config.engine_path.clone().unwrap_or_default(),
+            window_width: config.window_width,
+            window_height: config.window_height,
+            maximized: config.maximized,
+            piece_theme: config.piece_theme,
+            board_theme: config.board_theme,
+            interface_theme: config.interface_theme,
+            lang: PickListWrapper::new_lang(config.lang, config.lang),
+            export_pgs: config.export_pgs.to_string(),
+            play_sound: config.play_sound,
+            auto_load_next: config.auto_load_next,
+            flip_board: config.flip_board,
+            show_coordinates: config.show_coordinates,
+            puzzle_db_location_value: String::from(&config.puzzle_db_location),
+            search_results_limit_value: config.search_results_limit.to_string(),
             settings_status: String::new(),
-            saved_configs: config::load_config(),
+            saved_configs,
         }
     }
 
@@ -108,7 +113,14 @@ impl SettingsTab {
             }
             SettingsMessage::SelectBoardTheme(value) => {
                 self.board_theme = value;
-                Task::perform(SettingsTab::send_changes(self.play_sound, self.auto_load_next, self.flip_board, self.show_coordinates, self.piece_theme, self.theme, self.engine_path.clone(), self.lang.lang), Message::ChangeSettings)
+                let (play_sound, auto_load, flip, coords, pieces, theme, engine, lang) =
+                    self.settings_change_values();
+                Task::perform(
+                    SettingsTab::send_changes(
+                        play_sound, auto_load, flip, coords, pieces, theme, engine, lang,
+                    ),
+                    Message::ChangeSettings,
+                )
             }
             SettingsMessage::SelectInterfaceTheme(value) => {
                 self.interface_theme = value;
@@ -123,7 +135,14 @@ impl SettingsTab {
             SettingsMessage::SelectLanguage(value) => {
                 self.lang = value;
                 self.lang.lang = self.lang.item;
-                Task::perform(SettingsTab::send_changes(self.play_sound, self.auto_load_next, self.flip_board, self.show_coordinates, self.piece_theme, self.theme, self.engine_path.clone(), self.lang.lang), Message::ChangeSettings)
+                let (play_sound, auto_load, flip, coords, pieces, theme, engine, lang) =
+                    self.settings_change_values();
+                Task::perform(
+                    SettingsTab::send_changes(
+                        play_sound, auto_load, flip, coords, pieces, theme, engine, lang,
+                    ),
+                    Message::ChangeSettings,
+                )
             }
             SettingsMessage::ChangePuzzleDbLocation(value) => {
                 self.puzzle_db_location_value = value;
@@ -317,13 +336,46 @@ impl SettingsTab {
         }
     }
 
-    pub async fn send_changes(play_sound: bool, auto_load: bool, flip: bool, coords: bool, pieces: styles::PieceTheme, theme: styles::BoardTheme, engine: String, lang: lang::Language) -> Option<config::OfflinePuzzlesConfig> {
+    fn settings_change_values(
+        &self,
+    ) -> (
+        bool,
+        bool,
+        bool,
+        bool,
+        styles::PieceTheme,
+        styles::BoardTheme,
+        String,
+        lang::Language,
+    ) {
+        (
+            self.play_sound,
+            self.auto_load_next,
+            self.flip_board,
+            self.show_coordinates,
+            self.piece_theme,
+            self.board_theme,
+            self.engine_path.clone(),
+            self.lang.lang,
+        )
+    }
+
+    fn change_payload(
+        mut config: config::OfflinePuzzlesConfig,
+        play_sound: bool,
+        auto_load: bool,
+        flip: bool,
+        coords: bool,
+        pieces: styles::PieceTheme,
+        theme: styles::BoardTheme,
+        engine: String,
+        lang: lang::Language,
+    ) -> config::OfflinePuzzlesConfig {
         let engine = if engine.is_empty() {
             None
         } else {
             Some(engine)
         };
-        let mut config = config::load_config();
         config.board_theme = theme;
         config.piece_theme = pieces;
         config.lang = lang;
@@ -332,7 +384,21 @@ impl SettingsTab {
         config.flip_board = flip;
         config.show_coordinates = coords;
         config.engine_path = engine;
-        Some(config)
+        config
+    }
+
+    pub async fn send_changes(play_sound: bool, auto_load: bool, flip: bool, coords: bool, pieces: styles::PieceTheme, theme: styles::BoardTheme, engine: String, lang: lang::Language) -> Option<config::OfflinePuzzlesConfig> {
+        Some(Self::change_payload(
+            config::load_config(),
+            play_sound,
+            auto_load,
+            flip,
+            coords,
+            pieces,
+            theme,
+            engine,
+            lang,
+        ))
     }
 }
 
@@ -342,6 +408,66 @@ mod tests {
     use diesel::Connection;
     use diesel::sqlite::SqliteConnection;
     use diesel_migrations::MigrationHarness;
+
+    fn settings_tab_from_config(config: config::OfflinePuzzlesConfig) -> SettingsTab {
+        SettingsTab::from_config(&config, config.clone())
+    }
+
+    #[test]
+    fn settings_tab_uses_configured_window_height() {
+        let config = config::OfflinePuzzlesConfig {
+            window_width: 1234.0,
+            window_height: 567.0,
+            ..config::OfflinePuzzlesConfig::default()
+        };
+
+        let settings_tab = settings_tab_from_config(config);
+
+        assert_eq!(settings_tab.window_width, 1234.0);
+        assert_eq!(settings_tab.window_height, 567.0);
+    }
+
+    #[test]
+    fn board_theme_change_payload_uses_selected_theme() {
+        let config = config::OfflinePuzzlesConfig {
+            board_theme: styles::BoardTheme::Brown,
+            ..config::OfflinePuzzlesConfig::default()
+        };
+        let mut settings_tab = settings_tab_from_config(config.clone());
+
+        let _task = settings_tab.update(SettingsMessage::SelectBoardTheme(styles::BoardTheme::Green));
+        let (play_sound, auto_load, flip, coords, pieces, theme, engine, lang) =
+            settings_tab.settings_change_values();
+        let payload = SettingsTab::change_payload(
+            config, play_sound, auto_load, flip, coords, pieces, theme, engine, lang,
+        );
+        settings_tab.saved_configs = payload;
+
+        assert_eq!(settings_tab.board_theme, styles::BoardTheme::Green);
+        assert_eq!(settings_tab.saved_configs.board_theme, settings_tab.board_theme);
+    }
+
+    #[test]
+    fn language_change_payload_preserves_selected_board_theme() {
+        let config = config::OfflinePuzzlesConfig {
+            board_theme: styles::BoardTheme::Purple,
+            ..config::OfflinePuzzlesConfig::default()
+        };
+        let mut settings_tab = settings_tab_from_config(config.clone());
+
+        let _task = settings_tab.update(SettingsMessage::SelectLanguage(
+            PickListWrapper::new_lang(lang::Language::English, lang::Language::Spanish),
+        ));
+        let (play_sound, auto_load, flip, coords, pieces, theme, engine, lang) =
+            settings_tab.settings_change_values();
+        let payload = SettingsTab::change_payload(
+            config, play_sound, auto_load, flip, coords, pieces, theme, engine, lang,
+        );
+        settings_tab.saved_configs = payload;
+
+        assert_eq!(settings_tab.board_theme, styles::BoardTheme::Purple);
+        assert_eq!(settings_tab.saved_configs.board_theme, settings_tab.board_theme);
+    }
 
     struct TempPuzzleDb {
         path: std::path::PathBuf,
