@@ -1,10 +1,10 @@
 # Chess Material Studio
 
-Chess Material Studio is a desktop application for searching, solving, analyzing, and exporting chess puzzles for training and coaching. It currently supports the [Lichess Puzzle Database](https://database.lichess.org/#puzzles) as its primary puzzle source.
+Chess Material Studio is a desktop application for working with chess puzzles offline. Use it as a standalone puzzle solver to search, solve, analyze, and export a local collection, or use its optional Projects workflow to prepare persistent editorial material for books, classes, and similar work. It currently supports the [Lichess Puzzle Database](https://database.lichess.org/#puzzles) as its primary puzzle source.
 
 ## What is Chess Material Studio?
 
-Chess Material Studio helps chess players and coaches work with a local puzzle collection. You can filter puzzles, solve them on an interactive board, explore positions in analysis mode, save favorites, and prepare training material as PDF worksheets, PGN files, or JPEG board images.
+Chess Material Studio helps chess players and coaches work with a local puzzle collection. Without opening a project, you can filter puzzles, solve them on an interactive board, explore positions in analysis mode, save favorites, and create PDF worksheets, PGN files, or JPEG board images. Projects and Chapters add an optional persistent workflow for reviewing and organizing puzzle material.
 
 ## Features
 
@@ -18,6 +18,30 @@ Chess Material Studio helps chess players and coaches work with a local puzzle c
 - Export puzzle worksheets as PDF with exercise diagrams, side-to-move indicators, board orientation based on the side to move, coordinates, and an optional solution section with figurine notation.
 - Export puzzle sets as PGN using standard SAN notation.
 - Save the current board as a JPEG image.
+- Create or open editorial projects, organize them into Chapters, and optionally set a target puzzle count for each Chapter.
+- Review puzzles in an active Chapter as `Selected` or `Discarded`, clear a review decision, and resume the same editorial work after reopening the project.
+- Load and export selected editorial puzzles by active Chapter, marked Chapters, or the complete project.
+
+## Editorial workflow
+
+Projects are optional: the normal offline puzzle search and solver work without opening one. To prepare editorial material, create or open a project, create Chapters, choose an active Chapter, and optionally set its target puzzle count. Search the puzzle corpus, then review each puzzle as `Selected` or `Discarded`; a decision can also be cleared.
+
+Each project is stored in its own `.cms.sqlite` file. Reviews persist with a complete snapshot of the relevant puzzle data, rather than only its `PuzzleId`, so `Selected` and `Discarded` work survives closing and reopening a project. The selected puzzles of the active Chapter can be loaded back into the solver in their editorial order.
+
+During normal searches of the puzzle corpus, reviewed puzzles in the active Chapter are excluded from new results. This exclusion does not apply to Favorites searches. A puzzle marked `Selected` cannot be selected simultaneously in another Chapter of the same project; this restriction does not apply to `Discarded` reviews.
+
+### Editorial exports
+
+The Projects tab exports selected material through these routes:
+
+- Active Chapter to PGN.
+- Active Chapter to PDF.
+- Chapters marked for export to PGN.
+- Chapters marked for export to PDF.
+- Complete project to PGN.
+- Complete project to PDF.
+
+The multiple-Chapter export selection is temporary interface state, not project data stored in the `.cms.sqlite` file. It is cleared when a project is created, opened, or closed.
 
 ## Puzzle data
 
@@ -33,11 +57,9 @@ puzzles/lichess_db_puzzle.csv
 
 If automatic download is not suitable, download and extract the Lichess puzzle CSV manually, then place `lichess_db_puzzle.csv` at that path. The complete Lichess puzzle database is not included in this repository.
 
-### Advanced SQLite workflow
+### Optional SQLite puzzle corpus
 
-SQLite-backed puzzle searching is available as an advanced optional workflow. The puzzle source is configured through `puzzle_sqlite_location` in `settings.json`; the current GUI does not provide a standard file picker for selecting that database.
-
-The puzzle database is separate from `ocp.db`. `ocp.db` is the application's favorites database; it is not the puzzle corpus.
+SQLite-backed puzzle searching is an optional alternative to the local CSV. In **Settings**, choose a valid puzzle SQLite database with the file picker, or choose the CSV source again. The SQLite corpus is imported from Lichess data and is used as a search source; it is not an editorial project database.
 
 A limited CSV-to-SQLite import can be created with:
 
@@ -53,6 +75,20 @@ The importer also provides guarded full-import support and a `--resume` option. 
 ```bash
 cargo run --locked --release --bin import_puzzles -- --help
 ```
+
+### Three separate SQLite uses
+
+Chess Material Studio uses three distinct kinds of local data:
+
+1. **Puzzle corpus SQLite** — an optional SQLite database imported from Lichess and used instead of the CSV for puzzle searches.
+2. **Project `.cms.sqlite`** — an independent editorial project file containing its Chapters, reviews, and puzzle snapshots so work can continue later.
+3. **`ocp.db`** — the database used exclusively by the existing Favorites system.
+
+Neither a project file nor `ocp.db` replaces the Lichess puzzle corpus, and the optional puzzle corpus does not contain editorial project work.
+
+## Local configuration
+
+`settings.json` is optional local configuration. It is ignored by Git, and if it is absent at startup Chess Material Studio uses built-in default settings. Saving preferences can create or update this local file; it is not required to run the application and should not be versioned. The current release-packaging workflow does not include `settings.json` in its packages.
 
 ## Building and running
 
@@ -109,6 +145,7 @@ Third-party fonts, chess piece sets, and other assets may use separate licenses 
 - **California** — created by Jerry S.; currently attributed as CC BY-NC-SA 4.0.
 - **Cardinal, Dubrovny, Gioco, Icpieces, Maestro, Staunty, Governor, and Tatiana** — created by sadsnake1, currently attributed as CC BY-NC-SA 4.0, and obtained from the Lichess/lila project.
 - **Chess Alpha** piece set and font — created by Eric Bentzen; the included documentation describes it as free for personal, non-commercial use. See the documents in `font/`.
+- **Noto Sans** — created by The Noto Project Authors. `NotoSans-Regular.ttf` is embedded as the regular text font in current PDF generation and is distributed under the SIL Open Font License 1.1; see [font/OFL.txt](font/OFL.txt).
 - **Merida** — the original font was created by Armando Hernandez Marroquin and described as freeware. The shaded version used here was created by Felix Kling and obtained from the Lichess/lila project.
 
 Consult the notices included with individual assets before redistributing them, and do not assume that every asset is licensed under MIT.
