@@ -35,7 +35,6 @@ jobs:
           cp -R translations zip/chess-material-studio/
           cp -R font zip/chess-material-studio/
           cp *.ogg zip/chess-material-studio/
-          cp settings.json zip/chess-material-studio/
           cp LICENSE zip/chess-material-studio/
           cp README.md zip/chess-material-studio/
           cp target/release/chess-material-studio zip/chess-material-studio/
@@ -63,7 +62,6 @@ jobs:
           cp -R translations zip/chess-material-studio/
           cp -R font zip/chess-material-studio/
           cp *.ogg zip/chess-material-studio/
-          cp settings.json zip/chess-material-studio/
           cp LICENSE zip/chess-material-studio/
           cp README.md zip/chess-material-studio/
           cp target/release/chess-material-studio zip/chess-material-studio/
@@ -99,7 +97,6 @@ jobs:
           cp -R translations zip/chess-material-studio/
           cp -R font zip/chess-material-studio/
           cp *.ogg zip/chess-material-studio/
-          cp settings.json zip/chess-material-studio/
           cp LICENSE zip/chess-material-studio/
           cp README.md zip/chess-material-studio/
           cp target/release/chess-material-studio.exe zip/chess-material-studio/
@@ -135,7 +132,6 @@ jobs:
           cp -R translations zip/chess-material-studio/
           cp -R font zip/chess-material-studio/
           cp *.ogg zip/chess-material-studio/
-          cp settings.json zip/chess-material-studio/
           cp LICENSE zip/chess-material-studio/
           cp README.md zip/chess-material-studio/
           cp target/i686-pc-windows-msvc/release/chess-material-studio.exe zip/chess-material-studio/
