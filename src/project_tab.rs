@@ -72,6 +72,12 @@ struct ProjectPgnExportSnapshot {
 }
 
 #[derive(Debug, Clone)]
+struct ProjectPdfExportSnapshot {
+    project_name: String,
+    chapters: Vec<crate::export::ProjectPdfChapter>,
+}
+
+#[derive(Debug, Clone)]
 pub enum SelectedPuzzlesPgnExportResult {
     Cancelled,
     Finished(Result<(), String>),
@@ -79,6 +85,12 @@ pub enum SelectedPuzzlesPgnExportResult {
 
 #[derive(Debug, Clone)]
 pub enum ProjectPgnExportResult {
+    Cancelled,
+    Finished(Result<(), String>),
+}
+
+#[derive(Debug, Clone)]
+pub enum ProjectPdfExportResult {
     Cancelled,
     Finished(Result<(), String>),
 }
@@ -120,6 +132,8 @@ pub enum ProjectMessage {
     LoadSelectedPuzzles,
     ExportProjectPgn,
     ProjectPgnExportFinished(ProjectPgnExportResult),
+    ExportProjectPdf,
+    ProjectPdfExportFinished(ProjectPdfExportResult),
     ExportSelectedChaptersPgn,
     SelectedChaptersPgnExportFinished(SelectedChaptersPgnExportResult),
     ExportSelectedPuzzlesPgn,
@@ -245,6 +259,28 @@ impl ProjectTab {
             },
             ProjectMessage::ProjectPgnExportFinished(result) => {
                 self.apply_project_pgn_export_result(result);
+                Task::none()
+            }
+            ProjectMessage::ExportProjectPdf => match self.project_pdf_export_snapshot() {
+                Ok(Some(snapshot)) => {
+                    Task::perform(Self::export_project_pdf(snapshot, self.lang), |result| {
+                        Message::Project(ProjectMessage::ProjectPdfExportFinished(result))
+                    })
+                }
+                Ok(None) => {
+                    self.status = lang::tr(&self.lang, "no_selected_puzzles_in_project");
+                    Task::none()
+                }
+                Err(error) => {
+                    self.status = format!(
+                        "{}: {error}",
+                        lang::tr(&self.lang, "project_pdf_export_failed")
+                    );
+                    Task::none()
+                }
+            },
+            ProjectMessage::ProjectPdfExportFinished(result) => {
+                self.apply_project_pdf_export_result(result);
                 Task::none()
             }
             ProjectMessage::ExportSelectedChaptersPgn => {
@@ -537,6 +573,27 @@ impl ProjectTab {
         ))
     }
 
+    async fn export_project_pdf(
+        snapshot: ProjectPdfExportSnapshot,
+        lang: lang::Language,
+    ) -> ProjectPdfExportResult {
+        let Some(path) = AsyncFileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name("project.pdf")
+            .save_file()
+            .await
+            .map(|file| file.path().to_path_buf())
+        else {
+            return ProjectPdfExportResult::Cancelled;
+        };
+        ProjectPdfExportResult::Finished(crate::export::write_project_pdf(
+            &snapshot.project_name,
+            &snapshot.chapters,
+            &lang,
+            &path,
+        ))
+    }
+
     async fn export_selected_chapters_pgn(
         snapshot: ProjectPgnExportSnapshot,
     ) -> SelectedChaptersPgnExportResult {
@@ -769,6 +826,24 @@ impl ProjectTab {
         }))
     }
 
+    fn project_pdf_export_snapshot(&self) -> Result<Option<ProjectPdfExportSnapshot>, String> {
+        let active_project = self
+            .active_project
+            .as_ref()
+            .ok_or_else(|| "no project is open".to_string())?;
+        let chapters = list_selected_puzzles_by_chapter(&active_project.path)?
+            .into_iter()
+            .map(|chapter| crate::export::ProjectPdfChapter {
+                name: chapter.chapter_name,
+                puzzles: chapter.puzzles.iter().map(app_puzzle).collect(),
+            })
+            .collect::<Vec<_>>();
+        Ok((!chapters.is_empty()).then_some(ProjectPdfExportSnapshot {
+            project_name: active_project.metadata.project_name.clone(),
+            chapters,
+        }))
+    }
+
     fn selected_chapters_pgn_export_snapshot(
         &self,
     ) -> Result<Option<ProjectPgnExportSnapshot>, String> {
@@ -820,6 +895,21 @@ impl ProjectTab {
                     "{}: {error}",
                     lang::tr(&self.lang, "project_pgn_export_failed")
                 );
+            }
+        }
+    }
+
+    fn apply_project_pdf_export_result(&mut self, result: ProjectPdfExportResult) {
+        match result {
+            ProjectPdfExportResult::Cancelled => {}
+            ProjectPdfExportResult::Finished(Ok(())) => {
+                self.status = lang::tr(&self.lang, "project_pdf_exported")
+            }
+            ProjectPdfExportResult::Finished(Err(error)) => {
+                self.status = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "project_pdf_export_failed")
+                )
             }
         }
     }
@@ -1058,6 +1148,11 @@ impl ProjectTab {
             .push(
                 Button::new(Text::new(lang::tr(&self.lang, "export_project_to_pgn")))
                     .on_press(ProjectMessage::ExportProjectPgn)
+                    .style(btn_style_simple),
+            )
+            .push(
+                Button::new(Text::new(lang::tr(&self.lang, "export_project_to_pdf")))
+                    .on_press(ProjectMessage::ExportProjectPdf)
                     .style(btn_style_simple),
             )
             .push(Text::new(lang::tr(&self.lang, "chapters")))
@@ -1722,6 +1817,99 @@ mod tests {
     }
 
     #[test]
+    fn project_pdf_snapshot_is_owned_ordered_and_independent_from_ui_selection() {
+        let project = TempProjectDb::new("project-pdf-snapshot");
+        create_project(&project.path, "Libro editorial").unwrap();
+        let first_chapter = create_chapter(&project.path, "Primero", None).unwrap();
+        let empty_chapter = create_chapter(&project.path, "Vacío", None).unwrap();
+        let second_chapter = create_chapter(&project.path, "Segundo", None).unwrap();
+        let mut first = sample_puzzle();
+        first.puzzle_id = "cms-023o-first".into();
+        let mut second = sample_puzzle();
+        second.puzzle_id = "cms-023o-second".into();
+        let mut discarded = sample_puzzle();
+        discarded.puzzle_id = "cms-023o-discarded".into();
+        for (chapter_id, puzzle, decision) in [
+            (first_chapter.id, &first, ProjectPuzzleDecision::Selected),
+            (
+                first_chapter.id,
+                &discarded,
+                ProjectPuzzleDecision::Discarded,
+            ),
+            (second_chapter.id, &second, ProjectPuzzleDecision::Selected),
+        ] {
+            set_puzzle_decision(&project.path, chapter_id, &project_puzzle(puzzle), decision)
+                .unwrap();
+        }
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.active_project.as_mut().unwrap().active_chapter_id = None;
+        tab.set_chapter_export_selected(second_chapter.id, true);
+
+        let snapshot = tab.project_pdf_export_snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.project_name, "Libro editorial");
+        assert_eq!(
+            snapshot
+                .chapters
+                .iter()
+                .map(|chapter| chapter.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Primero", "Segundo"]
+        );
+        assert_eq!(snapshot.chapters[0].puzzles.len(), 1);
+        assert_eq!(snapshot.chapters[0].puzzles[0].puzzle_id, first.puzzle_id);
+        assert_eq!(snapshot.chapters[0].puzzles[0].fen, first.fen);
+        assert_eq!(snapshot.chapters[0].puzzles[0].moves, first.moves);
+        assert_eq!(snapshot.chapters[0].puzzles[0].rating, first.rating);
+        assert_eq!(
+            snapshot.chapters[0].puzzles[0].rating_deviation,
+            first.rating_deviation
+        );
+        assert_eq!(snapshot.chapters[0].puzzles[0].popularity, first.popularity);
+        assert_eq!(snapshot.chapters[0].puzzles[0].nb_plays, first.nb_plays);
+        assert_eq!(snapshot.chapters[0].puzzles[0].themes, first.themes);
+        assert_eq!(snapshot.chapters[0].puzzles[0].game_url, first.game_url);
+        assert_eq!(snapshot.chapters[0].puzzles[0].opening, first.opening);
+        tab.select_chapter(second_chapter.id);
+        tab.set_chapter_export_selected(second_chapter.id, false);
+        let _ = tab.update(ProjectMessage::CloseProject);
+        assert_eq!(snapshot.chapters[1].puzzles[0].puzzle_id, second.puzzle_id);
+        assert!(!tab.export_selected_chapter_ids.contains(&empty_chapter.id));
+    }
+
+    #[test]
+    fn project_pdf_action_keeps_cancel_neutral_and_reports_empty_read_and_writer_errors() {
+        let project = TempProjectDb::new("project-pdf-status");
+        create_project(&project.path, "Vacío").unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        let _ = tab.update(ProjectMessage::ExportProjectPdf);
+        assert_eq!(
+            tab.status,
+            lang::tr(&tab.lang, "no_selected_puzzles_in_project")
+        );
+        std::fs::remove_file(&project.path).unwrap();
+        let _ = tab.update(ProjectMessage::ExportProjectPdf);
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "project_pdf_export_failed"))
+        );
+        tab.status = "unchanged".into();
+        tab.apply_project_pdf_export_result(ProjectPdfExportResult::Cancelled);
+        assert_eq!(tab.status, "unchanged");
+        tab.apply_project_pdf_export_result(ProjectPdfExportResult::Finished(Ok(())));
+        assert!(
+            tab.status
+                .contains(&lang::tr(&tab.lang, "project_pdf_exported"))
+        );
+        tab.apply_project_pdf_export_result(ProjectPdfExportResult::Finished(Err(
+            "disk full".into()
+        )));
+        assert!(tab.status.contains("disk full"));
+    }
+
+    #[test]
     fn selected_chapters_pgn_snapshot_filters_the_ordered_project_read_and_is_owned() {
         let project = TempProjectDb::new("selected-chapters-pgn-snapshot");
         create_project(&project.path, "Libro editorial").unwrap();
@@ -2354,7 +2542,7 @@ mod tests {
 
     #[test]
     fn project_tab_translation_keys_exist_in_every_language() {
-        const PROJECT_KEYS: [&str; 52] = [
+        const PROJECT_KEYS: [&str; 55] = [
             "project",
             "new_project",
             "project_name",
@@ -2394,6 +2582,9 @@ mod tests {
             "export_project_to_pgn",
             "project_pgn_exported",
             "project_pgn_export_failed",
+            "export_project_to_pdf",
+            "project_pdf_exported",
+            "project_pdf_export_failed",
             "no_selected_puzzles_in_project",
             "export_chapter_to_pdf",
             "chapter_pdf_exported",

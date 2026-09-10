@@ -396,6 +396,12 @@ pub struct ProjectPgnChapter {
     pub puzzles: Vec<config::Puzzle>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectPdfChapter {
+    pub name: String,
+    pub puzzles: Vec<config::Puzzle>,
+}
+
 pub fn write_project_pgn(
     project_name: &str,
     chapters: &[ProjectPgnChapter],
@@ -666,6 +672,185 @@ fn historical_pdf_prefix(
     (&puzzles[..puzzle_count], diagram_pages)
 }
 
+const PROJECT_PDF_HEADING_LEFT: i32 = 50;
+const PROJECT_PDF_HEADING_WIDTH: i32 = 500;
+const PROJECT_PDF_PROJECT_HEADING_Y: i32 = 830;
+const PROJECT_PDF_CHAPTER_HEADING_Y: i32 = 812;
+const PROJECT_PDF_SOLUTION_START_Y: i32 = 780;
+const PROJECT_PDF_SOLUTION_LINE_HEIGHT: i32 = 18;
+const PROJECT_PDF_SOLUTION_MIN_Y: i32 = 18;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectPdfPagePlan {
+    chapter_index: usize,
+    puzzle_indexes: Vec<usize>,
+    puzzle_numbers: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectPdfPlan {
+    diagram_pages: Vec<ProjectPdfPagePlan>,
+    solution_pages: Vec<ProjectPdfPagePlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FittedProjectPdfHeading {
+    text: String,
+    font_size: i32,
+}
+
+fn project_pdf_solution_capacity() -> usize {
+    ((PROJECT_PDF_SOLUTION_START_Y - PROJECT_PDF_SOLUTION_MIN_Y) / PROJECT_PDF_SOLUTION_LINE_HEIGHT
+        + 1) as usize
+}
+
+fn project_pdf_plan(chapters: &[ProjectPdfChapter]) -> Result<ProjectPdfPlan, String> {
+    if chapters.iter().all(|chapter| chapter.puzzles.is_empty()) {
+        return Err("project has no selected puzzles".into());
+    }
+    let mut diagram_pages = Vec::new();
+    let mut solution_pages = Vec::new();
+    let mut next_puzzle_number = 1;
+    for (chapter_index, chapter) in chapters.iter().enumerate() {
+        if chapter.puzzles.is_empty() {
+            continue;
+        }
+        let chapter_numbers =
+            (next_puzzle_number..next_puzzle_number + chapter.puzzles.len()).collect::<Vec<_>>();
+        let puzzle_indexes = (0..chapter.puzzles.len()).collect::<Vec<_>>();
+        for indexes in puzzle_indexes.chunks(PDF_PUZZLES_PER_PAGE) {
+            let puzzle_indexes = indexes.to_vec();
+            diagram_pages.push(ProjectPdfPagePlan {
+                chapter_index,
+                puzzle_numbers: puzzle_indexes
+                    .iter()
+                    .map(|index| chapter_numbers[*index])
+                    .collect(),
+                puzzle_indexes,
+            });
+        }
+        for indexes in puzzle_indexes.chunks(project_pdf_solution_capacity()) {
+            let puzzle_indexes = indexes.to_vec();
+            solution_pages.push(ProjectPdfPagePlan {
+                chapter_index,
+                puzzle_numbers: puzzle_indexes
+                    .iter()
+                    .map(|index| chapter_numbers[*index])
+                    .collect(),
+                puzzle_indexes,
+            });
+        }
+        next_puzzle_number += chapter.puzzles.len();
+    }
+    Ok(ProjectPdfPlan {
+        diagram_pages,
+        solution_pages,
+    })
+}
+
+fn regular_pdf_text_width(text: &str, font_size: i32) -> Result<i32, String> {
+    let normalized = normalized_pdf_text(text);
+    let font = pdf_text_font()?;
+    let units_per_em = i64::from(font.units_per_em());
+    let units = normalized.chars().try_fold(0_i64, |total, character| {
+        let glyph = font.glyph_index(character).ok_or_else(|| {
+            format!(
+                "Embedded PDF text font has no glyph for U+{:04X} ('{}')",
+                character as u32, character
+            )
+        })?;
+        let advance = font.glyph_hor_advance(glyph).ok_or_else(|| {
+            format!(
+                "Embedded PDF text font has no advance for U+{:04X}",
+                character as u32
+            )
+        })?;
+        Ok::<_, String>(total + i64::from(advance))
+    })?;
+    Ok(((units * i64::from(font_size) + units_per_em - 1) / units_per_em) as i32)
+}
+
+fn fit_project_pdf_heading(
+    text: &str,
+    base_font_size: i32,
+    min_font_size: i32,
+) -> Result<FittedProjectPdfHeading, String> {
+    let normalized = normalized_pdf_text(text);
+    encode_pdf_regular_text(&normalized)?;
+    for font_size in (min_font_size..=base_font_size).rev() {
+        if regular_pdf_text_width(&normalized, font_size)? <= PROJECT_PDF_HEADING_WIDTH {
+            return Ok(FittedProjectPdfHeading {
+                text: normalized,
+                font_size,
+            });
+        }
+    }
+    Err(format!(
+        "PDF heading is too wide to fit within {} points",
+        PROJECT_PDF_HEADING_WIDTH
+    ))
+}
+
+fn append_project_pdf_headings(
+    ops: &mut Vec<Operation>,
+    project_heading: &FittedProjectPdfHeading,
+    chapter_heading: &FittedProjectPdfHeading,
+) -> Result<(), String> {
+    for (heading, y) in [
+        (project_heading, PROJECT_PDF_PROJECT_HEADING_Y),
+        (chapter_heading, PROJECT_PDF_CHAPTER_HEADING_Y),
+    ] {
+        ops.extend([
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["Regular".into(), heading.font_size.into()]),
+            Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
+            Operation::new("Td", vec![PROJECT_PDF_HEADING_LEFT.into(), y.into()]),
+            Operation::new("Tj", vec![encode_pdf_regular_text(&heading.text)?]),
+            Operation::new("ET", vec![]),
+        ]);
+    }
+    Ok(())
+}
+
+fn create_pdf_document() -> Result<(Document, lopdf::ObjectId, lopdf::ObjectId), String> {
+    let mut doc = Document::with_version("1.5");
+    let regular_font_id = doc
+        .add_font(pdf_text_font_data()?)
+        .map_err(|error| format!("Error adding PDF text font: {error}"))?;
+    let pages_id = doc.new_object_id();
+    let font_name = "Chess Alpha".to_string();
+    let mut font_data = lopdf::FontData::new(config::CHESS_ALPHA_BYTES, font_name.clone());
+    font_data
+        .set_flags(33)
+        .set_font_bbox((0, 0, 1000, 1000))
+        .set_first_char(32)
+        .set_last_char(255)
+        .set_widths(vec![1000.into(); 223])
+        .set_encoding("WinAnsiEncoding".to_string());
+    let font_id = doc
+        .add_font(font_data)
+        .map_err(|error| format!("Error adding PDF font: {error}"))?;
+    let resources_id = doc.add_object(dictionary! { "Font" => dictionary! { font_name => font_id, "Regular" => regular_font_id } });
+    Ok((doc, pages_id, resources_id))
+}
+
+fn save_pdf_document(
+    mut doc: Document,
+    pages_id: lopdf::ObjectId,
+    resources_id: lopdf::ObjectId,
+    page_ids: Vec<Object>,
+    path: &Path,
+) -> Result<(), String> {
+    let pages = dictionary! { "Type" => "Pages", "Count" => Object::Integer(page_ids.len() as i64), "Kids" => page_ids, "Resources" => resources_id, "MediaBox" => vec![0.into(), 0.into(), 600.into(), 850.into()] };
+    doc.objects.insert(pages_id, Object::Dictionary(pages));
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+    doc.compress();
+    doc.save(path)
+        .map(|_| ())
+        .map_err(|error| format!("Error writing PDF file '{}': {error}", path.display()))
+}
+
 pub fn write_pdf_all(
     puzzles: &[config::Puzzle],
     lang: &lang::Language,
@@ -687,6 +872,80 @@ pub fn to_pdf(
     if let Err(error) = write_pdf(puzzle_prefix, diagram_pages, lang, Path::new(&path)) {
         eprintln!("{error}");
     }
+}
+
+pub fn write_project_pdf(
+    project_name: &str,
+    chapters: &[ProjectPdfChapter],
+    lang: &lang::Language,
+    path: &Path,
+) -> Result<(), String> {
+    let plan = project_pdf_plan(chapters)?;
+    let project_heading = fit_project_pdf_heading(project_name, 10, 8)?;
+    let chapter_headings = chapters
+        .iter()
+        .map(|chapter| fit_project_pdf_heading(&chapter.name, 16, 10))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (mut doc, pages_id, resources_id) = create_pdf_document()?;
+    let mut page_ids = vec![];
+    for page in &plan.diagram_pages {
+        let chapter = &chapters[page.chapter_index];
+        let mut ops = vec![];
+        append_project_pdf_headings(
+            &mut ops,
+            &project_heading,
+            &chapter_headings[page.chapter_index],
+        )?;
+        let mut pos_x = 750;
+        let mut pos_y = 75;
+        for (slot, (&puzzle_index, &puzzle_number)) in page
+            .puzzle_indexes
+            .iter()
+            .zip(&page.puzzle_numbers)
+            .enumerate()
+        {
+            ops.append(&mut gen_diagram_operations(
+                puzzle_number,
+                &chapter.puzzles[puzzle_index],
+                pos_x,
+                pos_y,
+                lang,
+            )?);
+            if slot % 2 == 0 {
+                pos_y = 325;
+            } else {
+                pos_y = 75;
+                pos_x -= 250;
+            }
+        }
+        add_pdf_page(&mut doc, &mut page_ids, pages_id, Some(resources_id), ops)?;
+    }
+    for page in &plan.solution_pages {
+        let chapter = &chapters[page.chapter_index];
+        let mut ops = vec![];
+        append_project_pdf_headings(
+            &mut ops,
+            &project_heading,
+            &chapter_headings[page.chapter_index],
+        )?;
+        let mut y = PROJECT_PDF_SOLUTION_START_Y;
+        for (&puzzle_index, &puzzle_number) in page.puzzle_indexes.iter().zip(&page.puzzle_numbers)
+        {
+            let move_spans =
+                solution_spans_for_puzzle(puzzle_number, &chapter.puzzles[puzzle_index])?;
+            ops.extend([
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["Regular".into(), 12.into()]),
+                Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
+                Operation::new("Td", vec![75.into(), y.into()]),
+            ]);
+            append_pdf_solution_spans(&mut ops, &move_spans)?;
+            ops.push(Operation::new("ET", vec![]));
+            y -= PROJECT_PDF_SOLUTION_LINE_HEIGHT;
+        }
+        add_pdf_page(&mut doc, &mut page_ids, pages_id, Some(resources_id), ops)?;
+    }
+    save_pdf_document(doc, pages_id, resources_id, page_ids, path)
 }
 
 fn add_pdf_page(
@@ -783,29 +1042,7 @@ fn write_pdf(
         return Err("PDF diagram page plan does not match puzzle batch".to_string());
     }
 
-    let mut doc = Document::with_version("1.5");
-    let regular_font_id = doc
-        .add_font(pdf_text_font_data()?)
-        .map_err(|error| format!("Error adding PDF text font: {error}"))?;
-    let pages_id = doc.new_object_id();
-    let font_name = "Chess Alpha".to_string();
-    let mut font_data = lopdf::FontData::new(config::CHESS_ALPHA_BYTES, font_name.clone());
-    font_data
-        .set_flags(33)
-        .set_font_bbox((0, 0, 1000, 1000))
-        .set_first_char(32)
-        .set_last_char(255)
-        .set_widths(vec![1000.into(); 223])
-        .set_encoding("WinAnsiEncoding".to_string());
-    let font_id = doc
-        .add_font(font_data)
-        .map_err(|error| format!("Error adding PDF font: {error}"))?;
-    let resources_id = doc.add_object(dictionary! {
-        "Font" => dictionary! {
-            font_name => font_id,
-            "Regular" => regular_font_id,
-        },
-    });
+    let (mut doc, pages_id, resources_id) = create_pdf_document()?;
 
     let mut page_ids = vec![];
     for (page_index, puzzle_page) in puzzles.chunks(PDF_PUZZLES_PER_PAGE).enumerate() {
@@ -852,23 +1089,7 @@ fn write_pdf(
     }
     add_pdf_page(&mut doc, &mut page_ids, pages_id, None, ops)?;
 
-    let pages = dictionary! {
-        "Type" => "Pages",
-        "Count" => Object::Integer(page_ids.len() as i64),
-        "Kids" => page_ids,
-        "Resources" => resources_id,
-        "MediaBox" => vec![0.into(), 0.into(), 600.into(), 850.into()],
-    };
-    doc.objects.insert(pages_id, Object::Dictionary(pages));
-    let catalog_id = doc.add_object(dictionary! {
-        "Type" => "Catalog",
-        "Pages" => pages_id,
-    });
-    doc.trailer.set("Root", catalog_id);
-    doc.compress();
-    doc.save(path)
-        .map(|_| ())
-        .map_err(|error| format!("Error writing PDF file '{}': {error}", path.display()))
+    save_pdf_document(doc, pages_id, resources_id, page_ids, path)
 }
 fn pdf_board_labels(white_at_bottom: bool) -> ([i32; 8], [i32; 8]) {
     if white_at_bottom {
@@ -2833,6 +3054,122 @@ mod tests {
             document.get_pages().len(),
             2,
             "one diagram page plus one solution page"
+        );
+    }
+
+    #[test]
+    fn project_pdf_plan_preserves_boundaries_numbers_and_solution_continuations() {
+        let chapters = [
+            ProjectPdfChapter {
+                name: "A".into(),
+                puzzles: vec![fixture_puzzle_00010(); 2],
+            },
+            ProjectPdfChapter {
+                name: "B".into(),
+                puzzles: vec![fixture_puzzle_00010(); project_pdf_solution_capacity() + 1],
+            },
+        ];
+        let plan = project_pdf_plan(&chapters).unwrap();
+        assert_eq!(plan.diagram_pages.len(), 9);
+        assert_eq!(plan.diagram_pages[0].puzzle_numbers, vec![1, 2]);
+        assert_eq!(plan.diagram_pages[1].puzzle_numbers[0], 3);
+        assert_eq!(plan.solution_pages.len(), 3);
+        assert_eq!(plan.solution_pages[0].chapter_index, 0);
+        assert_eq!(plan.solution_pages[1].chapter_index, 1);
+        assert_eq!(plan.solution_pages[2].puzzle_numbers, vec![46]);
+    }
+
+    #[test]
+    fn project_pdf_writer_validates_headings_and_writes_a_readable_document() {
+        let path = pdf_test_path("cms-023o-project");
+        let chapters = [ProjectPdfChapter {
+            name: "Capítulo táctico".into(),
+            puzzles: vec![fixture_puzzle_00010()],
+        }];
+        write_project_pdf(
+            "Mi repertorio táctico",
+            &chapters,
+            &lang::Language::English,
+            &path,
+        )
+        .unwrap();
+        let document = Document::load(&path).unwrap();
+        assert_eq!(document.get_pages().len(), 2);
+        let encoding = lopdf::Encoding::SimpleEncoding(PDF_TEXT_ENCODING);
+        for page_id in document.get_pages().into_values() {
+            let content = Content::decode(&document.get_page_content(page_id)).unwrap();
+            let text = content
+                .operations
+                .iter()
+                .filter(|operation| operation.operator == "Tj")
+                .filter_map(|operation| match operation.operands.first() {
+                    Some(Object::String(bytes, _)) => encoding.bytes_to_string(bytes).ok(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(text.contains(&"Mi repertorio táctico".to_string()));
+            assert!(text.contains(&"Capítulo táctico".to_string()));
+        }
+        assert_eq!(
+            fit_project_pdf_heading("Capítulo táctico", 16, 10)
+                .unwrap()
+                .text,
+            "Capítulo táctico"
+        );
+        assert!(fit_project_pdf_heading(&"W".repeat(2_000), 16, 10).is_err());
+        assert!(write_project_pdf("中文", &chapters, &lang::Language::English, &path).is_err());
+        assert!(write_project_pdf("Vacío", &[], &lang::Language::English, &path).is_err());
+    }
+
+    #[test]
+    fn project_pdf_plans_exact_diagram_boundaries_and_rejects_generation_errors_before_save() {
+        for (chapter_sizes, expected_pages) in [
+            (vec![1], 1),
+            (vec![6], 1),
+            (vec![7], 2),
+            (vec![2, 2], 2),
+            (vec![6, 1], 2),
+            (vec![7, 7], 4),
+        ] {
+            let chapters = chapter_sizes
+                .into_iter()
+                .enumerate()
+                .map(|(index, count)| ProjectPdfChapter {
+                    name: format!("Chapter {index}"),
+                    puzzles: vec![fixture_puzzle_00010(); count],
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                project_pdf_plan(&chapters).unwrap().diagram_pages.len(),
+                expected_pages
+            );
+        }
+        let path = pdf_test_path("cms-023o-invalid-before-save");
+        let _ = std::fs::remove_file(&path);
+        let mut invalid_fen = fixture_puzzle_00010();
+        invalid_fen.fen = "invalid fen".into();
+        let invalid = [ProjectPdfChapter {
+            name: "Capítulo".into(),
+            puzzles: vec![invalid_fen],
+        }];
+        assert!(write_project_pdf("Proyecto", &invalid, &lang::Language::English, &path).is_err());
+        assert!(!path.exists());
+        let invalid_uci = [ProjectPdfChapter {
+            name: "Capítulo".into(),
+            puzzles: vec![config::Puzzle {
+                moves: "e2e5".into(),
+                ..fixture_puzzle_00010()
+            }],
+        }];
+        assert!(
+            write_project_pdf("Proyecto", &invalid_uci, &lang::Language::English, &path).is_err()
+        );
+        let cjk_chapter = [ProjectPdfChapter {
+            name: "中文".into(),
+            puzzles: vec![fixture_puzzle_00010()],
+        }];
+        assert!(
+            write_project_pdf("Proyecto", &cjk_chapter, &lang::Language::English, &path).is_err()
         );
     }
 }
