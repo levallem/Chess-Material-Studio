@@ -858,13 +858,36 @@ impl OfflinePuzzles {
                 }
                 Task::none()
             } (_, Message::ExportPDF(file_path)) => {
-                if let Some(file_path) = file_path {
-                    export::to_pdf(&self.puzzle_tab.puzzles, self.settings_tab.export_pgs.parse::<i32>().unwrap(), &self.lang, file_path);
+                match file_path {
+                    Some(file_path) => match export::to_pdf(
+                        &self.puzzle_tab.puzzles,
+                        self.settings_tab.export_pgs.parse::<i32>().unwrap(),
+                        &self.lang,
+                        file_path,
+                    ) {
+                        Ok(()) => self.puzzle_status = lang::tr(&self.lang, "normal_pdf_exported"),
+                        Err(error) => {
+                            self.puzzle_status = format!(
+                                "{}: {error}",
+                                lang::tr(&self.lang, "normal_pdf_export_failed")
+                            );
+                        }
+                    },
+                    None => self.puzzle_status = lang::tr(&self.lang, "normal_pdf_export_cancelled"),
                 }
                 Task::none()
             } (_, Message::ExportPGN(file_path)) => {
-                if let Some(file_path) = file_path {
-                    export::to_pgn(&self.puzzle_tab.puzzles, &self.lang, file_path);
+                match file_path {
+                    Some(file_path) => match export::to_pgn(&self.puzzle_tab.puzzles, &self.lang, file_path) {
+                        Ok(()) => self.puzzle_status = lang::tr(&self.lang, "normal_pgn_exported"),
+                        Err(error) => {
+                            self.puzzle_status = format!(
+                                "{}: {error}",
+                                lang::tr(&self.lang, "normal_pgn_export_failed")
+                            );
+                        }
+                    },
+                    None => self.puzzle_status = lang::tr(&self.lang, "normal_pgn_export_cancelled"),
                 }
                 Task::none()
             } (_, Message::EventOccurred(event)) => {
@@ -1192,6 +1215,7 @@ mod tests {
     use chess_material_studio::models::Puzzle as PersistentPuzzle;
     use chess_material_studio::project::{create_chapter, create_project, set_puzzle_decision};
     use crate::search_tab::SearchBase;
+    use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1277,6 +1301,104 @@ mod tests {
         assert_eq!(app.current_reviewable_puzzle().unwrap().puzzle_id, puzzle_id);
         assert_eq!(app.project_tab.cached_review_puzzle_id(), Some(puzzle_id));
         assert_eq!(app.project_tab.review_view().unwrap().decision, Some(decision));
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct NormalExportState {
+        puzzle_batch: Vec<(String, String, String, i32, i32, i32, i32, String, String, String)>,
+        current_puzzle: usize,
+        board: Board,
+        game_status: GameStatus,
+        current_favorite: Option<bool>,
+        review_puzzle_id: Option<String>,
+        review_view: Option<PuzzleReviewView>,
+        reviewed_puzzle_ids: Option<HashSet<String>>,
+    }
+
+    fn normal_export_state(app: &OfflinePuzzles) -> NormalExportState {
+        NormalExportState {
+            puzzle_batch: app.puzzle_tab.puzzles.iter().map(|puzzle| (
+                puzzle.puzzle_id.clone(), puzzle.fen.clone(), puzzle.moves.clone(), puzzle.rating,
+                puzzle.rating_deviation, puzzle.popularity, puzzle.nb_plays, puzzle.themes.clone(),
+                puzzle.game_url.clone(), puzzle.opening.clone(),
+            )).collect(),
+            current_puzzle: app.puzzle_tab.current_puzzle,
+            board: app.board,
+            game_status: app.puzzle_tab.game_status,
+            current_favorite: app.current_favorite,
+            review_puzzle_id: app.project_tab.cached_review_puzzle_id().map(str::to_owned),
+            review_view: app.project_tab.review_view(),
+            reviewed_puzzle_ids: app.project_tab.reviewed_puzzle_ids_for_active_chapter().unwrap(),
+        }
+    }
+
+    fn assert_normal_export_state_preserved(
+        app: &OfflinePuzzles,
+        expected: &NormalExportState,
+        route: &str,
+    ) {
+        assert_eq!(
+            normal_export_state(app).puzzle_batch,
+            expected.puzzle_batch,
+            "{route}: puzzle batch changed"
+        );
+        assert_eq!(
+            app.puzzle_tab.current_puzzle,
+            expected.current_puzzle,
+            "{route}: current puzzle changed"
+        );
+        assert_eq!(app.board, expected.board, "{route}: board changed");
+        assert_eq!(
+            app.puzzle_tab.game_status,
+            expected.game_status,
+            "{route}: game status changed"
+        );
+        assert_eq!(
+            app.current_favorite,
+            expected.current_favorite,
+            "{route}: favorite state changed"
+        );
+        assert_eq!(
+            app.project_tab.cached_review_puzzle_id().map(str::to_owned),
+            expected.review_puzzle_id,
+            "{route}: reviewed puzzle context changed"
+        );
+        assert_eq!(
+            app.project_tab.review_view(),
+            expected.review_view,
+            "{route}: review view changed"
+        );
+        assert_eq!(
+            app.project_tab.reviewed_puzzle_ids_for_active_chapter().unwrap(),
+            expected.reviewed_puzzle_ids,
+            "{route}: active project or chapter changed"
+        );
+    }
+
+    fn app_with_normal_export_review_context() -> (OfflinePuzzles, TempProjectDb) {
+        let project = TempProjectDb::new("normal-export-review-context");
+        create_project(&project.path, "Export context").unwrap();
+        let chapter = create_chapter(&project.path, "Current chapter", None).unwrap();
+        let puzzles = vec![
+            navigation_puzzle("normal-export-first"),
+            navigation_puzzle("normal-export-current"),
+        ];
+        set_puzzle_decision(
+            &project.path,
+            chapter.id,
+            &persistent_puzzle(&puzzles[1]),
+            ProjectPuzzleDecision::Selected,
+        ).unwrap();
+
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
+        app.puzzle_tab.puzzles = puzzles;
+        app.puzzle_tab.current_puzzle = 1;
+        app.load_puzzle(false);
+        app.current_favorite = Some(true);
+        (app, project)
     }
 
     #[test]
@@ -1478,6 +1600,79 @@ mod tests {
         app.puzzle_tab.current_puzzle = 0;
         app.load_puzzle(false);
         app
+    }
+
+    fn normal_export_test_path(extension: &str) -> PathBuf {
+        let sequence = TEMP_PROJECT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_normal_export_main_tests");
+        std::fs::create_dir_all(&directory).expect("normal export test directory should be created");
+        directory.join(format!("normal-export-{}-{sequence}.{extension}", std::process::id()))
+    }
+
+    #[test]
+    fn normal_exports_report_success_cancellation_and_errors_without_changing_the_batch() {
+        let (mut app, _project) = app_with_normal_export_review_context();
+        let original_state = normal_export_state(&app);
+        assert_eq!(original_state.current_puzzle, 1);
+        assert_current_review(
+            &app,
+            "normal-export-current",
+            ProjectPuzzleDecision::Selected,
+        );
+
+        let _ = app.update(Message::ExportPGN(None));
+        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "normal_pgn_export_cancelled"));
+        assert_normal_export_state_preserved(&app, &original_state, "PGN cancellation");
+
+        let pgn_path = normal_export_test_path("pgn");
+        let _ = app.update(Message::ExportPGN(Some(pgn_path.display().to_string())));
+        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "normal_pgn_exported"));
+        assert!(pgn_path.is_file());
+        assert_normal_export_state_preserved(&app, &original_state, "PGN success");
+        let _ = std::fs::remove_file(&pgn_path);
+
+        let pgn_missing_parent = normal_export_test_path("missing").join("output.pgn");
+        let _ = app.update(Message::ExportPGN(Some(pgn_missing_parent.display().to_string())));
+        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "normal_pgn_export_failed")));
+        assert!(app.puzzle_status.contains("Error writing PGN file"));
+        assert_normal_export_state_preserved(&app, &original_state, "PGN error");
+
+        let _ = app.update(Message::ExportPDF(None));
+        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "normal_pdf_export_cancelled"));
+        assert_normal_export_state_preserved(&app, &original_state, "PDF cancellation");
+
+        let pdf_path = normal_export_test_path("pdf");
+        let _ = app.update(Message::ExportPDF(Some(pdf_path.display().to_string())));
+        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "normal_pdf_exported"));
+        assert!(pdf_path.is_file());
+        assert_normal_export_state_preserved(&app, &original_state, "PDF success");
+        let _ = std::fs::remove_file(&pdf_path);
+
+        let pdf_missing_parent = normal_export_test_path("missing").join("output.pdf");
+        let _ = app.update(Message::ExportPDF(Some(pdf_missing_parent.display().to_string())));
+        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "normal_pdf_export_failed")));
+        assert!(app.puzzle_status.contains("Error writing PDF file"));
+        assert_normal_export_state_preserved(&app, &original_state, "PDF error");
+    }
+
+    #[test]
+    fn normal_export_status_translation_keys_exist_in_every_language() {
+        const NORMAL_EXPORT_KEYS: [&str; 6] = [
+            "normal_pgn_exported",
+            "normal_pgn_export_cancelled",
+            "normal_pgn_export_failed",
+            "normal_pdf_exported",
+            "normal_pdf_export_cancelled",
+            "normal_pdf_export_failed",
+        ];
+
+        for language in lang::Language::ALL {
+            for key in NORMAL_EXPORT_KEYS {
+                assert!(!lang::tr(&language, key).is_empty(), "missing {key}");
+            }
+        }
     }
 
     #[test]

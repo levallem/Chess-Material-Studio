@@ -437,10 +437,12 @@ pub fn write_project_pgn(
         .map_err(|error| format!("Error writing PGN file '{}': {error}", path.display()))
 }
 
-pub fn to_pgn(puzzles: &[config::Puzzle], _lang: &lang::Language, path: String) {
-    if let Err(error) = write_pgn(puzzles, Path::new(&path)) {
-        eprintln!("{error}");
-    }
+pub fn to_pgn(
+    puzzles: &[config::Puzzle],
+    _lang: &lang::Language,
+    path: String,
+) -> Result<(), String> {
+    write_pgn(puzzles, Path::new(&path))
 }
 
 // ─── PDF figurine spans ─────────────────────────────────────────────────────
@@ -867,11 +869,9 @@ pub fn to_pdf(
     number_of_pages: i32,
     lang: &lang::Language,
     path: String,
-) {
+) -> Result<(), String> {
     let (puzzle_prefix, diagram_pages) = historical_pdf_prefix(puzzles, number_of_pages);
-    if let Err(error) = write_pdf(puzzle_prefix, diagram_pages, lang, Path::new(&path)) {
-        eprintln!("{error}");
-    }
+    write_pdf(puzzle_prefix, diagram_pages, lang, Path::new(&path))
 }
 
 pub fn write_project_pdf(
@@ -2077,7 +2077,8 @@ mod tests {
         std::fs::create_dir_all(&dir).ok();
         let path = dir.join(format!("cms014_sample_{}.pgn", std::process::id()));
 
-        to_pgn(&puzzles, &lang::Language::English, path.to_str().unwrap().to_string());
+        to_pgn(&puzzles, &lang::Language::English, path.to_str().unwrap().to_string())
+            .expect("valid PGN export should succeed");
 
         let content = std::fs::read_to_string(&path).expect("PGN file should exist");
         assert!(content.contains("[SetUp \"1\"]"));
@@ -2086,6 +2087,26 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn normal_export_wrappers_propagate_writer_errors() {
+        let mut invalid = fixture_puzzle_00010();
+        invalid.moves.clear();
+
+        assert!(to_pgn(
+            &[invalid.clone()],
+            &lang::Language::English,
+            pdf_test_path("invalid-normal-export").display().to_string(),
+        )
+        .is_err());
+        assert!(to_pdf(
+            &[invalid],
+            1,
+            &lang::Language::English,
+            pdf_test_path("invalid-normal-export").display().to_string(),
+        )
+        .is_err());
     }
 
     // ── Existing tests preserved ──
@@ -3047,7 +3068,8 @@ mod tests {
             1,
             &lang::Language::English,
             path.display().to_string(),
-        );
+        )
+        .expect("historical wrapper should still export its page-limited prefix");
         let document =
             Document::load(path).expect("historical wrapper should still write a readable PDF");
         assert_eq!(
