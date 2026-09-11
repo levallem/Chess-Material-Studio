@@ -114,7 +114,7 @@ pub enum Message {
     ScreenshotCreated(Screenshot),
     SaveScreenshot(Option<(Screenshot, String)>),
     ExportPDF(Option<String>),
-    LoadPuzzle(Option<Vec<config::Puzzle>>),
+    LoadPuzzle(Result<Vec<config::Puzzle>, String>),
     LoadFavorites(Result<Vec<config::Puzzle>, String>),
     FavoriteStatusLoaded {
         puzzle_id: String,
@@ -695,28 +695,26 @@ impl OfflinePuzzles {
                 }
                 self.replace_puzzle_batch(puzzles_vec, false);
                 self.refresh_current_favorite_status()
-            } (_, Message::LoadPuzzle(puzzles_vec)) => {
-                self.from_square = None;
+            } (_, Message::LoadPuzzle(result)) => {
                 self.search_tab.show_searching_msg = false;
+                let puzzles_vec = match result {
+                    Ok(puzzles_vec) => puzzles_vec,
+                    Err(error) => {
+                        self.puzzle_status = format!("{}: {error}", lang::tr(&self.lang, "search"));
+                        return Task::none();
+                    }
+                };
+                self.from_square = None;
                 self.game_mode = config::GameMode::Puzzle;
                 if self.engine_state != EngineStatus::TurnedOff
                     && let Some(sender) = &self.engine_sender {
                         sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
                 }
-                if let Some(puzzles_vec) = puzzles_vec {
-                    if !puzzles_vec.is_empty() {
-                        self.replace_puzzle_batch(puzzles_vec, true);
-                        return self.refresh_current_favorite_status();
-                    } else {
-                        // Just putting the default position to make it obvious the search ended.
-                        self.board = Board::default();
-                        self.last_move_from = None;
-                        self.last_move_to = None;
-                        self.puzzle_tab.game_status = GameStatus::NoPuzzles;
-                        self.puzzle_status = lang::tr(&self.lang, "no_puzzle_found");
-                        self.current_favorite = None;
-                    }
+                if !puzzles_vec.is_empty() {
+                    self.replace_puzzle_batch(puzzles_vec, true);
+                    return self.refresh_current_favorite_status();
                 } else {
+                    // Just putting the default position to make it obvious the search ended.
                     self.board = Board::default();
                     self.last_move_from = None;
                     self.last_move_to = None;
@@ -1503,6 +1501,33 @@ mod tests {
         let mut app = app_with_current_puzzle("loaded-favorite");
 
         let _ = app.update(Message::LoadFavorites(Ok(Vec::new())));
+
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::NoPuzzles);
+        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "no_puzzle_found"));
+        assert_eq!(app.current_favorite, None);
+    }
+
+    #[test]
+    fn normal_search_error_preserves_the_loaded_puzzle() {
+        let mut app = app_with_current_puzzle("loaded-normal");
+        let board = app.board;
+        app.search_tab.show_searching_msg = true;
+
+        let _ = app.update(Message::LoadPuzzle(Err("controlled search failure".into())));
+
+        assert!(!app.search_tab.show_searching_msg);
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "loaded-normal");
+        assert_eq!(app.board, board);
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "search")));
+        assert!(app.puzzle_status.contains("controlled search failure"));
+    }
+
+    #[test]
+    fn empty_normal_search_keeps_the_historical_no_puzzles_behavior() {
+        let mut app = app_with_current_puzzle("loaded-normal");
+
+        let _ = app.update(Message::LoadPuzzle(Ok(Vec::new())));
 
         assert_eq!(app.puzzle_tab.game_status, GameStatus::NoPuzzles);
         assert_eq!(app.puzzle_status, lang::tr(&app.lang, "no_puzzle_found"));

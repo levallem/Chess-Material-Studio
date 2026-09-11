@@ -263,83 +263,58 @@ fn search_csv_from_path(
     variation: Variation,
     op_side: Option<OpeningSide>,
     result_limit: usize,
-) -> Option<Vec<config::Puzzle>> {
+) -> Result<Vec<config::Puzzle>, String> {
+    validate_search_input(min_rating, max_rating, result_limit)?;
     let mut puzzles: Vec<config::Puzzle> = Vec::new();
-
-    let reader = csv::ReaderBuilder::new()
+    let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
-        .from_path(csv_path);
+        .from_path(csv_path)
+        .map_err(|error| format!("cannot open CSV {}: {error}", csv_path.display()))?;
 
-    if let Ok(mut reader) = reader {
-        puzzles.clear();
-        if opening != Openings::Any {
-            let opening_tag: &str = if variation.name != Variation::ANY_STR {
-                &variation.name
-            } else {
-                opening.get_field_name()
-            };
-            let side = match op_side {
-                None => OpeningSide::Any,
-                Some(x) => x
-            };
-            match side {
-                OpeningSide::Any => {
-                    for result in reader.deserialize::<config::Puzzle>() {
-                        if let Ok(record) = result &&
-                                record.opening.contains(opening_tag) &&
-                                record.rating >= min_rating && record.rating <= max_rating &&
-                                record.popularity >= min_popularity &&
-                                record.themes.contains(theme.get_tag_name()) {
-                            puzzles.push(record);
-                        }
-                        if puzzles.len() == result_limit {
-                            break;
-                        }
-                    }
-                } OpeningSide::Black => {
-                    for result in reader.deserialize::<config::Puzzle>() {
-                        if let Ok(record) = result &&
-                                record.opening.contains(opening_tag) &&
-                                !record.game_url.contains("black") &&
-                                record.rating >= min_rating && record.rating <= max_rating &&
-                                record.popularity >= min_popularity &&
-                                record.themes.contains(theme.get_tag_name()) {
-                            puzzles.push(record);
-                        }
-                        if puzzles.len() == result_limit {
-                            break;
-                        }
-                    }
-                } OpeningSide::White => {
-                    for result in reader.deserialize::<config::Puzzle>() {
-                        if let Ok(record) = result &&
-                                record.opening.contains(opening_tag) &&
-                                record.game_url.contains("black") &&
-                                record.rating >= min_rating && record.rating <= max_rating &&
-                                record.popularity >= min_popularity &&
-                                record.themes.contains(theme.get_tag_name()) {
-                            puzzles.push(record);
-                        }
-                        if puzzles.len() == result_limit {
-                            break;
-                        }
-                    }
-                }
-            }
-        } else {
-            for result in reader.deserialize::<config::Puzzle>() {
-                if let Ok(record) = result && record.rating >= min_rating && record.rating <= max_rating &&
-                        record.popularity >= min_popularity &&
-                        record.themes.contains(theme.get_tag_name()) {
-                    puzzles.push(record);
-                }
-                if puzzles.len() == result_limit {
-                    break;
-                }
+    let opening_tag = if opening == Openings::Any {
+        None
+    } else if variation.name != Variation::ANY_STR {
+        Some(variation.name.as_ref())
+    } else {
+        Some(opening.get_field_name())
+    };
+    let side = op_side.unwrap_or(OpeningSide::Any);
+
+    for result in reader.deserialize::<config::Puzzle>() {
+        let record = result.map_err(|error| {
+            format!("cannot deserialize CSV row in {}: {error}", csv_path.display())
+        })?;
+        let opening_matches = opening_tag.map_or(true, |tag| record.opening.contains(tag));
+        let side_matches = match (opening_tag, side) {
+            (None, _) | (_, OpeningSide::Any) => true,
+            (Some(_), OpeningSide::Black) => !record.game_url.contains("black"),
+            (Some(_), OpeningSide::White) => record.game_url.contains("black"),
+        };
+
+        if opening_matches
+            && side_matches
+            && record.rating >= min_rating
+            && record.rating <= max_rating
+            && record.popularity >= min_popularity
+            && record.themes.contains(theme.get_tag_name())
+        {
+            puzzles.push(record);
+            if puzzles.len() == result_limit {
+                break;
             }
         }
     }
-    Some(puzzles)
+    Ok(puzzles)
+}
+
+fn validate_search_input(min_rating: i32, max_rating: i32, result_limit: usize) -> Result<(), String> {
+    if min_rating > max_rating {
+        return Err("min_rating must be <= max_rating".into());
+    }
+    if result_limit == 0 {
+        return Err("limit must be greater than 0".into());
+    }
+    Ok(())
 }
 
 fn search_sqlite_from_path(
@@ -353,6 +328,7 @@ fn search_sqlite_from_path(
     op_side: Option<OpeningSide>,
     result_limit: usize,
 ) -> Result<Vec<config::Puzzle>, String> {
+    validate_search_input(min_rating, max_rating, result_limit)?;
     if !db_path.is_file() {
         return Err(format!("database file not found: {}", db_path.display()));
     }
@@ -423,21 +399,12 @@ pub fn search_with_config(
     variation: Variation,
     op_side: Option<OpeningSide>,
     result_limit: usize,
-) -> Option<Vec<config::Puzzle>> {
+) -> Result<Vec<config::Puzzle>, String> {
     match &config.puzzle_sqlite_location {
-        Some(sqlite_path) => {
-            let path = std::path::Path::new(sqlite_path);
-            match search_sqlite_from_path(
-                path, min_rating, max_rating, min_popularity,
-                theme, opening, variation, op_side, result_limit,
-            ) {
-                Ok(results) => Some(results),
-                Err(e) => {
-                    eprintln!("CMS-013: SQLite search failed: {}", e);
-                    None
-                }
-            }
-        }
+        Some(sqlite_path) => search_sqlite_from_path(
+            std::path::Path::new(sqlite_path), min_rating, max_rating, min_popularity,
+            theme, opening, variation, op_side, result_limit,
+        ),
         None => {
             let csv_path = std::path::Path::new(&config.puzzle_db_location);
             search_csv_from_path(
@@ -459,7 +426,8 @@ fn search_with_config_excluding(
     op_side: Option<OpeningSide>,
     result_limit: usize,
     excluded_ids: &HashSet<String>,
-) -> Option<Vec<config::Puzzle>> {
+) -> Result<Vec<config::Puzzle>, String> {
+    validate_search_input(min_rating, max_rating, result_limit)?;
     if excluded_ids.is_empty() {
         return search_with_config(
             config, min_rating, max_rating, min_popularity, theme, opening, variation, op_side,
@@ -467,7 +435,7 @@ fn search_with_config_excluding(
         );
     }
 
-    search_with_config(
+    let puzzles = search_with_config(
         config,
         min_rating,
         max_rating,
@@ -477,8 +445,8 @@ fn search_with_config_excluding(
         variation,
         op_side,
         expanded_result_limit(result_limit, excluded_ids.len()),
-    )
-    .map(|puzzles| filter_excluded_puzzles(puzzles, excluded_ids, result_limit))
+    )?;
+    Ok(filter_excluded_puzzles(puzzles, excluded_ids, result_limit))
 }
 
 impl SearchTab {
@@ -637,7 +605,7 @@ impl SearchTab {
         );
     }
 
-    pub async fn search(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation: Variation, op_side: Option<OpeningSide>, result_limit: usize, excluded_ids: HashSet<String>) -> Option<Vec<config::Puzzle>> {
+    pub async fn search(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation: Variation, op_side: Option<OpeningSide>, result_limit: usize, excluded_ids: HashSet<String>) -> Result<Vec<config::Puzzle>, String> {
         let config = load_config();
         search_with_config_excluding(
             &config,
@@ -876,6 +844,126 @@ mod tests {
     }
 
     #[test]
+    fn csv_search_distinguishes_matches_empty_results_and_source_errors() {
+        let csv_path = setup_test_csv();
+
+        assert!(!search_csv_from_path(
+            &csv_path, 0, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 10,
+        )
+        .unwrap()
+        .is_empty());
+        assert!(search_csv_from_path(
+            &csv_path, 3900, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 10,
+        )
+        .unwrap()
+        .is_empty());
+        assert!(search_csv_from_path(
+            &tmp_path("missing.csv"), 0, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 10,
+        )
+        .is_err());
+
+        let invalid_csv_path = tmp_path("invalid.csv");
+        std::fs::write(&invalid_csv_path, "PuzzleId,Rating\ninvalid,not-a-rating\n")
+            .expect("write invalid csv");
+        assert!(search_csv_from_path(
+            &invalid_csv_path, 0, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 10,
+        )
+        .is_err());
+
+        cleanup(&csv_path);
+        cleanup(&invalid_csv_path);
+    }
+
+    #[test]
+    fn csv_and_sqlite_reject_invalid_ranges_and_zero_limits() {
+        let csv_path = setup_test_csv();
+        let db_path = setup_test_sqlite();
+
+        for (min_rating, max_rating, result_limit) in [(2000, 1000, 10), (0, 4000, 0)] {
+            assert!(search_csv_from_path(
+                &csv_path, min_rating, max_rating, -100, TacticalThemes::All, Openings::Any,
+                Variation::ANY.clone(), Some(OpeningSide::Any), result_limit,
+            )
+            .is_err());
+            assert!(search_sqlite_from_path(
+                &db_path, min_rating, max_rating, -100, TacticalThemes::All, Openings::Any,
+                Variation::ANY.clone(), Some(OpeningSide::Any), result_limit,
+            )
+            .is_err());
+        }
+
+        cleanup(&csv_path);
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn sqlite_search_distinguishes_empty_results_and_source_errors() {
+        let db_path = setup_test_sqlite();
+
+        assert!(search_sqlite_from_path(
+            &db_path, 3900, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 10,
+        )
+        .unwrap()
+        .is_empty());
+        assert!(search_sqlite_from_path(
+            &tmp_path("missing.sqlite"), 0, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 10,
+        )
+        .is_err());
+
+        let invalid_db_path = tmp_path("invalid.sqlite");
+        std::fs::write(&invalid_db_path, []).expect("write invalid sqlite file");
+        assert!(search_sqlite_from_path(
+            &invalid_db_path, 0, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 10,
+        )
+        .is_err());
+
+        cleanup(&db_path);
+        cleanup(&invalid_db_path);
+    }
+
+    #[test]
+    fn exclusions_propagate_search_errors() {
+        let mut cfg = config::OfflinePuzzlesConfig::default();
+        cfg.puzzle_db_location = tmp_path("missing.csv").to_string_lossy().into_owned();
+        let excluded = std::collections::HashSet::from(["already-reviewed".to_owned()]);
+
+        assert!(search_with_config_excluding(
+            &cfg, 0, 4000, -100, TacticalThemes::All, Openings::Any,
+            Variation::ANY.clone(), Some(OpeningSide::Any), 10, &excluded,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn excluded_search_rejects_zero_original_limit_before_overfetch() {
+        let csv_path = setup_test_csv();
+        let db_path = setup_test_sqlite();
+        let excluded = std::collections::HashSet::from(["00008".to_owned()]);
+        let mut csv_config = config::OfflinePuzzlesConfig::default();
+        csv_config.puzzle_db_location = csv_path.to_string_lossy().into_owned();
+        let mut sqlite_config = csv_config.clone();
+        sqlite_config.puzzle_sqlite_location = Some(db_path.to_string_lossy().into_owned());
+
+        for config in [&csv_config, &sqlite_config] {
+            assert!(search_with_config_excluding(
+                config, 0, 4000, -100, TacticalThemes::All, Openings::Any,
+                Variation::ANY.clone(), Some(OpeningSide::Any), 0, &excluded,
+            )
+            .is_err());
+        }
+
+        cleanup(&csv_path);
+        cleanup(&db_path);
+    }
+
+    #[test]
     fn exclusions_apply_equally_to_csv_and_sqlite() {
         let db_path = setup_test_sqlite();
         let csv_path = setup_test_csv();
@@ -1032,7 +1120,7 @@ mod tests {
             Some(OpeningSide::Any),
             10,
         );
-        assert!(results.is_some());
+        assert!(results.is_ok());
         let puzzles = results.unwrap();
         let mut ids: Vec<&str> = puzzles.iter().map(|p| p.puzzle_id.as_str()).collect();
         ids.sort();
@@ -1058,7 +1146,7 @@ mod tests {
             Some(OpeningSide::Any),
             10,
         );
-        assert!(results.is_some());
+        assert!(results.is_ok());
         let puzzles = results.unwrap();
         let mut ids: Vec<&str> = puzzles.iter().map(|p| p.puzzle_id.as_str()).collect();
         ids.sort();
@@ -1084,7 +1172,7 @@ mod tests {
             Some(OpeningSide::Any),
             10,
         );
-        assert!(results.is_none(), "SQLite error should NOT fall back to CSV");
+        assert!(results.is_err(), "SQLite error should NOT fall back to CSV");
         cleanup(&csv_path);
     }
 
