@@ -42,7 +42,7 @@ mod settings;
 use settings::{SettingsMessage, SettingsTab};
 
 mod puzzles;
-use puzzles::{PuzzleMessage, PuzzleTab, GameStatus};
+use puzzles::{PuzzleMessage, PuzzleTab, GameStatus, validate_puzzle_batch};
 
 mod project_tab;
 use project_tab::{ProjectMessage, ProjectTab, PuzzleReviewView};
@@ -514,7 +514,8 @@ impl OfflinePuzzles {
         self.refresh_current_puzzle_review();
     }
 
-    fn replace_puzzle_batch(&mut self, mut puzzles: Vec<config::Puzzle>, shuffle: bool) {
+    fn replace_puzzle_batch(&mut self, mut puzzles: Vec<config::Puzzle>, shuffle: bool) -> Result<(), String> {
+        validate_puzzle_batch(&puzzles)?;
         if shuffle {
             puzzles.shuffle(&mut rng());
         }
@@ -522,6 +523,7 @@ impl OfflinePuzzles {
         self.puzzle_tab.current_puzzle = 0;
         self.puzzle_number_ui = String::from("1");
         self.load_puzzle(false);
+        Ok(())
     }
 
     fn current_reviewable_puzzle(&self) -> Option<&config::Puzzle> {
@@ -688,13 +690,15 @@ impl OfflinePuzzles {
                 if puzzles_vec.is_empty() {
                     return Task::none();
                 }
+                if let Err(error) = self.replace_puzzle_batch(puzzles_vec, false) {
+                    self.puzzle_status = error;
+                    return Task::none();
+                }
                 self.from_square = None;
-                self.game_mode = config::GameMode::Puzzle;
                 if self.engine_state != EngineStatus::TurnedOff
                     && let Some(sender) = &self.engine_sender {
                         sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
                 }
-                self.replace_puzzle_batch(puzzles_vec, false);
                 self.refresh_current_favorite_status()
             } (_, Message::LoadPuzzle(result)) => {
                 self.search_tab.show_searching_msg = false;
@@ -705,16 +709,20 @@ impl OfflinePuzzles {
                         return Task::none();
                     }
                 };
-                self.from_square = None;
-                self.game_mode = config::GameMode::Puzzle;
-                if self.engine_state != EngineStatus::TurnedOff
-                    && let Some(sender) = &self.engine_sender {
-                        sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
-                }
                 if !puzzles_vec.is_empty() {
-                    self.replace_puzzle_batch(puzzles_vec, true);
+                    if let Err(error) = self.replace_puzzle_batch(puzzles_vec, true) {
+                        self.puzzle_status = format!("{}: {error}", lang::tr(&self.lang, "search"));
+                        return Task::none();
+                    }
+                    self.from_square = None;
+                    if self.engine_state != EngineStatus::TurnedOff
+                        && let Some(sender) = &self.engine_sender {
+                            sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
+                    }
                     return self.refresh_current_favorite_status();
                 } else {
+                    self.from_square = None;
+                    self.game_mode = config::GameMode::Puzzle;
                     // Just putting the default position to make it obvious the search ended.
                     self.board = Board::default();
                     self.last_move_from = None;
@@ -729,18 +737,22 @@ impl OfflinePuzzles {
                 self.search_tab.show_searching_msg = false;
                 match result {
                     Ok(puzzles_vec) => {
-                        self.from_square = None;
-                        self.game_mode = config::GameMode::Puzzle;
-                        if self.engine_state != EngineStatus::TurnedOff
-                            && let Some(sender) = &self.engine_sender {
-                                if let Err(error) = sender.blocking_send(String::from(eval::STOP_COMMAND)) {
-                                    eprintln!("Lost contact with the engine: {error}");
-                                }
-                        }
                         if !puzzles_vec.is_empty() {
-                            self.replace_puzzle_batch(puzzles_vec, true);
+                            if let Err(error) = self.replace_puzzle_batch(puzzles_vec, true) {
+                                self.puzzle_status = self.favorite_error_status(&error);
+                                return Task::none();
+                            }
+                            self.from_square = None;
+                            if self.engine_state != EngineStatus::TurnedOff
+                                && let Some(sender) = &self.engine_sender {
+                                    if let Err(error) = sender.blocking_send(String::from(eval::STOP_COMMAND)) {
+                                        eprintln!("Lost contact with the engine: {error}");
+                                    }
+                            }
                             self.refresh_current_favorite_status()
                         } else {
+                            self.from_square = None;
+                            self.game_mode = config::GameMode::Puzzle;
                             self.board = Board::default();
                             self.last_move_from = None;
                             self.last_move_to = None;
@@ -1268,7 +1280,7 @@ mod tests {
         config::Puzzle {
             puzzle_id: id.into(),
             fen: "8/8/8/8/8/8/8/K6k w - - 0 1".into(),
-            moves: "a1a2".into(),
+            moves: "a1a2 h1h2".into(),
             rating: 1500,
             rating_deviation: 80,
             popularity: 50,
@@ -1355,8 +1367,15 @@ mod tests {
     struct NormalExportState {
         puzzle_batch: Vec<(String, String, String, i32, i32, i32, i32, String, String, String)>,
         current_puzzle: usize,
+        current_puzzle_move: usize,
+        current_puzzle_side: Color,
+        current_puzzle_fen: String,
+        puzzle_number_ui: String,
         board: Board,
         game_status: GameStatus,
+        game_mode: config::GameMode,
+        last_move_from: Option<Square>,
+        last_move_to: Option<Square>,
         current_favorite: Option<bool>,
         review_puzzle_id: Option<String>,
         review_view: Option<PuzzleReviewView>,
@@ -1371,8 +1390,15 @@ mod tests {
                 puzzle.game_url.clone(), puzzle.opening.clone(),
             )).collect(),
             current_puzzle: app.puzzle_tab.current_puzzle,
+            current_puzzle_move: app.puzzle_tab.current_puzzle_move,
+            current_puzzle_side: app.puzzle_tab.current_puzzle_side,
+            current_puzzle_fen: app.puzzle_tab.current_puzzle_fen.clone(),
+            puzzle_number_ui: app.puzzle_number_ui.clone(),
             board: app.board,
             game_status: app.puzzle_tab.game_status,
+            game_mode: app.game_mode,
+            last_move_from: app.last_move_from,
+            last_move_to: app.last_move_to,
             current_favorite: app.current_favorite,
             review_puzzle_id: app.project_tab.cached_review_puzzle_id().map(str::to_owned),
             review_view: app.project_tab.review_view(),
@@ -1395,12 +1421,19 @@ mod tests {
             expected.current_puzzle,
             "{route}: current puzzle changed"
         );
+        assert_eq!(app.puzzle_tab.current_puzzle_move, expected.current_puzzle_move, "{route}: current puzzle move changed");
+        assert_eq!(app.puzzle_tab.current_puzzle_side, expected.current_puzzle_side, "{route}: current puzzle side changed");
+        assert_eq!(app.puzzle_tab.current_puzzle_fen, expected.current_puzzle_fen, "{route}: current puzzle FEN changed");
+        assert_eq!(app.puzzle_number_ui, expected.puzzle_number_ui, "{route}: puzzle number changed");
         assert_eq!(app.board, expected.board, "{route}: board changed");
         assert_eq!(
             app.puzzle_tab.game_status,
             expected.game_status,
             "{route}: game status changed"
         );
+        assert_eq!(app.game_mode, expected.game_mode, "{route}: game mode changed");
+        assert_eq!(app.last_move_from, expected.last_move_from, "{route}: last-move source changed");
+        assert_eq!(app.last_move_to, expected.last_move_to, "{route}: last-move destination changed");
         assert_eq!(
             app.current_favorite,
             expected.current_favorite,
@@ -1445,6 +1478,7 @@ mod tests {
         app.puzzle_tab.puzzles = puzzles;
         app.puzzle_tab.current_puzzle = 1;
         app.load_puzzle(false);
+        app.puzzle_number_ui = String::from("2");
         app.current_favorite = Some(true);
         (app, project)
     }
@@ -1764,6 +1798,80 @@ mod tests {
         assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
         assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "search")));
         assert!(app.puzzle_status.contains("controlled search failure"));
+    }
+
+    #[test]
+    fn invalid_normal_search_batch_preserves_the_loaded_context() {
+        let (mut app, _project) = app_with_normal_export_review_context();
+        let expected = normal_export_state(&app);
+        app.search_tab.show_searching_msg = true;
+        let mut invalid = navigation_puzzle("invalid-normal-search");
+        invalid.moves = "a1a2 i1i2".into();
+
+        let _ = app.update(Message::LoadPuzzle(Ok(vec![
+            navigation_puzzle("valid-normal-search"),
+            invalid,
+        ])));
+
+        assert!(!app.search_tab.show_searching_msg);
+        assert_normal_export_state_preserved(&app, &expected, "normal search invalid batch");
+        assert!(app.puzzle_status.contains("invalid-normal-search"));
+        assert!(app.puzzle_status.contains("invalid source square"));
+    }
+
+    #[test]
+    fn valid_normal_search_batch_replaces_the_loaded_context() {
+        let mut app = app_with_current_puzzle("old-normal-search");
+
+        let _ = app.update(Message::LoadPuzzle(Ok(vec![navigation_puzzle("new-normal-search")])));
+
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "new-normal-search");
+        assert_eq!(app.puzzle_tab.current_puzzle, 0);
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert_eq!(app.puzzle_number_ui, "1");
+    }
+
+    #[test]
+    fn invalid_favorite_batch_preserves_the_loaded_context() {
+        let (mut app, _project) = app_with_normal_export_review_context();
+        let expected = normal_export_state(&app);
+        let mut invalid = navigation_puzzle("invalid-favorite");
+        invalid.moves = "a1a2 h1h2 a2a4".into();
+
+        let _ = app.update(Message::LoadFavorites(Ok(vec![invalid])));
+
+        assert_normal_export_state_preserved(&app, &expected, "favorites invalid batch");
+        assert!(app.puzzle_status.contains("invalid-favorite"));
+        assert!(app.puzzle_status.contains("illegal move 'a2a4'"));
+    }
+
+    #[test]
+    fn valid_favorite_batch_replaces_the_loaded_context() {
+        let mut app = app_with_current_puzzle("old-favorite");
+
+        let _ = app.update(Message::LoadFavorites(Ok(vec![navigation_puzzle("new-favorite")])));
+
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "new-favorite");
+        assert_eq!(app.puzzle_tab.current_puzzle, 0);
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert_eq!(app.puzzle_number_ui, "1");
+    }
+
+    #[test]
+    fn invalid_project_selected_snapshot_preserves_the_loaded_context() {
+        let (mut app, _project) = app_with_normal_export_review_context();
+        let expected = normal_export_state(&app);
+        let mut invalid = navigation_puzzle("invalid-project-selected");
+        invalid.fen = "invalid FEN".into();
+
+        let _ = app.update(Message::LoadProjectPuzzles(vec![
+            navigation_puzzle("valid-project-selected"),
+            invalid,
+        ]));
+
+        assert_normal_export_state_preserved(&app, &expected, "project selected invalid batch");
+        assert!(app.puzzle_status.contains("invalid-project-selected"));
+        assert!(app.puzzle_status.contains("invalid FEN"));
     }
 
     #[test]
