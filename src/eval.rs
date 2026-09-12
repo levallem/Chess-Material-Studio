@@ -16,6 +16,99 @@ use crate::Message;
 pub const STOP_COMMAND: &str = "STOP";
 pub const EXIT_APP_COMMAND: &str = "EXIT";
 
+/// Extracts the relevant fields from one UCI `info` line without trusting
+/// engine stdout. `info string` payloads are free-form text, not UCI data.
+fn parse_uci_info_line(line: &str) -> (Option<String>, Option<String>) {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.first() == Some(&"info") && tokens.get(1) == Some(&"string") {
+        return (None, None);
+    }
+
+    let mut eval = None;
+    let mut best_move = None;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match *token {
+            "score" => {
+                let score_type = tokens.get(index + 1);
+                let score_value = tokens.get(index + 2);
+                let parsed_score = score_value.and_then(|value| value.parse::<i32>().ok());
+
+                match (score_type, parsed_score) {
+                    (Some(&"cp"), Some(value)) => eval = Some(format!("{:.2}", value as f32 / 100.0)),
+                    (Some(&"mate"), Some(value)) => eval = Some(format!("Mate in {value}")),
+                    _ => {}
+                }
+            }
+            "pv" => {
+                if let Some(candidate) = tokens.get(index + 1) {
+                    if crate::puzzles::parse_uci_move(candidate).is_ok() {
+                        best_move = Some((*candidate).to_string());
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (eval, best_move)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_uci_info_line;
+
+    #[test]
+    fn parses_positive_and_negative_centipawn_scores() {
+        assert_eq!(parse_uci_info_line("info depth 12 score cp 35 nodes 100"), (Some(String::from("0.35")), None));
+        assert_eq!(parse_uci_info_line("info depth 12 score cp -127 nodes 100"), (Some(String::from("-1.27")), None));
+    }
+
+    #[test]
+    fn parses_mate_scores() {
+        assert_eq!(parse_uci_info_line("info score mate 3"), (Some(String::from("Mate in 3")), None));
+        assert_eq!(parse_uci_info_line("info score mate -2"), (Some(String::from("Mate in -2")), None));
+        assert_eq!(parse_uci_info_line("info score mate 0"), (Some(String::from("Mate in 0")), None));
+    }
+
+    #[test]
+    fn parses_scores_followed_by_bound_tokens() {
+        assert_eq!(parse_uci_info_line("info score cp 35 lowerbound nodes 100"), (Some(String::from("0.35")), None));
+        assert_eq!(parse_uci_info_line("info score cp -127 upperbound nps 100"), (Some(String::from("-1.27")), None));
+    }
+
+    #[test]
+    fn ignores_incomplete_or_invalid_scores() {
+        for line in ["info score", "info score cp", "info score mate", "info score cp not-a-number", "info score unknown 35", "info depth 12 nodes 100"] {
+            assert_eq!(parse_uci_info_line(line).0, None, "{line}");
+        }
+    }
+
+    #[test]
+    fn ignores_free_form_info_string_lines() {
+        assert_eq!(parse_uci_info_line("info string score cp 300 pv e2e4"), (None, None));
+        assert_eq!(parse_uci_info_line("info string pv e2e4"), (None, None));
+    }
+
+    #[test]
+    fn ignores_missing_and_malformed_pv_moves() {
+        for line in ["info pv", "info pv e2", "info pv i1i2", "info pv e2e4x", "info pv e7e8k", "info pv a1☃2"] {
+            assert_eq!(parse_uci_info_line(line).1, None, "{line}");
+        }
+    }
+
+    #[test]
+    fn accepts_normal_and_promotion_pv_moves() {
+        assert_eq!(parse_uci_info_line("info depth 12 pv e2e4 e7e5").1, Some(String::from("e2e4")));
+        assert_eq!(parse_uci_info_line("info pv e7e8q").1, Some(String::from("e7e8q")));
+    }
+
+    #[test]
+    fn parses_score_and_pv_from_a_normal_uci_line() {
+        assert_eq!(parse_uci_info_line("info depth 20 score cp 35 lowerbound nodes 100 pv e2e4 e7e5"), (Some(String::from("0.35")), Some(String::from("e2e4"))));
+    }
+}
 pub enum EngineState {
     Start,
     Thinking(Child, String, Receiver<String>),
@@ -180,26 +273,12 @@ impl Engine {
                                         if read_result == 0 {
                                             break;
                                         }
-                                        let vector: Vec<&str> = buf_str.split_whitespace().collect::<Vec<&str>>();
-                                        if let Some(index) = vector.iter().position(|&x| x == "score") {
-                                            let eval_num = vector.get(index+2).unwrap().parse::<f32>().ok();
-                                            if let Some(e) = eval_num {
-                                                if vector.get(index+1).unwrap() == &"mate" {
-                                                    eval = Some(String::from("Mate in ") + &e.to_string());
-                                                } else {
-                                                    eval = Some(format!("{:.2}",(e / 100.)));
-                                                }
-                                            }
-                                            for i in (index + 3)..vector.len() {
-                                                if let Some(token) = vector.get(i) && token == &"pv" {
-                                                    // I thought we could just unwrap, but at least Koivisto sometimes
-                                                    // returns lines with nothing in the pv
-                                                    if let Some(best) = vector.get(i+1) {
-                                                        best_move = Some(best.to_string());
-                                                        break;
-                                                    }
-                                                }
-                                            }
+                                        let (line_eval, line_best_move) = parse_uci_info_line(&buf_str);
+                                        if line_eval.is_some() {
+                                            eval = line_eval;
+                                        }
+                                        if line_best_move.is_some() {
+                                            best_move = line_best_move;
                                         }
                                         buf_str.clear();
                                     } else {
@@ -217,4 +296,3 @@ impl Engine {
         )
     }
 }
- 
