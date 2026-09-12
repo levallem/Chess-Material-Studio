@@ -44,6 +44,7 @@ do_you_wanna_download = Quer baixar agora?
 download_size_info = o download é de aprox. 300mb, e cerca de 1gb depois de descompactado.
 downloading = Baixando...
 download_btn = Baixar
+db_download_failed = Falha ao baixar o banco de dados de puzzles
 select_puzzle_sqlite_db = Selecionar banco de dados SQLite
 
 #Projeto

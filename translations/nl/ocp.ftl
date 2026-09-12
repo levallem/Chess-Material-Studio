@@ -44,6 +44,7 @@ do_you_wanna_download = Wil je deze nu downloaden?
 download_size_info = de download is ongeveer 300 MB, and rond 1 GB ongecomprimeerd
 downloading = Downloaden...
 download_btn = Downloaden
+db_download_failed = Download van de puzzeldatabase mislukt
 select_puzzle_sqlite_db = SQLite-database selecteren
 
 #Project

@@ -140,6 +140,7 @@ pub enum Message {
     SaveMaximizedStatusAndExit(bool),
     StartDBDownload,
     DBDownloadFinished,
+    DBDownloadFailed(String),
     DownloadProgress(String),
     PuzzleSqliteSourceSelected,
     PuzzleInputIndexChange(String),
@@ -995,10 +996,18 @@ impl OfflinePuzzles {
                     }
                 }
                 self.downloading_db = true;
+                self.download_progress.clear();
                 Task::none()
             } (_, Message::DBDownloadFinished) => {
                 self.downloading_db = false;
                 self.has_db = true;
+                Task::none()
+            } (_, Message::DBDownloadFailed(error)) => {
+                self.downloading_db = false;
+                self.download_progress = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "db_download_failed")
+                );
                 Task::none()
             } (_, Message::DownloadProgress(progress)) => {
                 self.download_progress = progress;
@@ -1194,6 +1203,13 @@ impl OfflinePuzzles {
                             .width(Length::Fill)
                             .align_x(alignment::Horizontal::Center),
                     );
+                if !self.download_progress.is_empty() {
+                    col = col.push(
+                        Text::new(&self.download_progress)
+                            .width(Length::Fill)
+                            .align_x(alignment::Horizontal::Center),
+                    );
+                }
             };
             center(col)
                 .padding(1)
@@ -1261,6 +1277,38 @@ mod tests {
             game_url: "https://lichess.org/game".into(),
             opening: String::new(),
         }
+    }
+
+    #[test]
+    fn database_download_failure_restores_retryable_state_and_shows_detail() {
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::StartDBDownload);
+        let _ = app.update(Message::DBDownloadFailed("network unavailable".into()));
+
+        assert!(!app.downloading_db);
+        assert!(!app.has_db);
+        assert!(app.download_progress.contains(&lang::tr(&app.lang, "db_download_failed")));
+        assert!(app.download_progress.contains("network unavailable"));
+    }
+
+    #[test]
+    fn database_download_success_marks_database_as_available() {
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::StartDBDownload);
+        let _ = app.update(Message::DBDownloadFinished);
+
+        assert!(!app.downloading_db);
+        assert!(app.has_db);
+    }
+
+    #[test]
+    fn database_download_can_restart_after_a_failure() {
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::StartDBDownload);
+        let _ = app.update(Message::DBDownloadFailed("temporary failure".into()));
+        let _ = app.update(Message::StartDBDownload);
+
+        assert!(app.downloading_db);
     }
 
     fn auto_advance_puzzle(id: &str) -> config::Puzzle {
