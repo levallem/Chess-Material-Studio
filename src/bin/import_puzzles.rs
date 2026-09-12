@@ -345,29 +345,38 @@ fn single_checkpoint_source_key(conn: &mut SqliteConnection) -> Result<String, S
         .map_err(|e| format!("checkpoint source_key query failed: {}", e))
 }
 
-/// Full resume preflight: verify that the existing DB has exactly one checkpoint
+/// Resume preflight: verify that the existing DB has exactly one checkpoint
 /// whose source_key matches the expected one from the CSV.
-fn validate_full_resume_source(
+fn validate_resume_source(
     conn: &mut SqliteConnection,
     csv_path: &Path,
+    mode: &ImportMode,
 ) -> Result<String, String> {
+    let import_kind = match mode {
+        ImportMode::Limited { .. } => "limited import",
+        ImportMode::Full => "full import",
+    };
     let expected_source_key = puzzle_import::puzzle_source_key_from_file(csv_path)
         .map_err(|e| format!("failed to compute CSV source key: {}", e))?;
 
     let count = checkpoint_count(conn)?;
     if count == 0 {
-        return Err("Cannot resume full import: no checkpoint found".into());
+        return Err(format!("Cannot resume {}: no checkpoint found", import_kind));
     }
     if count > 1 {
-        return Err("Cannot resume full import: multiple source checkpoints found".into());
+        return Err(format!(
+            "Cannot resume {}: multiple source checkpoints found",
+            import_kind
+        ));
     }
 
     // Query the single stored source_key directly
     let stored_key = single_checkpoint_source_key(conn)?;
     if stored_key != expected_source_key {
-        return Err(
-            "Cannot resume full import: CSV source identity does not match checkpoint".into(),
-        );
+        return Err(format!(
+            "Cannot resume {}: CSV source identity does not match checkpoint",
+            import_kind
+        ));
     }
 
     Ok(expected_source_key)
@@ -416,9 +425,9 @@ fn main() {
 
             let csv_size = file_size_bytes(&args.csv);
 
-            // Full resume preflight: compute source_key before importing
-            let preflight_source_key = if args.mode == ImportMode::Full && args.resume {
-                match validate_full_resume_source(&mut conn, &args.csv) {
+            // Resume preflight: compute and validate the source key before importing.
+            let preflight_source_key = if args.resume {
+                match validate_resume_source(&mut conn, &args.csv, &args.mode) {
                     Ok(k) => Some(k),
                     Err(e) => {
                         eprintln!("Error: {}", e);
@@ -466,11 +475,16 @@ fn main() {
             };
             let elapsed = start.elapsed();
 
-            // Verify preflight source_key matches (full + resume)
+            // Verify the source key did not change between preflight and import.
             if let Some(ref expected) = preflight_source_key {
                 if &result.source_key != expected {
+                    let import_kind = match &args.mode {
+                        ImportMode::Limited { .. } => "limited import",
+                        ImportMode::Full => "full import",
+                    };
                     eprintln!(
-                        "Cannot resume full import: CSV source identity does not match checkpoint"
+                        "Cannot resume {}: CSV source identity does not match checkpoint",
+                        import_kind
                     );
                     std::process::exit(1);
                 }
@@ -1093,7 +1107,7 @@ mod tests {
         assert!(validate_args(&args).is_err());
     }
 
-    // ── Full resume source identity tests ──
+    // ── Resume source identity tests ──
 
     fn write_tmp(name: &str, content: &[u8]) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1128,7 +1142,8 @@ mod tests {
         assert_eq!(result.inserted_rows, 4);
 
         // Now validate preflight — should succeed with matching source_key
-        let key = validate_full_resume_source(&mut conn, &csv_path).expect("preflight should pass");
+        let key = validate_resume_source(&mut conn, &csv_path, &ImportMode::Full)
+            .expect("preflight should pass");
         assert_eq!(key, result.source_key);
 
         std::fs::remove_file(&csv_path).ok();
@@ -1141,8 +1156,8 @@ mod tests {
         let mut conn = setup_test_db();
 
         // Empty DB — no checkpoints
-        let err = validate_full_resume_source(&mut conn, &csv_path).unwrap_err();
-        assert!(err.contains("no checkpoint"), "error: {}", err);
+        let err = validate_resume_source(&mut conn, &csv_path, &ImportMode::Full).unwrap_err();
+        assert_eq!(err, "Cannot resume full import: no checkpoint found");
 
         std::fs::remove_file(&csv_path).ok();
     }
@@ -1173,11 +1188,10 @@ mod tests {
         assert_eq!(count, 4);
 
         // Preflight should fail: key mismatch — explicit message
-        let err = validate_full_resume_source(&mut conn, &csv_path).unwrap_err();
-        assert!(
-            err.contains("does not match checkpoint"),
-            "error: {}",
-            err
+        let err = validate_resume_source(&mut conn, &csv_path, &ImportMode::Full).unwrap_err();
+        assert_eq!(
+            err,
+            "Cannot resume full import: CSV source identity does not match checkpoint"
         );
 
         std::fs::remove_file(&csv_path).ok();
@@ -1210,11 +1224,106 @@ mod tests {
             .execute(&mut conn)
             .expect("insert beta");
 
-        let err = validate_full_resume_source(&mut conn, &csv_path).unwrap_err();
+        let err = validate_resume_source(&mut conn, &csv_path, &ImportMode::Full).unwrap_err();
+        assert_eq!(err, "Cannot resume full import: multiple source checkpoints found");
+
+        std::fs::remove_file(&csv_path).ok();
+    }
+
+    #[test]
+    fn test_limited_resume_preflight_wrong_source_preserves_database() {
+        let source_a = include_str!("../../tests/fixtures/lichess_puzzles_sample.csv");
+        let source_b = format!("{}\n", source_a.replace("00001", "99999"));
+        let csv_a_path = write_tmp("limited_resume_a", source_a.as_bytes());
+        let csv_b_path = write_tmp("limited_resume_b", source_b.as_bytes());
+        let mut conn = setup_test_db();
+
+        let source_a_result =
+            puzzle_import::import_puzzles_from_file_chunked_limited(&mut conn, &csv_a_path, 1, 2)
+                .expect("seed limited import");
+        let source_b_key = puzzle_import::puzzle_source_key_from_file(&csv_b_path)
+            .expect("compute source B key");
+        assert_ne!(source_a_result.source_key, source_b_key);
+        let rows_before = row_count(&mut conn).expect("count rows before preflight");
+        let checkpoint_a_before = checkpoint_value(&mut conn, &source_a_result.source_key)
+            .expect("read source A checkpoint before preflight");
+        let checkpoints_before = checkpoint_count(&mut conn).expect("count checkpoints before preflight");
+        let source_b_rows_before: i64 = chess_material_studio::schema::puzzles::table
+            .filter(chess_material_studio::schema::puzzles::dsl::puzzle_id.eq("99999"))
+            .count()
+            .get_result(&mut conn)
+            .expect("count source B-exclusive rows before preflight");
+        assert_eq!(source_b_rows_before, 0);
+
+        let err = validate_resume_source(
+            &mut conn,
+            &csv_b_path,
+            &ImportMode::Limited { max_rows: 2 },
+        )
+        .unwrap_err();
+        assert!(err.contains("does not match checkpoint"), "error: {}", err);
+
+        assert_eq!(
+            row_count(&mut conn).expect("count rows after preflight"),
+            rows_before,
+            "mismatched limited resume must not insert rows"
+        );
+        assert_eq!(
+            checkpoint_count(&mut conn).expect("count checkpoints after preflight"),
+            checkpoints_before,
+            "mismatched limited resume must not add checkpoints"
+        );
+        assert_eq!(
+            checkpoint_value(&mut conn, &source_a_result.source_key)
+                .expect("read source A checkpoint after preflight"),
+            checkpoint_a_before,
+            "mismatched limited resume must not update source A's checkpoint"
+        );
         assert!(
-            err.contains("multiple source checkpoints"),
-            "error: {}",
-            err
+            checkpoint_value(&mut conn, &source_b_key).is_err(),
+            "mismatched limited resume must not create source B's checkpoint"
+        );
+        let source_b_rows_after: i64 = chess_material_studio::schema::puzzles::table
+            .filter(chess_material_studio::schema::puzzles::dsl::puzzle_id.eq("99999"))
+            .count()
+            .get_result(&mut conn)
+            .expect("count source B-exclusive rows after preflight");
+        assert_eq!(
+            source_b_rows_after, source_b_rows_before,
+            "mismatched limited resume must not insert source B-exclusive rows"
+        );
+
+        std::fs::remove_file(&csv_a_path).ok();
+        std::fs::remove_file(&csv_b_path).ok();
+    }
+
+    #[test]
+    fn test_limited_resume_same_source_preflight_allows_continuation() {
+        let fixture = include_str!("../../tests/fixtures/lichess_puzzles_sample.csv");
+        let csv_path = write_tmp("limited_resume_same", fixture.as_bytes());
+        let mut conn = setup_test_db();
+
+        let initial =
+            puzzle_import::import_puzzles_from_file_chunked_limited(&mut conn, &csv_path, 1, 2)
+                .expect("initial limited import");
+        assert_eq!(initial.inserted_rows, 2);
+
+        let source_key = validate_resume_source(
+            &mut conn,
+            &csv_path,
+            &ImportMode::Limited { max_rows: 4 },
+        )
+        .expect("same source preflight");
+        assert_eq!(source_key, initial.source_key);
+
+        let resumed =
+            puzzle_import::import_puzzles_from_file_chunked_limited(&mut conn, &csv_path, 1, 4)
+                .expect("resume limited import");
+        assert_eq!(resumed.inserted_rows, 2);
+        assert_eq!(row_count(&mut conn).expect("count final rows"), 4);
+        assert_eq!(
+            checkpoint_value(&mut conn, &source_key).expect("read final checkpoint"),
+            4
         );
 
         std::fs::remove_file(&csv_path).ok();
