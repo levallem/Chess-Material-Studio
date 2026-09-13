@@ -541,7 +541,7 @@ impl SearchTab {
         self.base == Some(SearchBase::Favorites)
     }
 
-    pub fn start_lichess_search(&mut self, excluded_ids: HashSet<String>) -> Result<Task<Message>, &'static str> {
+    pub fn start_lichess_search(&mut self, generation: u64, excluded_ids: HashSet<String>) -> Result<Task<Message>, &'static str> {
         self.save_current_search_settings()?;
         self.show_searching_msg = true;
         let config = load_config();
@@ -557,11 +557,11 @@ impl SearchTab {
                 config.search_results_limit,
                 excluded_ids,
             ),
-            Message::LoadPuzzle,
+            move |result| Message::LoadPuzzle { generation, result },
         ))
     }
 
-    pub fn start_favorites_search(&mut self) -> Result<Task<Message>, &'static str> {
+    pub fn start_favorites_search(&mut self, generation: u64) -> Result<Task<Message>, &'static str> {
         self.save_current_search_settings()?;
         self.show_searching_msg = true;
         let config = load_config();
@@ -576,7 +576,7 @@ impl SearchTab {
                 self.opening_side,
                 config.search_results_limit,
             ),
-            Message::LoadFavorites,
+            move |result| Message::LoadFavorites { generation, result },
         ))
     }
 

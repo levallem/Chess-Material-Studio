@@ -114,8 +114,14 @@ pub enum Message {
     ScreenshotCreated(Screenshot),
     SaveScreenshot(Option<(Screenshot, String)>),
     ExportPDF(Option<String>),
-    LoadPuzzle(Result<Vec<config::Puzzle>, String>),
-    LoadFavorites(Result<Vec<config::Puzzle>, String>),
+    LoadPuzzle {
+        generation: u64,
+        result: Result<Vec<config::Puzzle>, String>,
+    },
+    LoadFavorites {
+        generation: u64,
+        result: Result<Vec<config::Puzzle>, String>,
+    },
     FavoriteStatusLoaded {
         puzzle_id: String,
         generation: u64,
@@ -279,6 +285,7 @@ struct OfflinePuzzles {
     puzzle_number_ui: String,
     current_favorite: Option<bool>,
     favorite_generation: u64,
+    search_generation: u64,
 
     analysis: Game,
     analysis_history: Vec<Board>,
@@ -340,6 +347,7 @@ impl OfflinePuzzles {
             puzzle_number_ui: String::from("1"),
             current_favorite: None,
             favorite_generation: 0,
+            search_generation: 0,
             search_tab: SearchTab::new(),
             settings_tab: SettingsTab::new(),
             puzzle_tab: PuzzleTab::new(),
@@ -552,6 +560,15 @@ impl OfflinePuzzles {
         self.favorite_generation
     }
 
+    fn next_search_generation(&mut self) -> u64 {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_generation
+    }
+
+    fn search_response_is_current(&self, generation: u64) -> bool {
+        self.search_generation == generation
+    }
+
     fn favorite_response_is_current(&self, puzzle_id: &str, generation: u64) -> bool {
         self.favorite_generation == generation && self.current_puzzle_matches(puzzle_id)
     }
@@ -739,7 +756,10 @@ impl OfflinePuzzles {
                             }
                 }
                 self.refresh_current_favorite_status()
-            } (_, Message::LoadPuzzle(result)) => {
+            } (_, Message::LoadPuzzle { generation, result }) => {
+                if !self.search_response_is_current(generation) {
+                    return Task::none();
+                }
                 self.search_tab.show_searching_msg = false;
                 let puzzles_vec = match result {
                     Ok(puzzles_vec) => puzzles_vec,
@@ -774,7 +794,10 @@ impl OfflinePuzzles {
                 }
                 self.refresh_current_puzzle_review();
                 Task::none()
-            } (_, Message::LoadFavorites(result)) => {
+            } (_, Message::LoadFavorites { generation, result }) => {
+                if !self.search_response_is_current(generation) {
+                    return Task::none();
+                }
                 self.search_tab.show_searching_msg = false;
                 match result {
                     Ok(puzzles_vec) => {
@@ -850,11 +873,13 @@ impl OfflinePuzzles {
              (_, Message::PuzzleInfo(message)) => {
                 self.puzzle_tab.update(message)
             } (_, Message::Search(SearchMesssage::ClickSearch)) => {
+                let generation = self.next_search_generation();
                 let task = if self.search_tab.is_favorites() {
-                    self.search_tab.start_favorites_search()
+                    self.search_tab.start_favorites_search(generation)
                 } else {
                     match self.project_tab.reviewed_puzzle_ids_for_active_chapter() {
                         Ok(excluded_ids) => self.search_tab.start_lichess_search(
+                            generation,
                             excluded_ids.unwrap_or_default(),
                         ),
                         Err(error) => {
@@ -1806,13 +1831,23 @@ mod tests {
             project.path.clone(),
         ))));
         std::fs::remove_file(&project.path).unwrap();
+        let stale_generation = app.search_generation;
 
         let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
 
         assert!(!app.search_tab.show_searching_msg);
+        assert_ne!(app.search_generation, stale_generation);
         assert_eq!(app.puzzle_tab.puzzles.len(), 1);
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, loaded.puzzle_id);
         assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "review_error")));
+
+        let status_after_failed_preparation = app.puzzle_status.clone();
+        let _ = app.update(Message::LoadPuzzle {
+            generation: stale_generation,
+            result: Ok(vec![navigation_puzzle("stale-after-failed-preparation")]),
+        });
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, loaded.puzzle_id);
+        assert_eq!(app.puzzle_status, status_after_failed_preparation);
 
         let _ = app.update(Message::Search(SearchMesssage::SelectBase(SearchBase::Favorites)));
         let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
@@ -1918,7 +1953,10 @@ mod tests {
         let board = app.board;
         app.search_tab.show_searching_msg = true;
 
-        let _ = app.update(Message::LoadFavorites(Err("controlled search failure".into())));
+        let _ = app.update(Message::LoadFavorites {
+            generation: app.search_generation,
+            result: Err("controlled search failure".into()),
+        });
 
         assert!(!app.search_tab.show_searching_msg);
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "loaded-favorite");
@@ -1932,7 +1970,10 @@ mod tests {
     fn empty_favorite_search_keeps_the_historical_no_puzzles_behavior() {
         let mut app = app_with_current_puzzle("loaded-favorite");
 
-        let _ = app.update(Message::LoadFavorites(Ok(Vec::new())));
+        let _ = app.update(Message::LoadFavorites {
+            generation: app.search_generation,
+            result: Ok(Vec::new()),
+        });
 
         assert_eq!(app.puzzle_tab.game_status, GameStatus::NoPuzzles);
         assert_eq!(app.puzzle_status, lang::tr(&app.lang, "no_puzzle_found"));
@@ -1945,7 +1986,10 @@ mod tests {
         let board = app.board;
         app.search_tab.show_searching_msg = true;
 
-        let _ = app.update(Message::LoadPuzzle(Err("controlled search failure".into())));
+        let _ = app.update(Message::LoadPuzzle {
+            generation: app.search_generation,
+            result: Err("controlled search failure".into()),
+        });
 
         assert!(!app.search_tab.show_searching_msg);
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "loaded-normal");
@@ -1963,10 +2007,13 @@ mod tests {
         let mut invalid = navigation_puzzle("invalid-normal-search");
         invalid.moves = "a1a2 i1i2".into();
 
-        let _ = app.update(Message::LoadPuzzle(Ok(vec![
-            navigation_puzzle("valid-normal-search"),
-            invalid,
-        ])));
+        let _ = app.update(Message::LoadPuzzle {
+            generation: app.search_generation,
+            result: Ok(vec![
+                navigation_puzzle("valid-normal-search"),
+                invalid,
+            ]),
+        });
 
         assert!(!app.search_tab.show_searching_msg);
         assert_normal_export_state_preserved(&app, &expected, "normal search invalid batch");
@@ -1978,7 +2025,10 @@ mod tests {
     fn valid_normal_search_batch_replaces_the_loaded_context() {
         let mut app = app_with_current_puzzle("old-normal-search");
 
-        let _ = app.update(Message::LoadPuzzle(Ok(vec![navigation_puzzle("new-normal-search")])));
+        let _ = app.update(Message::LoadPuzzle {
+            generation: app.search_generation,
+            result: Ok(vec![navigation_puzzle("new-normal-search")]),
+        });
 
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "new-normal-search");
         assert_eq!(app.puzzle_tab.current_puzzle, 0);
@@ -1993,7 +2043,10 @@ mod tests {
         let mut invalid = navigation_puzzle("invalid-favorite");
         invalid.moves = "a1a2 h1h2 a2a4".into();
 
-        let _ = app.update(Message::LoadFavorites(Ok(vec![invalid])));
+        let _ = app.update(Message::LoadFavorites {
+            generation: app.search_generation,
+            result: Ok(vec![invalid]),
+        });
 
         assert_normal_export_state_preserved(&app, &expected, "favorites invalid batch");
         assert!(app.puzzle_status.contains("invalid-favorite"));
@@ -2004,7 +2057,10 @@ mod tests {
     fn valid_favorite_batch_replaces_the_loaded_context() {
         let mut app = app_with_current_puzzle("old-favorite");
 
-        let _ = app.update(Message::LoadFavorites(Ok(vec![navigation_puzzle("new-favorite")])));
+        let _ = app.update(Message::LoadFavorites {
+            generation: app.search_generation,
+            result: Ok(vec![navigation_puzzle("new-favorite")]),
+        });
 
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "new-favorite");
         assert_eq!(app.puzzle_tab.current_puzzle, 0);
@@ -2033,11 +2089,112 @@ mod tests {
     fn empty_normal_search_keeps_the_historical_no_puzzles_behavior() {
         let mut app = app_with_current_puzzle("loaded-normal");
 
-        let _ = app.update(Message::LoadPuzzle(Ok(Vec::new())));
+        let _ = app.update(Message::LoadPuzzle {
+            generation: app.search_generation,
+            result: Ok(Vec::new()),
+        });
 
         assert_eq!(app.puzzle_tab.game_status, GameStatus::NoPuzzles);
         assert_eq!(app.puzzle_status, lang::tr(&app.lang, "no_puzzle_found"));
         assert_eq!(app.current_favorite, None);
+    }
+
+    #[test]
+    fn stale_normal_search_result_cannot_replace_a_newer_result() {
+        let mut app = app_with_current_puzzle("loaded-normal");
+        let first_generation = app.next_search_generation();
+        let second_generation = app.next_search_generation();
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation: second_generation,
+            result: Ok(vec![navigation_puzzle("newer-normal-search")]),
+        });
+        let _ = app.update(Message::LoadPuzzle {
+            generation: first_generation,
+            result: Ok(vec![navigation_puzzle("stale-normal-search")]),
+        });
+
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "newer-normal-search");
+    }
+
+    #[test]
+    fn stale_search_result_cannot_hide_a_newer_pending_search() {
+        let mut app = app_with_current_puzzle("loaded-normal");
+        let first_generation = app.next_search_generation();
+        let _second_generation = app.next_search_generation();
+        let expected = normal_export_state(&app);
+        app.search_tab.show_searching_msg = true;
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation: first_generation,
+            result: Ok(vec![navigation_puzzle("stale-normal-search")]),
+        });
+
+        assert!(app.search_tab.show_searching_msg);
+        assert_normal_export_state_preserved(&app, &expected, "stale pending search");
+    }
+
+    #[test]
+    fn stale_search_error_is_invisible() {
+        let mut app = app_with_current_puzzle("loaded-normal");
+        let first_generation = app.next_search_generation();
+        let second_generation = app.next_search_generation();
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation: second_generation,
+            result: Ok(vec![navigation_puzzle("newer-normal-search")]),
+        });
+        let status_before_stale_error = app.puzzle_status.clone();
+        let board_before_stale_error = app.board;
+        app.search_tab.show_searching_msg = true;
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation: first_generation,
+            result: Err("stale search failure".into()),
+        });
+
+        assert_eq!(app.puzzle_status, status_before_stale_error);
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "newer-normal-search");
+        assert_eq!(app.board, board_before_stale_error);
+        assert!(app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn stale_lichess_result_cannot_replace_newer_favorites_result() {
+        let mut app = app_with_current_puzzle("loaded-normal");
+        let lichess_generation = app.next_search_generation();
+        let favorites_generation = app.next_search_generation();
+
+        let _ = app.update(Message::LoadFavorites {
+            generation: favorites_generation,
+            result: Ok(vec![navigation_puzzle("newer-favorites-search")]),
+        });
+        let _ = app.update(Message::LoadPuzzle {
+            generation: lichess_generation,
+            result: Ok(vec![navigation_puzzle("stale-lichess-search")]),
+        });
+
+        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "newer-favorites-search");
+    }
+
+    #[test]
+    fn only_the_current_search_response_can_clear_searching_message() {
+        let mut app = app_with_current_puzzle("loaded-normal");
+        let stale_generation = app.next_search_generation();
+        let current_generation = app.next_search_generation();
+        app.search_tab.show_searching_msg = true;
+
+        let _ = app.update(Message::LoadFavorites {
+            generation: stale_generation,
+            result: Ok(Vec::new()),
+        });
+        assert!(app.search_tab.show_searching_msg);
+
+        let _ = app.update(Message::LoadFavorites {
+            generation: current_generation,
+            result: Ok(Vec::new()),
+        });
+        assert!(!app.search_tab.show_searching_msg);
     }
 
     #[test]
