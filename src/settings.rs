@@ -7,7 +7,6 @@ use rfd::AsyncFileDialog;
 
 use crate::styles::btn_style_simple;
 use crate::{Message, Tab, config, styles, lang, lang::PickListWrapper};
-use crate::config::SETTINGS_FILE;
 
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
@@ -126,7 +125,7 @@ impl SettingsTab {
                 self.interface_theme = value;
                 let mut config = config::load_config();
                 config.interface_theme = value;
-                match Self::persist_config(&config) {
+                match config::persist_config(&config) {
                     Ok(()) => self.saved_configs = config,
                     Err(status_key) => self.settings_status = lang::tr(&self.lang.lang, status_key),
                 }
@@ -228,7 +227,7 @@ impl SettingsTab {
             },
             SettingsMessage::ChangePressed => {
                 let config = self.current_config();
-                match Self::persist_config(&config) {
+                match config::persist_config(&config) {
                     Ok(()) => {
                         self.saved_configs = config;
                         self.settings_status = lang::tr(&self.lang.lang, "settings_saved");
@@ -282,11 +281,6 @@ impl SettingsTab {
         }
     }
 
-    fn persist_config(config: &config::OfflinePuzzlesConfig) -> Result<(), &'static str> {
-        let file = std::fs::File::create(SETTINGS_FILE).map_err(|_| "error_reading_config")?;
-        serde_json::to_writer_pretty(file, config).map_err(|_| "error_saving")
-    }
-
     fn save_puzzle_sqlite_location(&mut self, puzzle_sqlite_location: Option<String>) {
         let config = with_puzzle_sqlite_location(config::load_config(), puzzle_sqlite_location);
         if let Err(error) = self.persist_puzzle_source_config(config) {
@@ -298,7 +292,7 @@ impl SettingsTab {
         &mut self,
         config: config::OfflinePuzzlesConfig,
     ) -> Result<(), String> {
-        match Self::persist_config(&config) {
+        match config::persist_config(&config) {
             Ok(()) => {
                 let status_key = if config.puzzle_sqlite_location.is_some() {
                     "puzzle_sqlite_selected"
@@ -321,19 +315,16 @@ impl SettingsTab {
         self.saved_configs.puzzle_sqlite_location.is_some()
     }
 
-    pub fn save_window_size(&self) {
-        let mut config = config::load_config();
+    pub fn save_window_size(&self) -> Result<(), &'static str> {
+        self.save_window_size_to_path(std::path::Path::new(config::SETTINGS_FILE))
+    }
+
+    fn save_window_size_to_path(&self, path: &std::path::Path) -> Result<(), &'static str> {
+        let mut config = config::load_config_from_path(path);
         config.window_width = self.window_width;
         config.window_height = self.window_height;
         config.maximized = self.maximized;
-        let file = std::fs::File::create(SETTINGS_FILE);
-        match file {
-            Ok(file) => {
-                if serde_json::to_writer_pretty(file, &config).is_err() {
-                    println!("Error saving config file.");
-                }
-            } Err(_) => println!("Error opening settings file")
-        }
+        config::persist_config_to_path(&config, path)
     }
 
     fn settings_change_values(
@@ -411,6 +402,66 @@ mod tests {
 
     fn settings_tab_from_config(config: config::OfflinePuzzlesConfig) -> SettingsTab {
         SettingsTab::from_config(&config, config.clone())
+    }
+
+    struct TempSettingsFile {
+        directory: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl TempSettingsFile {
+        fn new(label: &str) -> Self {
+            let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("cms_h4_settings_tests")
+                .join(format!(
+                    "{label}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system clock should be after UNIX epoch")
+                        .as_nanos(),
+                ));
+            std::fs::create_dir_all(&directory).expect("test directory should be created");
+            Self {
+                path: directory.join("settings.json"),
+                directory,
+            }
+        }
+    }
+
+    impl Drop for TempSettingsFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    fn save_window_size_to_path_preserves_unrelated_config() {
+        let settings_file = TempSettingsFile::new("window-size");
+        let path = &settings_file.path;
+        let persisted = config::OfflinePuzzlesConfig {
+            engine_limit: "nodes 123".into(),
+            window_width: 800.0,
+            window_height: 600.0,
+            ..config::OfflinePuzzlesConfig::default()
+        };
+        config::persist_config_to_path(&persisted, &path)
+            .expect("test configuration should persist");
+        let mut settings_tab = settings_tab_from_config(persisted);
+        settings_tab.window_width = 1234.0;
+        settings_tab.window_height = 567.0;
+        settings_tab.maximized = true;
+
+        settings_tab
+            .save_window_size_to_path(&path)
+            .expect("window size should use the safe persistence helper");
+
+        let restored = config::load_config_from_path(&path);
+        assert_eq!(restored.window_width, 1234.0);
+        assert_eq!(restored.window_height, 567.0);
+        assert!(restored.maximized);
+        assert_eq!(restored.engine_limit, "nodes 123");
     }
 
     #[test]

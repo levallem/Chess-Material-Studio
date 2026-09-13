@@ -1,6 +1,7 @@
 use crate::{styles, search_tab::TacticalThemes, search_tab::OpeningSide, lang, openings::{Openings, Variation}};
 use chess::{Board, ChessMove, Piece, Square};
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use iced::Font;
@@ -129,6 +130,49 @@ pub fn load_config_from_path(path: &Path) -> OfflinePuzzlesConfig {
         } Err(_) => config = OfflinePuzzlesConfig::default()
     }
     config
+}
+
+pub(crate) fn persist_config(config: &OfflinePuzzlesConfig) -> Result<(), &'static str> {
+    persist_config_to_path(config, Path::new(SETTINGS_FILE))
+}
+
+pub(crate) fn persist_config_to_path(
+    config: &OfflinePuzzlesConfig,
+    path: &Path,
+) -> Result<(), &'static str> {
+    persist_config_to_path_with_renamer(config, path, |from, to| std::fs::rename(from, to))
+}
+
+fn persist_config_to_path_with_renamer<F>(
+    config: &OfflinePuzzlesConfig,
+    path: &Path,
+    renamer: F,
+) -> Result<(), &'static str>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let serialized = serde_json::to_vec_pretty(config).map_err(|_| "error_saving")?;
+    let temporary = temporary_config_path(path)?;
+    let result = (|| {
+        let mut file = std::fs::File::create(&temporary).map_err(|_| "error_saving")?;
+        file.write_all(&serialized).map_err(|_| "error_saving")?;
+        file.sync_all().map_err(|_| "error_saving")?;
+        drop(file);
+        renamer(&temporary, path).map_err(|_| "error_saving")
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+
+    result
+}
+
+fn temporary_config_path(path: &Path) -> Result<PathBuf, &'static str> {
+    let file_name = path.file_name().ok_or("error_saving")?;
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(".tmp");
+    Ok(path.with_file_name(temporary_name))
 }
 
 fn deserialize_config(reader: impl std::io::Read) -> serde_json::Result<OfflinePuzzlesConfig> {
@@ -491,6 +535,91 @@ mod tests {
             .join("cms_test_tmp");
         std::fs::create_dir_all(&dir).ok();
         dir.join(format!("{}_{}", name, std::process::id()))
+    }
+
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("cms_h4_settings_tests")
+                .join(format!(
+                    "{label}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system clock should be after UNIX epoch")
+                        .as_nanos(),
+                ));
+            std::fs::create_dir_all(&directory).expect("test directory should be created");
+            Self(directory)
+        }
+
+        fn settings_path(&self) -> std::path::PathBuf {
+            self.0.join("settings.json")
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn persist_config_to_path_round_trips_without_touching_repository_settings() {
+        let directory = TestDirectory::new("round-trip");
+        let path = directory.settings_path();
+        let config = OfflinePuzzlesConfig {
+            engine_limit: "nodes 123".into(),
+            window_width: 1234.0,
+            window_height: 567.0,
+            interface_theme: styles::InterfaceTheme::Dark,
+            ..OfflinePuzzlesConfig::default()
+        };
+
+        persist_config_to_path(&config, &path).expect("test configuration should persist");
+
+        let restored = load_config_from_path(&path);
+        assert_eq!(restored.engine_limit, "nodes 123");
+        assert_eq!(restored.window_width, 1234.0);
+        assert_eq!(restored.window_height, 567.0);
+        assert_eq!(restored.interface_theme, styles::InterfaceTheme::Dark);
+        assert!(!path.with_file_name("settings.json.tmp").exists());
+    }
+
+    #[test]
+    fn failed_temporary_creation_preserves_existing_config_bytes() {
+        let directory = TestDirectory::new("blocked-temporary");
+        let path = directory.settings_path();
+        let original = b"{\"engine_limit\":\"original\"}";
+        std::fs::write(&path, original).expect("existing configuration should be seeded");
+        std::fs::create_dir(path.with_file_name("settings.json.tmp"))
+            .expect("temporary path should be blocked by a directory");
+
+        let result = persist_config_to_path(&OfflinePuzzlesConfig::default(), &path);
+
+        assert_eq!(result, Err("error_saving"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_replace_preserves_existing_config_bytes_and_cleans_temporary() {
+        let directory = TestDirectory::new("failed-replace");
+        let path = directory.settings_path();
+        let original = b"{\"engine_limit\":\"original\"}";
+        std::fs::write(&path, original).expect("existing configuration should be seeded");
+
+        let result = persist_config_to_path_with_renamer(
+            &OfflinePuzzlesConfig::default(),
+            &path,
+            |_, _| Err(std::io::Error::other("injected rename failure")),
+        );
+
+        assert_eq!(result, Err("error_saving"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!path.with_file_name("settings.json.tmp").exists());
     }
 
     #[test]

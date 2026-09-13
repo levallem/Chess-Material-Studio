@@ -606,7 +606,9 @@ impl OfflinePuzzles {
     fn handle_engine_failure(&mut self, reason: String, exit_requested: bool) -> Task<Message> {
         self.record_engine_failure(reason);
         if exit_requested {
-            self.settings_tab.save_window_size();
+            if self.settings_tab.save_window_size().is_err() {
+                eprintln!("Error saving config file.");
+            }
             if let Some(window_id) = self.window_id {
                 window::close(window_id)
             } else {
@@ -847,14 +849,26 @@ impl OfflinePuzzles {
             }
              (_, Message::PuzzleInfo(message)) => {
                 self.puzzle_tab.update(message)
-            } (_, Message::Search(SearchMesssage::ClickSearch)) if !self.search_tab.is_favorites() => {
-                match self.project_tab.reviewed_puzzle_ids_for_active_chapter() {
-                    Ok(excluded_ids) => self.search_tab.start_lichess_search(
-                        excluded_ids.unwrap_or_default(),
-                    ),
-                    Err(error) => {
+            } (_, Message::Search(SearchMesssage::ClickSearch)) => {
+                let task = if self.search_tab.is_favorites() {
+                    self.search_tab.start_favorites_search()
+                } else {
+                    match self.project_tab.reviewed_puzzle_ids_for_active_chapter() {
+                        Ok(excluded_ids) => self.search_tab.start_lichess_search(
+                            excluded_ids.unwrap_or_default(),
+                        ),
+                        Err(error) => {
+                            self.search_tab.show_searching_msg = false;
+                            self.puzzle_status = format!("{}: {error}", lang::tr(&self.lang, "review_error"));
+                            return Task::none();
+                        }
+                    }
+                };
+                match task {
+                    Ok(task) => task,
+                    Err(status_key) => {
                         self.search_tab.show_searching_msg = false;
-                        self.puzzle_status = format!("{}: {error}", lang::tr(&self.lang, "review_error"));
+                        self.puzzle_status = lang::tr(&self.lang, status_key);
                         Task::none()
                     }
                 }
@@ -965,7 +979,9 @@ impl OfflinePuzzles {
                 }
             } (_, Message::SaveMaximizedStatusAndExit(is_maximized)) => {
                 self.settings_tab.maximized = is_maximized;
-                self.settings_tab.save_window_size();
+                if self.settings_tab.save_window_size().is_err() {
+                    eprintln!("Error saving config file.");
+                }
                 window::close(self.window_id.unwrap())
             } (_, Message::EngineFileChosen(engine_path)) => {
                 if let Some(engine_path) = engine_path {
@@ -995,7 +1011,9 @@ impl OfflinePuzzles {
             } (_, Message::EngineStopped(exit)) => {
                 self.clear_engine_state();
                 if exit {
-                    self.settings_tab.save_window_size();
+                    if self.settings_tab.save_window_size().is_err() {
+                        eprintln!("Error saving config file.");
+                    }
                     if let Some(window_id) = self.window_id {
                         window::close(window_id)
                     } else {
@@ -1322,6 +1340,39 @@ mod tests {
             let _ = std::fs::remove_file(&self.path);
             let _ = std::fs::remove_dir(&self.directory);
         }
+    }
+
+    struct TempSettingsFile {
+        path: PathBuf,
+        directory: PathBuf,
+    }
+
+    impl TempSettingsFile {
+        fn new(label: &str) -> Self {
+            let sequence = TEMP_PROJECT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("cms_h4_main_tests")
+                .join(format!("{label}-{}-{sequence}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("test directory should be created");
+            Self {
+                path: directory.join("settings.json"),
+                directory,
+            }
+        }
+    }
+
+    impl Drop for TempSettingsFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn isolate_search_settings(app: &mut OfflinePuzzles, label: &str) -> TempSettingsFile {
+        let settings_file = TempSettingsFile::new(label);
+        app.search_tab
+            .set_settings_path_for_test(settings_file.path.clone());
+        settings_file
     }
 
     fn navigation_puzzle(id: &str) -> config::Puzzle {
@@ -1746,6 +1797,7 @@ mod tests {
         create_project(&project.path, "Proyecto").unwrap();
         create_chapter(&project.path, "Capítulo", None).unwrap();
         let mut app = OfflinePuzzles::new(false);
+        let _settings_file = isolate_search_settings(&mut app, "search-preparation");
         let loaded = navigation_puzzle("already-loaded");
         app.puzzle_tab.puzzles = vec![loaded.clone()];
         app.puzzle_tab.current_puzzle = 0;
@@ -1772,6 +1824,7 @@ mod tests {
     #[test]
     fn lichess_search_without_a_project_starts_normally() {
         let mut app = OfflinePuzzles::new(false);
+        let _settings_file = isolate_search_settings(&mut app, "lichess-search");
 
         let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
 

@@ -3,7 +3,7 @@ use iced::widget::{Container, Button, column as col, Text, Radio, row, Row, Svg,
 use iced::widget::text::LineHeight;
 use iced::{alignment, Alignment, Element, Length, Task, Theme};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use diesel::Connection;
 use iced_aw::TabLabel;
@@ -234,6 +234,7 @@ pub struct SearchTab {
     pub lang: lang::Language,
     base: Option<SearchBase>,
     pub promotion_piece_img: Vec<Handle>,
+    settings_path: PathBuf,
 }
 
 fn adapt_sqlite_puzzle(
@@ -465,7 +466,13 @@ impl SearchTab {
             lang: config::SETTINGS.lang,
             base: Some(SearchBase::Lichess),
             promotion_piece_img: gen_piece_vec(&config::SETTINGS.piece_theme),
+            settings_path: PathBuf::from(SETTINGS_FILE),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_settings_path_for_test(&mut self, path: PathBuf) {
+        self.settings_path = path;
     }
 
     pub fn update(&mut self, message: SearchMesssage) -> Task<Message> {//config::AppEvents {
@@ -496,29 +503,12 @@ impl SearchTab {
                 self.piece_to_promote_to = piece;
                 Task::none()
             } SearchMesssage::ClickSearch => {
-                if self.is_favorites() {
-                    self.start_favorites_search()
-                } else {
-                    self.start_lichess_search(HashSet::new())
-                }
+                Task::none()
             } SearchMesssage::SelectBase(base) => {
                 self.base = Some(base);
                 Task::none()
             }
         }
-    }
-
-    pub fn save_search_settings(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation: Variation, op_side: Option<OpeningSide>) {
-        Self::save_search_settings_to_path(
-            Path::new(SETTINGS_FILE),
-            min_rating,
-            max_rating,
-            min_popularity,
-            theme,
-            opening,
-            variation,
-            op_side,
-        );
     }
 
     fn save_search_settings_to_path(
@@ -530,7 +520,7 @@ impl SearchTab {
         opening: Openings,
         variation: Variation,
         op_side: Option<OpeningSide>,
-    ) {
+    ) -> Result<(), &'static str> {
         let mut config = load_config_from_path(path);
         config.last_min_rating = min_rating;
         config.last_max_rating = max_rating;
@@ -540,10 +530,7 @@ impl SearchTab {
         config.last_variation = variation;
         config.last_opening_side = op_side;
 
-        let file = std::fs::File::create(path);
-        if let Ok(file) = file && serde_json::to_writer_pretty(file, &config).is_err() {
-            println!("Error saving search options.");
-        }
+        config::persist_config_to_path(&config, path)
     }
 
     pub async fn search_favs(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation:Variation, op_side: Option<OpeningSide>, result_limit: usize) -> Result<Vec<config::Puzzle>, String> {
@@ -554,11 +541,11 @@ impl SearchTab {
         self.base == Some(SearchBase::Favorites)
     }
 
-    pub fn start_lichess_search(&mut self, excluded_ids: HashSet<String>) -> Task<Message> {
+    pub fn start_lichess_search(&mut self, excluded_ids: HashSet<String>) -> Result<Task<Message>, &'static str> {
+        self.save_current_search_settings()?;
         self.show_searching_msg = true;
-        self.save_current_search_settings();
         let config = load_config();
-        Task::perform(
+        Ok(Task::perform(
             SearchTab::search(
                 self.slider_min_rating_value,
                 self.slider_max_rating_value,
@@ -571,14 +558,14 @@ impl SearchTab {
                 excluded_ids,
             ),
             Message::LoadPuzzle,
-        )
+        ))
     }
 
-    fn start_favorites_search(&mut self) -> Task<Message> {
+    pub fn start_favorites_search(&mut self) -> Result<Task<Message>, &'static str> {
+        self.save_current_search_settings()?;
         self.show_searching_msg = true;
-        self.save_current_search_settings();
         let config = load_config();
-        Task::perform(
+        Ok(Task::perform(
             SearchTab::search_favs(
                 self.slider_min_rating_value,
                 self.slider_max_rating_value,
@@ -590,11 +577,12 @@ impl SearchTab {
                 config.search_results_limit,
             ),
             Message::LoadFavorites,
-        )
+        ))
     }
 
-    fn save_current_search_settings(&self) {
-        SearchTab::save_search_settings(
+    fn save_current_search_settings(&self) -> Result<(), &'static str> {
+        Self::save_search_settings_to_path(
+            &self.settings_path,
             self.slider_min_rating_value,
             self.slider_max_rating_value,
             self.slider_min_popularity,
@@ -602,7 +590,7 @@ impl SearchTab {
             self.opening.item,
             self.variation.item.clone(),
             self.opening_side,
-        );
+        )
     }
 
     pub async fn search(min_rating: i32, max_rating: i32, min_popularity: i32, theme: TacticalThemes, opening: Openings, variation: Variation, op_side: Option<OpeningSide>, result_limit: usize, excluded_ids: HashSet<String>) -> Result<Vec<config::Puzzle>, String> {
@@ -1015,7 +1003,8 @@ mod tests {
             Openings::Any,
             Variation::ANY.clone(),
             Some(OpeningSide::Any),
-        );
+        )
+        .expect("missing test configuration should persist");
 
         let config = config::load_config_from_path(&path);
         assert_eq!(config.search_results_limit, 100);
@@ -1051,7 +1040,8 @@ mod tests {
                 family: Openings::Sicilian,
             },
             Some(OpeningSide::White),
-        );
+        )
+        .expect("existing test configuration should persist");
 
         let config = config::load_config_from_path(&path);
         assert_eq!(config.search_results_limit, 500);
