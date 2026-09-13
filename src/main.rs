@@ -132,6 +132,7 @@ pub enum Message {
     EventOccurred(iced::Event),
     StartEngine,
     EngineStopped(bool),
+    EngineFailed { reason: String, exit_requested: bool },
     UpdateEval((Option<String>, Option<String>)),
     EngineReady(mpsc::Sender<String>),
     EngineFileChosen(Option<String>),
@@ -388,7 +389,7 @@ impl OfflinePuzzles {
                 self.engine.position = self.analysis.current_position().to_string();
                 if let Some(sender) = &self.engine_sender
                     && let Err(e) = sender.blocking_send(san_correct_ep(self.analysis.current_position().to_string())) {
-                        eprintln!("Lost contact with the engine: {}", e);
+                        self.record_engine_failure(format!("lost contact with engine: {e}"));
                 }
                 if self.settings_tab.saved_configs.play_sound
                     && let Some(audio) = &self.sound_playback {
@@ -590,6 +591,38 @@ impl OfflinePuzzles {
         self.puzzle_number_ui = (self.puzzle_tab.current_puzzle + 1).to_string();
     }
 
+    fn clear_engine_state(&mut self) {
+        self.engine_state = EngineStatus::TurnedOff;
+        self.engine_sender = None;
+        self.engine_eval = String::new();
+        self.engine_move = String::new();
+    }
+
+    fn record_engine_failure(&mut self, reason: impl std::fmt::Display) {
+        self.clear_engine_state();
+        self.puzzle_status = format!("Engine error: {reason}");
+    }
+
+    fn handle_engine_failure(&mut self, reason: String, exit_requested: bool) -> Task<Message> {
+        self.record_engine_failure(reason);
+        if exit_requested {
+            self.settings_tab.save_window_size();
+            if let Some(window_id) = self.window_id {
+                window::close(window_id)
+            } else {
+                Task::none()
+            }
+        } else {
+            Task::none()
+        }
+    }
+
+    fn send_engine_command(&self, command: &str) -> Result<(), String> {
+        let sender = self.engine_sender.as_ref()
+            .ok_or_else(|| String::from("engine control channel is unavailable"))?;
+        sender.blocking_send(command.to_string())
+            .map_err(|error| format!("lost contact with engine: {error}"))
+    }
     // Old Iced application trait stuff
     fn init() -> (Self, Task<Message>) {
         let has_lichess_db = config::puzzle_source_exists(&config::SETTINGS);
@@ -646,8 +679,10 @@ impl OfflinePuzzles {
                     self.analysis = Game::new_with_board(self.board);
                 } else {
                     if self.engine_state != EngineStatus::TurnedOff
-                        && let Some(sender) = &self.engine_sender {
-                            sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
+                        && self.engine_sender.is_some() {
+                            if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                                return self.handle_engine_failure(error, false);
+                            }
                     }
                     self.analysis_history.truncate(self.puzzle_tab.current_puzzle_move);
                 }
@@ -679,7 +714,7 @@ impl OfflinePuzzles {
                     self.analysis = Game::new_with_board(*self.analysis_history.last().unwrap());
                     if let Some(sender) = &self.engine_sender
                         && let Err(e) = sender.blocking_send(san_correct_ep(self.analysis.current_position().to_string())) {
-                            eprintln!("Lost contact with the engine: {}", e);
+                            self.record_engine_failure(format!("lost contact with engine: {e}"));
                     }
                 }
                 Task::none()
@@ -696,8 +731,10 @@ impl OfflinePuzzles {
                 }
                 self.from_square = None;
                 if self.engine_state != EngineStatus::TurnedOff
-                    && let Some(sender) = &self.engine_sender {
-                        sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
+                    && self.engine_sender.is_some() {
+                        if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                                return self.handle_engine_failure(error, false);
+                            }
                 }
                 self.refresh_current_favorite_status()
             } (_, Message::LoadPuzzle(result)) => {
@@ -716,8 +753,10 @@ impl OfflinePuzzles {
                     }
                     self.from_square = None;
                     if self.engine_state != EngineStatus::TurnedOff
-                        && let Some(sender) = &self.engine_sender {
-                            sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
+                        && self.engine_sender.is_some() {
+                            if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                                return self.handle_engine_failure(error, false);
+                            }
                     }
                     return self.refresh_current_favorite_status();
                 } else {
@@ -744,9 +783,9 @@ impl OfflinePuzzles {
                             }
                             self.from_square = None;
                             if self.engine_state != EngineStatus::TurnedOff
-                                && let Some(sender) = &self.engine_sender {
-                                    if let Err(error) = sender.blocking_send(String::from(eval::STOP_COMMAND)) {
-                                        eprintln!("Lost contact with the engine: {error}");
+                                && self.engine_sender.is_some() {
+                                    if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                                        return self.handle_engine_failure(error, false);
                                     }
                             }
                             self.refresh_current_favorite_status()
@@ -909,8 +948,8 @@ impl OfflinePuzzles {
                         EngineStatus::TurnedOff => {
                             iced::window::is_maximized(self.window_id.unwrap()).map(Message::SaveMaximizedStatusAndExit)
                         } _ => {
-                            if let Some(sender) = &self.engine_sender {
-                                sender.blocking_send(String::from(eval::EXIT_APP_COMMAND)).expect("Error stopping engine.");
+                            if let Err(error) = self.send_engine_command(eval::EXIT_APP_COMMAND) {
+                                return self.handle_engine_failure(error, true);
                             }
                             Task::none()
                         }
@@ -937,31 +976,40 @@ impl OfflinePuzzles {
             } (_, Message::StartEngine) => {
                 match self.engine_state {
                     EngineStatus::TurnedOff => {
-                        //Check if the path is correct first
-                        if Path::new(&self.engine.engine_path).exists() {
+                        if self.engine.engine_path.is_empty() {
+                            self.record_engine_failure("engine path is empty");
+                        } else if !Path::new(&self.engine.engine_path).exists() {
+                            self.record_engine_failure("engine executable does not exist");
+                        } else {
                             self.engine.position = san_correct_ep(self.analysis.current_position().to_string());
                             self.engine_state = EngineStatus::Started;
                         }
                     } _ => {
-                        if let Some(sender) = &self.engine_sender {
-                            sender.blocking_send(String::from(eval::STOP_COMMAND)).expect("Error stopping engine.");
-                            self.engine_sender = None;
+                        if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                            return self.handle_engine_failure(error, false);
                         }
+                        self.engine_sender = None;
                     }
                 }
                 Task::none()
             } (_, Message::EngineStopped(exit)) => {
-                self.engine_state = EngineStatus::TurnedOff;
+                self.clear_engine_state();
                 if exit {
                     self.settings_tab.save_window_size();
-                    window::close(self.window_id.unwrap())
+                    if let Some(window_id) = self.window_id {
+                        window::close(window_id)
+                    } else {
+                        Task::none()
+                    }
                 } else {
-                    self.engine_eval = String::new();
-                    self.engine_move = String::new();
                     Task::none()
                 }
+            } (_, Message::EngineFailed { reason, exit_requested }) => {
+                self.handle_engine_failure(reason, exit_requested)
             } (_, Message::EngineReady(sender)) => {
-                self.engine_sender = Some(sender);
+                if self.engine_state != EngineStatus::TurnedOff {
+                    self.engine_sender = Some(sender);
+                }
                 Task::none()
             } (_, Message::UpdateEval(eval)) => {
                 match self.engine_state {
@@ -1289,6 +1337,60 @@ mod tests {
             game_url: "https://lichess.org/game".into(),
             opening: String::new(),
         }
+    }
+
+    #[test]
+    fn engine_failure_resets_coordination_state_and_shows_feedback() {
+        let mut app = OfflinePuzzles::new(false);
+        let (sender, _receiver) = mpsc::channel(1);
+        app.engine_state = EngineStatus::Started;
+        app.engine_sender = Some(sender);
+        app.engine_eval = "0.42".into();
+        app.engine_move = "e4".into();
+
+        let _ = app.update(Message::EngineFailed {
+            reason: "stdout closed".into(),
+            exit_requested: false,
+        });
+
+        assert!(app.engine_state == EngineStatus::TurnedOff);
+        assert!(app.engine_sender.is_none());
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+        assert!(app.puzzle_status.contains("stdout closed"));
+    }
+
+    #[test]
+    fn normal_engine_stop_clears_the_sender() {
+        let mut app = OfflinePuzzles::new(false);
+        let (sender, _receiver) = mpsc::channel(1);
+        app.engine_state = EngineStatus::Started;
+        app.engine_sender = Some(sender);
+        app.engine_eval = "0.42".into();
+        app.engine_move = "e4".into();
+
+        let _ = app.update(Message::EngineStopped(false));
+
+        assert!(app.engine_state == EngineStatus::TurnedOff);
+        assert!(app.engine_sender.is_none());
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn missing_engine_path_keeps_engine_off_and_shows_feedback() {
+        let mut app = OfflinePuzzles::new(false);
+        let missing_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("h3-engine-path-that-does-not-exist");
+        assert!(!missing_path.exists());
+        app.engine.engine_path = missing_path.display().to_string();
+
+        let _ = app.update(Message::StartEngine);
+
+        assert!(app.engine_state == EngineStatus::TurnedOff);
+        assert!(app.engine_sender.is_none());
+        assert!(app.puzzle_status.contains("does not exist"));
     }
 
     #[test]

@@ -4,11 +4,11 @@ use iced::futures::sink::SinkExt;
 use iced::Subscription;
 
 use std::process::Stdio;
-use tokio::sync::mpsc::{self, Receiver};
-use tokio::process::{Command, Child};
-use tokio::io::{BufReader, AsyncWriteExt, AsyncBufReadExt};
+use tokio::sync::mpsc::{self, error::TryRecvError, Receiver};
+use tokio::process::{Child, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use std::time::Duration;
 
 use crate::Message;
@@ -111,8 +111,7 @@ mod tests {
 }
 pub enum EngineState {
     Start,
-    Thinking(Child, String, Receiver<String>),
-    TurnedOff,
+    Thinking(Child, Lines<BufReader<ChildStdout>>, String, Receiver<String>),
 }
 
 #[derive(PartialEq)]
@@ -157,7 +156,6 @@ impl Engine {
                     match &mut state {
 
                         EngineState::Start => {
-
                             let (sender, receiver) = mpsc::channel(100);
                             let mut cmd = Command::new(engine.engine_path.clone());
                             cmd.kill_on_drop(true).stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -165,134 +163,228 @@ impl Engine {
                             //"CREATE_NO_WINDOW" flag
                             // https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
                             cmd.creation_flags(0x08000000);
-                            let mut child = cmd.spawn().expect("Error calling engine");
+                            let mut child = match cmd.spawn() {
+                                Ok(child) => child,
+                                Err(error) => {
+                                    if output.send(Message::EngineFailed {
+                                        reason: format!("could not start engine: {error}"),
+                                        exit_requested: false,
+                                    }).await.is_err() {
+                                        return;
+                                    }
+                                    return;
+                                }
+                            };
                             let pos = String::from("position fen ") + &engine.position + &String::from("\n");
                             let limit = String::from("go ") + &engine.search_up_to + "\n";
-                            let mut uciok = false;
-                            let mut readyok = false;
-                            child.stdin.as_mut().unwrap().write_all(b"uci\n").await.expect("Error communicating with engine");
-                            let mut reader = BufReader::new(child.stdout.as_mut().unwrap());
-                            let mut buf_str = String::new();
-                            loop {
-                                let uciok_timeout = timeout(Duration::from_millis(7000),
-                                    reader.read_line(&mut buf_str)
-                                ).await;
-                                if uciok_timeout.is_err() {
-                                    break;
-                                } else if buf_str.contains("uciok") {
-                                    uciok = true;
-                                    break;
-                                }
-                            }
-                            if uciok {
-                                child.stdin.as_mut().unwrap().write_all(b"ucinewgame\n").await.expect("Error communicating with engine");
-                                child.stdin.as_mut().unwrap().write_all(b"isready\n").await.expect("Error communicating with engine");
-                                buf_str = String::new();
-                                loop {
-                                    let readyok_timeout = timeout(Duration::from_millis(7000),
-                                        reader.read_line(&mut buf_str)
-                                    ).await;
-                                    if readyok_timeout.is_err() {
-                                        break;
-                                    } else if buf_str.contains("readyok") {
-                                        readyok = true;
-                                        break;
+                            let stdout = match child.stdout.take() {
+                                Some(stdout) => stdout,
+                                None => {
+                                    let reason = with_shutdown_result(&mut child, String::from("engine stdout is unavailable")).await;
+                                    if output.send(Message::EngineFailed {
+                                        reason,
+                                        exit_requested: false,
+                                    }).await.is_err() {
+                                        return;
                                     }
+                                    return;
                                 }
-                                if readyok {
-                                    child.stdin.as_mut().unwrap().write_all(b"setoption name UCI_AnalyseMode value true\n").await.expect("Error communicating with engine");
-                                    child.stdin.as_mut().unwrap().write_all(pos.as_bytes()).await.expect("Error communicating with engine");
-                                    child.stdin.as_mut().unwrap().write_all(limit.as_bytes()).await.expect("Error communicating with engine");
+                            };
+                            let mut reader = BufReader::new(stdout).lines();
+                            let startup_result = async {
+                                write_engine_command(&mut child, b"uci\n", "sending uci").await?;
+                                wait_for_token(&mut reader, "uciok", "uciok").await?;
+                                write_engine_command(&mut child, b"ucinewgame\n", "sending ucinewgame").await?;
+                                write_engine_command(&mut child, b"isready\n", "sending isready").await?;
+                                wait_for_token(&mut reader, "readyok", "readyok").await?;
+                                write_engine_command(&mut child, b"setoption name UCI_AnalyseMode value true\n", "configuring analysis mode").await?;
+                                write_engine_command(&mut child, pos.as_bytes(), "sending position").await?;
+                                write_engine_command(&mut child, limit.as_bytes(), "starting analysis").await
+                            }.await;
 
-                                    output.send(Message::EngineReady(sender)).await.expect("Error on the mpsc channel in the engine subscription");
-                                    state = EngineState::Thinking(child, engine.search_up_to.to_string(), receiver);
-                                    continue;
+                            if let Err(reason) = startup_result {
+                                let reason = with_shutdown_result(&mut child, reason).await;
+                                if output.send(Message::EngineFailed {
+                                    reason,
+                                    exit_requested: false,
+                                }).await.is_err() {
+                                    return;
                                 }
+                                return;
                             }
-                            eprintln!("Engine took too long to start, aborting...");
-                            child.stdin.as_mut().unwrap().write_all(b"stop\n").await.expect("Error communicating with engine");
-                            child.stdin.as_mut().unwrap().write_all(b"quit\n").await.expect("Error communicating with engine");
-                            let terminate_timeout = timeout(Duration::from_millis(1000),
-                                child.wait()
-                            ).await;
-                            if let Err(e) = terminate_timeout {
-                                eprintln!("Error: {e}");
-                                eprintln!("Engine didn't quit, killing the process now... ");
-                                let kill_result = timeout(Duration::from_millis(500),
-                                    child.kill()
-                                ).await;
-                                if let Err(e) = kill_result {
-                                    eprintln!("Error killing the engine process: {e}");
+
+                            if output.send(Message::EngineReady(sender)).await.is_err() {
+                                return;
+                            }
+                            state = EngineState::Thinking(child, reader, engine.search_up_to.to_string(), receiver);
+                            continue;
+                        } EngineState::Thinking(child, reader, search_up_to, receiver) => {
+                            let msg = match receiver.try_recv() {
+                                Ok(message) => Some(message),
+                                Err(TryRecvError::Empty) => None,
+                                Err(TryRecvError::Disconnected) => {
+                                    let reason = with_shutdown_result(child, String::from("engine control channel disconnected")).await;
+                                    if output.send(Message::EngineFailed {
+                                        reason,
+                                        exit_requested: false,
+                                    }).await.is_err() {
+                                        return;
+                                    }
+                                    return;
                                 }
-                            }
-                            output.send(Message::EngineStopped(false)).await.expect("Error on the mpsc channel in the engine subscription");
-                            state = EngineState::TurnedOff;
-                        } EngineState::Thinking(child, search_up_to, receiver) => {
-                            let msg = receiver.try_recv();
-                            if let Ok(msg) = msg {
+                            };
+                            if let Some(msg) = msg {
                                 if msg == STOP_COMMAND || msg == EXIT_APP_COMMAND {
-                                    child.stdin.as_mut().unwrap().write_all(b"stop\n").await.expect("Error communicating with engine");
-                                    child.stdin.as_mut().unwrap().write_all(b"quit\n").await.expect("Error communicating with engine");
-                                    let terminate_timeout = timeout(Duration::from_millis(1000),
-                                        child.wait()
-                                    ).await;
-                                    if let Err(e) = terminate_timeout {
-                                        eprintln!("Error: {e}");
-                                        eprintln!("Engine didn't quit, killing the process now... ");
-                                        let kill_result = timeout(Duration::from_millis(500),
-                                            child.kill()
-                                        ).await;
-                                        if let Err(e) = kill_result {
-                                            eprintln!("Error killing the engine process: {e}");
+                                    match shutdown_engine(child).await {
+                                        Ok(()) => {
+                                            if output.send(Message::EngineStopped(msg == EXIT_APP_COMMAND)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(reason) => {
+                                            if output.send(Message::EngineFailed {
+                                                reason,
+                                                exit_requested: msg == EXIT_APP_COMMAND,
+                                            }).await.is_err() {
+                                                return;
+                                            }
                                         }
                                     }
-                                    output.send(Message::EngineStopped(msg == EXIT_APP_COMMAND)).await.expect("Error on the mpsc channel in the engine subscription");
-                                    state = EngineState::TurnedOff;
-                                    continue;
+                                    return;
                                 } else {
                                     let pos = String::from("position fen ") + &msg + &String::from("\n");
                                     let limit = String::from("go ") + search_up_to + "\n";
-                                    child.stdin.as_mut().unwrap().write_all(b"stop\n").await.expect("Error communicating with engine");
-                                    //child.stdin.as_mut().unwrap().write_all(b"setoption name UCI_AnalyseMode value true\n").await.expect("Error communicating with engine");
-                                    //child.stdin.as_mut().unwrap().write_all(b"ucinewgame\n").await.expect("Error communicating with engine");
-                                    child.stdin.as_mut().unwrap().write_all(pos.as_bytes()).await.expect("Error communicating with engine");
-                                    child.stdin.as_mut().unwrap().write_all(limit.as_bytes()).await.expect("Error communicating with engine");
-                                }
-                            }
-                            let mut buf_str = String::new();
-                            let mut eval = None;
-                            let mut best_move = None;
-
-                            if let Some(out) = child.stdout.as_mut() {
-                                let mut reader = BufReader::new(out);
-                                loop {
-                                    let read_timeout = timeout(Duration::from_millis(50),
-                                        reader.read_line(&mut buf_str)
-                                    ).await;
-                                    if let Ok(Ok(read_result)) = read_timeout {
-                                        if read_result == 0 {
-                                            break;
+                                    let position_result = async {
+                                        write_engine_command(child, b"stop\n", "stopping previous analysis").await?;
+                                        write_engine_command(child, pos.as_bytes(), "sending position").await?;
+                                        write_engine_command(child, limit.as_bytes(), "starting analysis").await
+                                    }.await;
+                                    if let Err(reason) = position_result {
+                                        let reason = with_shutdown_result(child, reason).await;
+                                        if output.send(Message::EngineFailed {
+                                            reason,
+                                            exit_requested: false,
+                                        }).await.is_err() {
+                                            return;
                                         }
-                                        let (line_eval, line_best_move) = parse_uci_info_line(&buf_str);
-                                        if line_eval.is_some() {
-                                            eval = line_eval;
-                                        }
-                                        if line_best_move.is_some() {
-                                            best_move = line_best_move;
-                                        }
-                                        buf_str.clear();
-                                    } else {
-                                        break;
+                                        return;
                                     }
                                 }
                             }
-                            output.send(Message::UpdateEval((eval, best_move))).await.expect("Error on the mpsc channel in the engine subscription");
-                        } EngineState::TurnedOff => {
-                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            let mut eval = None;
+                            let mut best_move = None;
+
+                            let read_result = read_analysis_output(reader, &mut eval, &mut best_move).await;
+                            if let Err(reason) = read_result {
+                                let reason = with_shutdown_result(child, reason).await;
+                                if output.send(Message::EngineFailed {
+                                    reason,
+                                    exit_requested: false,
+                                }).await.is_err() {
+                                    return;
+                                }
+                                return;
+                            }
+                            match output.try_send(Message::UpdateEval((eval, best_move))) {
+                                Ok(()) => {}
+                                Err(error) if error.is_full() => {}
+                                Err(_) => return,
+                            }
                         }
                     }
                 }
             }
         )
+    }
+}
+
+async fn write_engine_command(child: &mut Child, command: &[u8], action: &str) -> Result<(), String> {
+    let stdin = child.stdin.as_mut()
+        .ok_or_else(|| String::from("engine stdin is unavailable"))?;
+    stdin.write_all(command).await
+        .map_err(|error| format!("failed while {action}: {error}"))
+}
+
+async fn wait_for_token(
+    reader: &mut Lines<BufReader<ChildStdout>>,
+    token: &str,
+    token_name: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(7);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("timed out waiting for {token_name}"));
+        }
+        match timeout(remaining, reader.next_line()).await {
+            Err(_) => return Err(format!("timed out waiting for {token_name}")),
+            Ok(Ok(None)) => return Err(format!("engine stdout closed before {token_name}")),
+            Ok(Ok(Some(line))) if line.contains(token) => return Ok(()),
+            Ok(Ok(Some(_))) => {}
+            Ok(Err(error)) => return Err(format!("failed while waiting for {token_name}: {error}")),
+        }
+    }
+}
+
+const MAX_ANALYSIS_LINES_PER_CYCLE: usize = 32;
+const ANALYSIS_READ_BUDGET: Duration = Duration::from_millis(50);
+
+async fn read_analysis_output(
+    reader: &mut Lines<BufReader<ChildStdout>>,
+    eval: &mut Option<String>,
+    best_move: &mut Option<String>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + ANALYSIS_READ_BUDGET;
+    for _ in 0..MAX_ANALYSIS_LINES_PER_CYCLE {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        match timeout(remaining, reader.next_line()).await {
+            Err(_) => return Ok(()),
+            Ok(Ok(None)) => return Err(String::from("engine stdout closed during analysis")),
+            Ok(Ok(Some(line))) => {
+                let (line_eval, line_best_move) = parse_uci_info_line(&line);
+                if line_eval.is_some() {
+                    *eval = line_eval;
+                }
+                if line_best_move.is_some() {
+                    *best_move = line_best_move;
+                }
+            }
+            Ok(Err(error)) => return Err(format!("failed while reading engine analysis: {error}")),
+        }
+    }
+    Ok(())
+}
+
+async fn with_shutdown_result(child: &mut Child, reason: String) -> String {
+    match shutdown_engine(child).await {
+        Ok(()) => reason,
+        Err(shutdown_reason) => format!("{reason}; shutdown failed: {shutdown_reason}"),
+    }
+}
+
+async fn shutdown_engine(child: &mut Child) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = write_engine_command(child, b"stop\n", "sending stop").await {
+        errors.push(error);
+    }
+    if let Err(error) = write_engine_command(child, b"quit\n", "sending quit").await {
+        errors.push(error);
+    }
+    match timeout(Duration::from_millis(1000), child.wait()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => errors.push(format!("failed while waiting for engine exit: {error}")),
+        Err(_) => match timeout(Duration::from_millis(500), child.kill()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => errors.push(format!("failed while killing engine: {error}")),
+            Err(_) => errors.push(String::from("timed out while killing engine")),
+        },
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
