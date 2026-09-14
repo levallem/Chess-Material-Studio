@@ -228,9 +228,9 @@ fn escape_pgn_tag_value(value: &str) -> String {
                 if characters.peek() == Some(&'\n') {
                     characters.next();
                 }
-                escaped.push_str("\\n");
+                escaped.push(' ');
             }
-            '\n' => escaped.push_str("\\n"),
+            character if character.is_control() => escaped.push(' '),
             character => escaped.push(character),
         }
     }
@@ -273,9 +273,10 @@ fn build_pgn_game_with_context(
     // Build headers
     let mut pgn = String::new();
     pgn.push_str("[Event \"Chess Puzzle\"]\n");
+    let site = format!("https://lichess.org/training/{}", puzzle.puzzle_id);
     pgn.push_str(&format!(
-        "[Site \"https://lichess.org/training/{}\"]\n",
-        puzzle.puzzle_id
+        "[Site \"{}\"]\n",
+        escape_pgn_tag_value(&site)
     ));
     if let Some(context) = context {
         pgn.push_str(&format!(
@@ -306,11 +307,17 @@ fn build_pgn_game_with_context(
         }
     ));
     pgn.push_str("[Result \"*\"]\n");
-    pgn.push_str(&format!("[GameID \"{}\"]\n", puzzle.game_url));
+    pgn.push_str(&format!(
+        "[GameID \"{}\"]\n",
+        escape_pgn_tag_value(&puzzle.game_url)
+    ));
     pgn.push_str(&format!("[FEN \"{}\"]\n", fen));
     pgn.push_str("[SetUp \"1\"]\n");
     if !puzzle.opening.is_empty() {
-        pgn.push_str(&format!("[Opening \"{}\"]\n", puzzle.opening));
+        pgn.push_str(&format!(
+            "[Opening \"{}\"]\n",
+            escape_pgn_tag_value(&puzzle.opening)
+        ));
     }
     pgn.push_str(&format!("[PuzzleRating \"{}\"]\n", puzzle.rating));
     pgn.push_str(&format!(
@@ -319,7 +326,10 @@ fn build_pgn_game_with_context(
     ));
     pgn.push_str(&format!("[PuzzlePopularity \"{}\"]\n", puzzle.popularity));
     pgn.push_str(&format!("[PuzzleNbPlays \"{}\"]\n", puzzle.nb_plays));
-    pgn.push_str(&format!("[PuzzleThemes \"{}\"]\n", puzzle.themes));
+    pgn.push_str(&format!(
+        "[PuzzleThemes \"{}\"]\n",
+        escape_pgn_tag_value(&puzzle.themes)
+    ));
     pgn.push('\n');
 
     // Build move text
@@ -1991,8 +2001,8 @@ mod tests {
     fn project_pgn_escapes_tags_and_rejects_empty_or_invalid_exports() {
         let mut valid = fixture_puzzle_00010();
         valid.puzzle_id = "escaped".into();
-        let project_name = "Libro \\\"A\\\"\nB";
-        let chapter_name = "Capítulo \\\"uno\\\"\r\ndos";
+        let project_name = "Libro \"A\" \\\r\nB\nC\tfinal";
+        let chapter_name = "Capítulo \"uno\" \\\r\ndos\u{0007}final";
         let chapters = [ProjectPgnChapter {
             name: chapter_name.into(),
             puzzles: vec![valid],
@@ -2005,14 +2015,8 @@ mod tests {
 
         write_project_pgn(project_name, &chapters, &path).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains(&format!(
-            "[Project \"{}\"]",
-            escape_pgn_tag_value(project_name)
-        )));
-        assert!(content.contains(&format!(
-            "[Chapter \"{}\"]",
-            escape_pgn_tag_value(chapter_name)
-        )));
+        assert!(content.contains(r#"[Project "Libro \"A\" \\ B C final"]"#));
+        assert!(content.contains(r#"[Chapter "Capítulo \"uno\" \\ dos final"]"#));
         assert_eq!(
             content
                 .lines()
@@ -2025,11 +2029,44 @@ mod tests {
     }
 
     #[test]
-    fn project_pgn_tag_escape_normalizes_physical_line_endings() {
+    fn pgn_tag_escape_preserves_tag_structure_and_normalizes_controls() {
         assert_eq!(
-            escape_pgn_tag_value("line one\r\nline two\rline three\nline four"),
-            "line one\\nline two\\nline three\\nline four"
+            escape_pgn_tag_value("quote\"\\\r\ncr\rlf\ntab\tcontrol\u{0007}é"),
+            "quote\\\"\\\\ cr lf tab control é"
         );
+    }
+
+    #[test]
+    fn pgn_puzzle_metadata_is_escaped_without_creating_injected_tags() {
+        let mut puzzle = fixture_puzzle_00010();
+        puzzle.puzzle_id = "id\"\\\n[Injected \"yes\"]\tend".into();
+        puzzle.game_url = "https://example.test/\"game\"\\\r\n[Injected \"yes\"]".into();
+        puzzle.opening = "Open\"ing\\\n[Injected \"yes\"]\tline".into();
+        puzzle.themes = "theme\"\\\r[Injected \"yes\"]\u{0007}end".into();
+
+        let pgn = build_pgn_game(&puzzle, "2026.09.14").unwrap();
+        let headers = pgn.split_once("\n\n").unwrap().0;
+        let header_lines = headers.lines().collect::<Vec<_>>();
+
+        assert_eq!(header_lines.len(), 16, "unexpected physical PGN tag lines: {headers}");
+        assert!(header_lines.iter().all(|line| line.starts_with('[') && line.ends_with(']')));
+        assert!(!header_lines.iter().any(|line| line.starts_with("[Injected ")));
+        assert!(pgn.contains(&format!(
+            "[Site \"{}\"]",
+            escape_pgn_tag_value(&format!("https://lichess.org/training/{}", puzzle.puzzle_id))
+        )));
+        assert!(pgn.contains(&format!(
+            "[GameID \"{}\"]",
+            escape_pgn_tag_value(&puzzle.game_url)
+        )));
+        assert!(pgn.contains(&format!(
+            "[Opening \"{}\"]",
+            escape_pgn_tag_value(&puzzle.opening)
+        )));
+        assert!(pgn.contains(&format!(
+            "[PuzzleThemes \"{}\"]",
+            escape_pgn_tag_value(&puzzle.themes)
+        )));
     }
 
     #[test]
