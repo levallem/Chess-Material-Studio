@@ -159,14 +159,13 @@ mod tests {
     }
 
     #[test]
-    fn taking_a_screenshot_without_a_window_id_does_not_panic() {
+    fn taking_a_screenshot_without_a_window_id_returns_a_recoverable_failure_task() {
         let mut tab = PuzzleTab::new();
 
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _ = tab.update(PuzzleMessage::TakeScreenshot);
-        }));
+        let task = catch_unwind(AssertUnwindSafe(|| tab.update(PuzzleMessage::TakeScreenshot)))
+            .expect("missing window id must not panic");
 
-        assert!(result.is_ok());
+        assert_eq!(task.units(), 1, "missing window id must produce a failure task");
     }
 
     #[test]

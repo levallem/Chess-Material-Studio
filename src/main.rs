@@ -1691,6 +1691,7 @@ mod tests {
         last_move_from: Option<Square>,
         last_move_to: Option<Square>,
         current_favorite: Option<bool>,
+        favorite_generation: u64,
         review_puzzle_id: Option<String>,
         review_view: Option<PuzzleReviewView>,
         reviewed_puzzle_ids: Option<HashSet<String>>,
@@ -1714,6 +1715,7 @@ mod tests {
             last_move_from: app.last_move_from,
             last_move_to: app.last_move_to,
             current_favorite: app.current_favorite,
+            favorite_generation: app.favorite_generation,
             review_puzzle_id: app.project_tab.cached_review_puzzle_id().map(str::to_owned),
             review_view: app.project_tab.review_view(),
             reviewed_puzzle_ids: app.project_tab.reviewed_puzzle_ids_for_active_chapter().unwrap(),
@@ -1752,6 +1754,11 @@ mod tests {
             app.current_favorite,
             expected.current_favorite,
             "{route}: favorite state changed"
+        );
+        assert_eq!(
+            app.favorite_generation,
+            expected.favorite_generation,
+            "{route}: favorite generation changed"
         );
         assert_eq!(
             app.project_tab.cached_review_puzzle_id().map(str::to_owned),
@@ -1794,6 +1801,7 @@ mod tests {
         app.load_puzzle(false);
         app.puzzle_number_ui = String::from("2");
         app.current_favorite = Some(true);
+        app.favorite_generation = 73;
         (app, project)
     }
 
@@ -2151,6 +2159,11 @@ mod tests {
         assert!(app.puzzle_status.starts_with(&lang::tr(&app.lang, "screenshot_failed")));
         assert!(app.puzzle_status.contains("failed to crop screenshot"));
         assert_normal_export_state_preserved(&app, &original_state, "screenshot failure");
+
+        let _ = app.update(Message::ScreenshotFailed("screenshot window is not initialized".into()));
+        assert!(app.puzzle_status.starts_with(&lang::tr(&app.lang, "screenshot_failed")));
+        assert!(app.puzzle_status.contains("screenshot window is not initialized"));
+        assert_normal_export_state_preserved(&app, &original_state, "missing screenshot window");
     }
 
     #[test]
