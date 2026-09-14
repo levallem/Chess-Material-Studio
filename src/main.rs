@@ -145,6 +145,8 @@ pub enum Message {
     EngineFileChosen(Option<String>),
     FavoritePuzzle,
     MinimizeUI,
+    WindowResizeStateResolved { size: Size, maximized: bool },
+    ResolveMaximizedStatusBeforeExit,
     SaveMaximizedStatusAndExit(bool),
     StartDBDownload,
     DBDownloadFinished,
@@ -155,6 +157,12 @@ pub enum Message {
     JumpToPuzzle,
     SetPuzzleReview(ProjectPuzzleDecision),
     ClearPuzzleReview,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitPersistenceAction {
+    ResolveMaximizedStatus,
+    StayOpen,
 }
 
 struct SoundPlayback {
@@ -623,15 +631,37 @@ impl OfflinePuzzles {
 
     fn handle_engine_failure(&mut self, reason: String, exit_requested: bool) -> Task<Message> {
         self.record_engine_failure(reason);
-        if exit_requested {
-            self.persist_settings_before_exit();
-            if let Some(window_id) = self.window_id {
-                window::close(window_id)
-            } else {
-                Task::none()
+        self.final_exit_task(exit_requested)
+    }
+
+    fn final_exit_task(&self, exit_requested: bool) -> Task<Message> {
+        match Self::exit_persistence_action(exit_requested) {
+            ExitPersistenceAction::ResolveMaximizedStatus => {
+                Task::done(Message::ResolveMaximizedStatusBeforeExit)
             }
+            ExitPersistenceAction::StayOpen => Task::none(),
+        }
+    }
+
+    fn exit_persistence_action(exit_requested: bool) -> ExitPersistenceAction {
+        if exit_requested {
+            ExitPersistenceAction::ResolveMaximizedStatus
+        } else {
+            ExitPersistenceAction::StayOpen
+        }
+    }
+
+    fn resolve_maximized_status_before_exit(&self) -> Task<Message> {
+        if let Some(window_id) = self.window_id {
+            window::is_maximized(window_id).map(Message::SaveMaximizedStatusAndExit)
         } else {
             Task::none()
+        }
+    }
+
+    fn record_window_resize(&mut self, size: Size, maximized: bool) {
+        if !self.mini_ui {
+            self.settings_tab.record_window_resize(size, maximized);
         }
     }
 
@@ -1011,7 +1041,7 @@ impl OfflinePuzzles {
                 if let Event::Window(window::Event::CloseRequested) = event {
                     match self.engine_state {
                         EngineStatus::TurnedOff => {
-                            iced::window::is_maximized(self.window_id.unwrap()).map(Message::SaveMaximizedStatusAndExit)
+                            self.final_exit_task(true)
                         } _ => {
                             if let Err(error) = self.send_engine_command(eval::EXIT_APP_COMMAND) {
                                 return self.handle_engine_failure(error, true);
@@ -1021,17 +1051,28 @@ impl OfflinePuzzles {
                     }
                 } else if let Event::Window(window::Event::Resized(size)) = event {
                     if !self.mini_ui {
-                        self.settings_tab.window_width = size.width;
-                        self.settings_tab.window_height = size.height;
+                        iced::window::is_maximized(self.window_id.unwrap()).map(move |maximized| {
+                            Message::WindowResizeStateResolved { size, maximized }
+                        })
+                    } else {
+                        Task::none()
                     }
-                    Task::none()
                 } else {
                     Task::none()
                 }
+            } (_, Message::WindowResizeStateResolved { size, maximized }) => {
+                self.record_window_resize(size, maximized);
+                Task::none()
+            } (_, Message::ResolveMaximizedStatusBeforeExit) => {
+                self.resolve_maximized_status_before_exit()
             } (_, Message::SaveMaximizedStatusAndExit(is_maximized)) => {
                 self.settings_tab.maximized = is_maximized;
                 self.persist_settings_before_exit();
-                window::close(self.window_id.unwrap())
+                if let Some(window_id) = self.window_id {
+                    window::close(window_id)
+                } else {
+                    Task::none()
+                }
             } (_, Message::EngineFileChosen(engine_path)) => {
                 if let Some(engine_path) = engine_path {
                     self.settings_tab.engine_path = engine_path.clone();
@@ -1059,16 +1100,7 @@ impl OfflinePuzzles {
                 Task::none()
             } (_, Message::EngineStopped(exit)) => {
                 self.clear_engine_state();
-                if exit {
-                    self.persist_settings_before_exit();
-                    if let Some(window_id) = self.window_id {
-                        window::close(window_id)
-                    } else {
-                        Task::none()
-                    }
-                } else {
-                    Task::none()
-                }
+                self.final_exit_task(exit)
             } (_, Message::EngineFailed { reason, exit_requested }) => {
                 self.handle_engine_failure(reason, exit_requested)
             } (_, Message::EngineReady(sender)) => {
@@ -1512,6 +1544,35 @@ mod tests {
     }
 
     #[test]
+    fn close_after_engine_exit_requires_maximized_state_resolution() {
+        assert_eq!(
+            OfflinePuzzles::exit_persistence_action(true),
+            ExitPersistenceAction::ResolveMaximizedStatus
+        );
+        assert_eq!(
+            OfflinePuzzles::exit_persistence_action(false),
+            ExitPersistenceAction::StayOpen
+        );
+    }
+
+    #[test]
+    fn mini_ui_resize_does_not_contaminate_windowed_geometry_used_for_exit_persistence() {
+        let mut app = OfflinePuzzles::new(false);
+        let settings_file = isolate_search_settings(&mut app, "mini-ui-window-geometry");
+
+        app.record_window_resize(Size::new(1200.0, 800.0), false);
+        app.mini_ui = true;
+        app.record_window_resize(Size::new(705.0, 680.0), false);
+        app.settings_tab.maximized = true;
+        app.persist_settings_before_exit();
+
+        let restored = config::load_config_from_path(&settings_file.path);
+        assert_eq!(restored.window_width, 1200.0);
+        assert_eq!(restored.window_height, 800.0);
+        assert!(restored.maximized);
+    }
+
+    #[test]
     fn exit_persistence_keeps_live_search_filters_and_window_geometry() {
         let mut app = OfflinePuzzles::new(false);
         let settings_file = isolate_search_settings(&mut app, "exit-persistence");
@@ -1521,9 +1582,10 @@ mod tests {
         };
         config::persist_config_to_path(&existing, &settings_file.path)
             .expect("test settings should persist");
-        app.settings_tab.window_width = 1234.0;
-        app.settings_tab.window_height = 567.0;
-        app.settings_tab.maximized = true;
+        app.settings_tab
+            .record_window_resize(Size::new(1234.0, 567.0), false);
+        app.settings_tab
+            .record_window_resize(Size::new(1900.0, 1000.0), true);
 
         let _ = app.update(Message::Search(SearchMesssage::SliderMinRatingChanged(1500)));
         let _ = app.update(Message::Search(SearchMesssage::SliderMaxRatingChanged(2500)));
@@ -1577,9 +1639,10 @@ mod tests {
         std::fs::create_dir(filter_path.with_file_name("filters.json.tmp"))
             .expect("filter temporary path should block the first persistence");
 
-        app.settings_tab.window_width = 1234.0;
-        app.settings_tab.window_height = 567.0;
-        app.settings_tab.maximized = true;
+        app.settings_tab
+            .record_window_resize(Size::new(1234.0, 567.0), false);
+        app.settings_tab
+            .record_window_resize(Size::new(1900.0, 1000.0), true);
 
         app.persist_settings_before_exit_to_paths(&filter_path, &settings_file.path);
 

@@ -56,6 +56,7 @@ pub struct SettingsTab {
     pub engine_path: String,
     pub window_width: f32,
     pub window_height: f32,
+    windowed_size: iced::Size,
     pub maximized: bool,
     pub piece_theme: styles::PieceTheme,
     pub board_theme: styles::BoardTheme,
@@ -87,6 +88,7 @@ impl SettingsTab {
             engine_path: config.engine_path.clone().unwrap_or_default(),
             window_width: config.window_width,
             window_height: config.window_height,
+            windowed_size: iced::Size::new(config.window_width, config.window_height),
             maximized: config.maximized,
             piece_theme: config.piece_theme,
             board_theme: config.board_theme,
@@ -261,8 +263,8 @@ impl SettingsTab {
     ) -> config::OfflinePuzzlesConfig {
         let engine_path = (!self.engine_path.is_empty()).then(|| self.engine_path.clone());
         config.engine_path = engine_path;
-        config.window_width = self.window_width;
-        config.window_height = self.window_height;
+        config.window_width = self.windowed_size.width;
+        config.window_height = self.windowed_size.height;
         config.maximized = self.maximized;
         config.puzzle_db_location = self.puzzle_db_location_value.clone();
         config.piece_theme = self.piece_theme;
@@ -317,10 +319,19 @@ impl SettingsTab {
         path: &std::path::Path,
     ) -> Result<(), &'static str> {
         let mut config = config::load_config_from_path(path);
-        config.window_width = self.window_width;
-        config.window_height = self.window_height;
+        config.window_width = self.windowed_size.width;
+        config.window_height = self.windowed_size.height;
         config.maximized = self.maximized;
         config::persist_config_to_path(&config, path)
+    }
+
+    pub(crate) fn record_window_resize(&mut self, size: iced::Size, maximized: bool) {
+        self.window_width = size.width;
+        self.window_height = size.height;
+        self.maximized = maximized;
+        if !maximized {
+            self.windowed_size = size;
+        }
     }
 
     fn settings_change_values(
@@ -445,9 +456,8 @@ mod tests {
         config::persist_config_to_path(&persisted, &path)
             .expect("test configuration should persist");
         let mut settings_tab = settings_tab_from_config(persisted);
-        settings_tab.window_width = 1234.0;
-        settings_tab.window_height = 567.0;
-        settings_tab.maximized = true;
+        settings_tab.record_window_resize(iced::Size::new(1234.0, 567.0), false);
+        settings_tab.record_window_resize(iced::Size::new(1900.0, 1000.0), true);
 
         settings_tab
             .save_window_size_to_path(&path)
@@ -458,6 +468,29 @@ mod tests {
         assert_eq!(restored.window_height, 567.0);
         assert!(restored.maximized);
         assert_eq!(restored.engine_limit, "nodes 123");
+    }
+
+    #[test]
+    fn window_resize_tracks_live_size_without_overwriting_windowed_size_when_maximized() {
+        let mut settings_tab = settings_tab_from_config(config::OfflinePuzzlesConfig::default());
+
+        settings_tab.record_window_resize(iced::Size::new(1200.0, 800.0), false);
+        assert_eq!(settings_tab.window_width, 1200.0);
+        assert_eq!(settings_tab.window_height, 800.0);
+        assert_eq!(settings_tab.windowed_size, iced::Size::new(1200.0, 800.0));
+        assert!(!settings_tab.maximized);
+
+        settings_tab.record_window_resize(iced::Size::new(1900.0, 1000.0), true);
+        assert_eq!(settings_tab.window_width, 1900.0);
+        assert_eq!(settings_tab.window_height, 1000.0);
+        assert_eq!(settings_tab.windowed_size, iced::Size::new(1200.0, 800.0));
+        assert!(settings_tab.maximized);
+
+        settings_tab.record_window_resize(iced::Size::new(1250.0, 820.0), false);
+        assert_eq!(settings_tab.window_width, 1250.0);
+        assert_eq!(settings_tab.window_height, 820.0);
+        assert_eq!(settings_tab.windowed_size, iced::Size::new(1250.0, 820.0));
+        assert!(!settings_tab.maximized);
     }
 
     #[test]
@@ -521,9 +554,8 @@ mod tests {
         let stale_snapshot = config::OfflinePuzzlesConfig::default();
         let mut settings_tab = settings_tab_from_config(stale_snapshot);
         settings_tab.engine_path = "new-engine.exe".into();
-        settings_tab.window_width = 1234.0;
-        settings_tab.window_height = 567.0;
-        settings_tab.maximized = true;
+        settings_tab.record_window_resize(iced::Size::new(1234.0, 567.0), false);
+        settings_tab.record_window_resize(iced::Size::new(1900.0, 1000.0), true);
         settings_tab.puzzle_db_location_value = "new-puzzles.csv".into();
         settings_tab.piece_theme = styles::PieceTheme::Alpha;
         settings_tab.board_theme = styles::BoardTheme::Green;
