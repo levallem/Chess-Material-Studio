@@ -580,9 +580,20 @@ impl SearchTab {
         ))
     }
 
-    fn save_current_search_settings(&self) -> Result<(), &'static str> {
+    pub(crate) fn settings_path(&self) -> &Path {
+        &self.settings_path
+    }
+
+    pub(crate) fn save_current_search_settings(&self) -> Result<(), &'static str> {
+        self.save_current_search_settings_to_path(&self.settings_path)
+    }
+
+    pub(crate) fn save_current_search_settings_to_path(
+        &self,
+        path: &Path,
+    ) -> Result<(), &'static str> {
         Self::save_search_settings_to_path(
-            &self.settings_path,
+            path,
             self.slider_min_rating_value,
             self.slider_max_rating_value,
             self.slider_min_popularity,
@@ -1060,6 +1071,52 @@ mod tests {
             }
         );
         assert_eq!(config.last_opening_side, Some(OpeningSide::White));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn save_current_search_settings_persists_live_filters_without_starting_search() {
+        let path = tmp_path("live_search_settings.json");
+        let mut existing = config::OfflinePuzzlesConfig::default();
+        existing.engine_limit = "nodes 77".into();
+        config::persist_config_to_path(&existing, &path)
+            .expect("test settings should persist");
+
+        let mut search_tab = SearchTab::new();
+        search_tab.set_settings_path_for_test(path.clone());
+        search_tab.slider_min_rating_value = 1500;
+        search_tab.slider_max_rating_value = 2500;
+        search_tab.slider_min_popularity = 33;
+        search_tab.theme = PickListWrapper::new_theme(search_tab.lang, TacticalThemes::Fork);
+        search_tab.opening = PickListWrapper::new_opening(search_tab.lang, Openings::Sicilian);
+        search_tab.variation = PickListWrapper::new_variation(
+            search_tab.lang,
+            Variation {
+                name: std::borrow::Cow::Borrowed("Sicilian_Defense_Najdorf_Variation"),
+                family: Openings::Sicilian,
+            },
+        );
+        search_tab.opening_side = Some(OpeningSide::Black);
+
+        search_tab
+            .save_current_search_settings()
+            .expect("live search filters should persist");
+
+        let restored = config::load_config_from_path(&path);
+        assert_eq!(restored.last_min_rating, 1500);
+        assert_eq!(restored.last_max_rating, 2500);
+        assert_eq!(restored.last_min_popularity, 33);
+        assert_eq!(restored.last_theme, TacticalThemes::Fork);
+        assert_eq!(restored.last_opening, Openings::Sicilian);
+        assert_eq!(
+            restored.last_variation,
+            Variation {
+                name: std::borrow::Cow::Borrowed("Sicilian_Defense_Najdorf_Variation"),
+                family: Openings::Sicilian,
+            }
+        );
+        assert_eq!(restored.last_opening_side, Some(OpeningSide::Black));
+        assert_eq!(restored.engine_limit, "nodes 77");
         cleanup(&path);
     }
 

@@ -252,33 +252,30 @@ impl SettingsTab {
     }
 
     fn current_config(&self) -> config::OfflinePuzzlesConfig {
+        self.current_config_from_base(config::load_config())
+    }
+
+    fn current_config_from_base(
+        &self,
+        mut config: config::OfflinePuzzlesConfig,
+    ) -> config::OfflinePuzzlesConfig {
         let engine_path = (!self.engine_path.is_empty()).then(|| self.engine_path.clone());
-        config::OfflinePuzzlesConfig {
-            engine_path,
-            engine_limit: self.saved_configs.engine_limit.clone(),
-            window_width: self.window_width,
-            window_height: self.window_height,
-            maximized: self.maximized,
-            puzzle_db_location: self.puzzle_db_location_value.clone(),
-            piece_theme: self.piece_theme,
-            search_results_limit: self.search_results_limit_value.parse().unwrap(),
-            play_sound: self.play_sound,
-            auto_load_next: self.auto_load_next,
-            flip_board: self.flip_board,
-            show_coordinates: self.show_coordinates,
-            board_theme: self.board_theme,
-            interface_theme: self.interface_theme,
-            lang: self.lang.lang,
-            export_pgs: self.export_pgs.parse().unwrap(),
-            last_min_rating: self.saved_configs.last_min_rating,
-            last_max_rating: self.saved_configs.last_max_rating,
-            last_min_popularity: self.saved_configs.last_min_popularity,
-            last_theme: self.saved_configs.last_theme,
-            last_opening: self.saved_configs.last_opening,
-            last_variation: self.saved_configs.last_variation.clone(),
-            last_opening_side: self.saved_configs.last_opening_side,
-            puzzle_sqlite_location: self.saved_configs.puzzle_sqlite_location.clone(),
-        }
+        config.engine_path = engine_path;
+        config.window_width = self.window_width;
+        config.window_height = self.window_height;
+        config.maximized = self.maximized;
+        config.puzzle_db_location = self.puzzle_db_location_value.clone();
+        config.piece_theme = self.piece_theme;
+        config.search_results_limit = self.search_results_limit_value.parse().unwrap();
+        config.play_sound = self.play_sound;
+        config.auto_load_next = self.auto_load_next;
+        config.flip_board = self.flip_board;
+        config.show_coordinates = self.show_coordinates;
+        config.board_theme = self.board_theme;
+        config.interface_theme = self.interface_theme;
+        config.lang = self.lang.lang;
+        config.export_pgs = self.export_pgs.parse().unwrap();
+        config
     }
 
     fn save_puzzle_sqlite_location(&mut self, puzzle_sqlite_location: Option<String>) {
@@ -315,11 +312,10 @@ impl SettingsTab {
         self.saved_configs.puzzle_sqlite_location.is_some()
     }
 
-    pub fn save_window_size(&self) -> Result<(), &'static str> {
-        self.save_window_size_to_path(std::path::Path::new(config::SETTINGS_FILE))
-    }
-
-    fn save_window_size_to_path(&self, path: &std::path::Path) -> Result<(), &'static str> {
+    pub(crate) fn save_window_size_to_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), &'static str> {
         let mut config = config::load_config_from_path(path);
         config.window_width = self.window_width;
         config.window_height = self.window_height;
@@ -518,6 +514,76 @@ mod tests {
 
         assert_eq!(settings_tab.board_theme, styles::BoardTheme::Purple);
         assert_eq!(settings_tab.saved_configs.board_theme, settings_tab.board_theme);
+    }
+
+    #[test]
+    fn current_config_merge_preserves_fresh_external_fields_and_applies_settings_values() {
+        let stale_snapshot = config::OfflinePuzzlesConfig::default();
+        let mut settings_tab = settings_tab_from_config(stale_snapshot);
+        settings_tab.engine_path = "new-engine.exe".into();
+        settings_tab.window_width = 1234.0;
+        settings_tab.window_height = 567.0;
+        settings_tab.maximized = true;
+        settings_tab.puzzle_db_location_value = "new-puzzles.csv".into();
+        settings_tab.piece_theme = styles::PieceTheme::Alpha;
+        settings_tab.board_theme = styles::BoardTheme::Green;
+        settings_tab.interface_theme = styles::InterfaceTheme::Dark;
+        settings_tab.lang = PickListWrapper::new_lang(lang::Language::Spanish, lang::Language::Spanish);
+        settings_tab.export_pgs = "75".into();
+        settings_tab.search_results_limit_value = "250".into();
+        settings_tab.play_sound = false;
+        settings_tab.auto_load_next = false;
+        settings_tab.flip_board = true;
+        settings_tab.show_coordinates = true;
+
+        let fresh_filters = config::OfflinePuzzlesConfig {
+            engine_limit: "nodes 99".into(),
+            last_min_rating: 1500,
+            last_max_rating: 2500,
+            last_min_popularity: 33,
+            last_theme: crate::search_tab::TacticalThemes::Fork,
+            last_opening: crate::openings::Openings::Sicilian,
+            last_variation: crate::openings::Variation {
+                name: std::borrow::Cow::Borrowed("Sicilian_Defense_Najdorf_Variation"),
+                family: crate::openings::Openings::Sicilian,
+            },
+            last_opening_side: Some(crate::search_tab::OpeningSide::Black),
+            puzzle_sqlite_location: Some("fresh-puzzles.sqlite".into()),
+            ..config::OfflinePuzzlesConfig::default()
+        };
+
+        let merged = settings_tab.current_config_from_base(fresh_filters);
+
+        assert_eq!(merged.last_min_rating, 1500);
+        assert_eq!(merged.last_max_rating, 2500);
+        assert_eq!(merged.last_min_popularity, 33);
+        assert_eq!(merged.last_theme, crate::search_tab::TacticalThemes::Fork);
+        assert_eq!(merged.last_opening, crate::openings::Openings::Sicilian);
+        assert_eq!(
+            merged.last_variation,
+            crate::openings::Variation {
+                name: std::borrow::Cow::Borrowed("Sicilian_Defense_Najdorf_Variation"),
+                family: crate::openings::Openings::Sicilian,
+            }
+        );
+        assert_eq!(merged.last_opening_side, Some(crate::search_tab::OpeningSide::Black));
+        assert_eq!(merged.engine_limit, "nodes 99");
+        assert_eq!(merged.puzzle_sqlite_location.as_deref(), Some("fresh-puzzles.sqlite"));
+        assert_eq!(merged.engine_path.as_deref(), Some("new-engine.exe"));
+        assert_eq!(merged.window_width, 1234.0);
+        assert_eq!(merged.window_height, 567.0);
+        assert!(merged.maximized);
+        assert_eq!(merged.puzzle_db_location, "new-puzzles.csv");
+        assert_eq!(merged.piece_theme, styles::PieceTheme::Alpha);
+        assert_eq!(merged.board_theme, styles::BoardTheme::Green);
+        assert_eq!(merged.interface_theme, styles::InterfaceTheme::Dark);
+        assert_eq!(merged.lang, lang::Language::Spanish);
+        assert_eq!(merged.search_results_limit, 250);
+        assert_eq!(merged.export_pgs, 75);
+        assert!(!merged.play_sound);
+        assert!(!merged.auto_load_next);
+        assert!(merged.flip_board);
+        assert!(merged.show_coordinates);
     }
 
     struct TempPuzzleDb {

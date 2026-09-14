@@ -623,9 +623,7 @@ impl OfflinePuzzles {
     fn handle_engine_failure(&mut self, reason: String, exit_requested: bool) -> Task<Message> {
         self.record_engine_failure(reason);
         if exit_requested {
-            if self.settings_tab.save_window_size().is_err() {
-                eprintln!("Error saving config file.");
-            }
+            self.persist_settings_before_exit();
             if let Some(window_id) = self.window_id {
                 window::close(window_id)
             } else {
@@ -633,6 +631,32 @@ impl OfflinePuzzles {
             }
         } else {
             Task::none()
+        }
+    }
+
+    fn persist_settings_before_exit(&self) {
+        let path = self.search_tab.settings_path().to_path_buf();
+        self.persist_settings_before_exit_to_paths(&path, &path);
+    }
+
+    fn persist_settings_before_exit_to_paths(
+        &self,
+        search_settings_path: &Path,
+        window_settings_path: &Path,
+    ) {
+        if self
+            .search_tab
+            .save_current_search_settings_to_path(search_settings_path)
+            .is_err()
+        {
+            eprintln!("Error saving search settings.");
+        }
+        if self
+            .settings_tab
+            .save_window_size_to_path(window_settings_path)
+            .is_err()
+        {
+            eprintln!("Error saving config file.");
         }
     }
 
@@ -1004,9 +1028,7 @@ impl OfflinePuzzles {
                 }
             } (_, Message::SaveMaximizedStatusAndExit(is_maximized)) => {
                 self.settings_tab.maximized = is_maximized;
-                if self.settings_tab.save_window_size().is_err() {
-                    eprintln!("Error saving config file.");
-                }
+                self.persist_settings_before_exit();
                 window::close(self.window_id.unwrap())
             } (_, Message::EngineFileChosen(engine_path)) => {
                 if let Some(engine_path) = engine_path {
@@ -1036,9 +1058,7 @@ impl OfflinePuzzles {
             } (_, Message::EngineStopped(exit)) => {
                 self.clear_engine_state();
                 if exit {
-                    if self.settings_tab.save_window_size().is_err() {
-                        eprintln!("Error saving config file.");
-                    }
+                    self.persist_settings_before_exit();
                     if let Some(window_id) = self.window_id {
                         window::close(window_id)
                     } else {
@@ -1333,7 +1353,9 @@ mod tests {
     use super::*;
     use chess_material_studio::models::Puzzle as PersistentPuzzle;
     use chess_material_studio::project::{create_chapter, create_project, set_puzzle_decision};
-    use crate::search_tab::SearchBase;
+    use crate::lang::PickListWrapper;
+    use crate::openings::{Openings, Variation};
+    use crate::search_tab::{OpeningSide, SearchBase, TacticalThemes};
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1451,6 +1473,84 @@ mod tests {
         assert!(app.engine_sender.is_none());
         assert!(app.engine_eval.is_empty());
         assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn exit_persistence_keeps_live_search_filters_and_window_geometry() {
+        let mut app = OfflinePuzzles::new(false);
+        let settings_file = isolate_search_settings(&mut app, "exit-persistence");
+        let existing = config::OfflinePuzzlesConfig {
+            engine_limit: "nodes 77".into(),
+            ..config::OfflinePuzzlesConfig::default()
+        };
+        config::persist_config_to_path(&existing, &settings_file.path)
+            .expect("test settings should persist");
+        app.settings_tab.window_width = 1234.0;
+        app.settings_tab.window_height = 567.0;
+        app.settings_tab.maximized = true;
+
+        let _ = app.update(Message::Search(SearchMesssage::SliderMinRatingChanged(1500)));
+        let _ = app.update(Message::Search(SearchMesssage::SliderMaxRatingChanged(2500)));
+        let _ = app.update(Message::Search(SearchMesssage::SliderMinPopularityChanged(33)));
+        let _ = app.update(Message::Search(SearchMesssage::SelectTheme(
+            PickListWrapper::new_theme(app.lang, TacticalThemes::Fork),
+        )));
+        let _ = app.update(Message::Search(SearchMesssage::SelectOpening(
+            PickListWrapper::new_opening(app.lang, Openings::Sicilian),
+        )));
+        let _ = app.update(Message::Search(SearchMesssage::SelectVariation(
+            PickListWrapper::new_variation(
+                app.lang,
+                Variation {
+                    name: std::borrow::Cow::Borrowed("Sicilian_Defense_Najdorf_Variation"),
+                    family: Openings::Sicilian,
+                },
+            ),
+        )));
+        let _ = app.update(Message::Search(SearchMesssage::SelectOpeningSide(
+            OpeningSide::Black,
+        )));
+
+        app.persist_settings_before_exit();
+
+        let restored = config::load_config_from_path(&settings_file.path);
+        assert_eq!(restored.last_min_rating, 1500);
+        assert_eq!(restored.last_max_rating, 2500);
+        assert_eq!(restored.last_min_popularity, 33);
+        assert_eq!(restored.last_theme, TacticalThemes::Fork);
+        assert_eq!(restored.last_opening, Openings::Sicilian);
+        assert_eq!(
+            restored.last_variation,
+            Variation {
+                name: std::borrow::Cow::Borrowed("Sicilian_Defense_Najdorf_Variation"),
+                family: Openings::Sicilian,
+            }
+        );
+        assert_eq!(restored.last_opening_side, Some(OpeningSide::Black));
+        assert_eq!(restored.window_width, 1234.0);
+        assert_eq!(restored.window_height, 567.0);
+        assert!(restored.maximized);
+        assert_eq!(restored.engine_limit, "nodes 77");
+    }
+
+    #[test]
+    fn exit_persistence_attempts_window_save_after_filter_save_failure() {
+        let mut app = OfflinePuzzles::new(false);
+        let settings_file = TempSettingsFile::new("exit-filter-save-failure");
+        let filter_path = settings_file.directory.join("filters.json");
+        std::fs::create_dir(filter_path.with_file_name("filters.json.tmp"))
+            .expect("filter temporary path should block the first persistence");
+
+        app.settings_tab.window_width = 1234.0;
+        app.settings_tab.window_height = 567.0;
+        app.settings_tab.maximized = true;
+
+        app.persist_settings_before_exit_to_paths(&filter_path, &settings_file.path);
+
+        let restored = config::load_config_from_path(&settings_file.path);
+        assert_eq!(restored.window_width, 1234.0);
+        assert_eq!(restored.window_height, 567.0);
+        assert!(restored.maximized);
     }
 
     #[test]
