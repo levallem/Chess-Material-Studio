@@ -169,6 +169,12 @@ enum ExitPersistenceAction {
     StayOpen,
 }
 
+#[derive(Clone, Copy)]
+struct PendingWindowResize {
+    size: Size,
+    generation: u64,
+}
+
 struct SoundPlayback {
     handle: MixerDeviceSink,
 }
@@ -300,6 +306,7 @@ struct OfflinePuzzles {
     favorite_generation: u64,
     search_generation: u64,
     window_resize_generation: u64,
+    pending_window_resize: Option<PendingWindowResize>,
 
     analysis: Game,
     analysis_history: Vec<Board>,
@@ -363,6 +370,7 @@ impl OfflinePuzzles {
             favorite_generation: 0,
             search_generation: 0,
             window_resize_generation: 0,
+            pending_window_resize: None,
             search_tab: SearchTab::new(),
             settings_tab: SettingsTab::new(),
             puzzle_tab: PuzzleTab::new(),
@@ -671,7 +679,7 @@ impl OfflinePuzzles {
     }
 
     fn resolve_window_resize(&mut self, size: Size) -> Task<Message> {
-        let generation = self.next_window_resize_generation();
+        let generation = self.remember_pending_window_resize(size);
         if let Some(window_id) = self.window_id {
             iced::window::is_maximized(window_id).map(move |maximized| {
                 Message::WindowResizeStateResolved {
@@ -681,8 +689,15 @@ impl OfflinePuzzles {
                 }
             })
         } else {
+            self.pending_window_resize = None;
             Task::none()
         }
+    }
+
+    fn remember_pending_window_resize(&mut self, size: Size) -> u64 {
+        let generation = self.next_window_resize_generation();
+        self.pending_window_resize = Some(PendingWindowResize { size, generation });
+        generation
     }
 
     fn apply_window_resize_resolution(
@@ -691,12 +706,29 @@ impl OfflinePuzzles {
         maximized: bool,
         generation: u64,
     ) -> bool {
-        if generation != self.window_resize_generation {
+        if generation != self.window_resize_generation
+            || self
+                .pending_window_resize
+                .map(|pending| pending.generation)
+                != Some(generation)
+        {
             return false;
         }
 
+        self.pending_window_resize = None;
         self.settings_tab.record_window_resize(size, maximized);
         true
+    }
+
+    fn consolidate_pending_window_resize_before_exit(&mut self, maximized: bool) {
+        if let Some(pending) = self.pending_window_resize.take() {
+            if pending.generation == self.window_resize_generation {
+                self.settings_tab.record_window_resize(pending.size, maximized);
+                return;
+            }
+        }
+
+        self.settings_tab.maximized = maximized;
     }
 
     fn persist_settings_before_exit(&self) {
@@ -1098,7 +1130,7 @@ impl OfflinePuzzles {
             } (_, Message::ResolveMaximizedStatusBeforeExit) => {
                 self.resolve_maximized_status_before_exit()
             } (_, Message::SaveMaximizedStatusAndExit(is_maximized)) => {
-                self.settings_tab.maximized = is_maximized;
+                self.consolidate_pending_window_resize_before_exit(is_maximized);
                 self.persist_settings_before_exit();
                 if let Some(window_id) = self.window_id {
                     window::close(window_id)
@@ -1592,7 +1624,7 @@ mod tests {
         let mut app = OfflinePuzzles::new(false);
         let settings_file = isolate_search_settings(&mut app, "mini-ui-window-geometry");
 
-        let windowed_generation = app.next_window_resize_generation();
+        let windowed_generation = app.remember_pending_window_resize(Size::new(1200.0, 800.0));
         assert!(app.apply_window_resize_resolution(
             Size::new(1200.0, 800.0),
             false,
@@ -1619,6 +1651,7 @@ mod tests {
         ))));
 
         assert_eq!(app.window_resize_generation, 1);
+        assert!(app.pending_window_resize.is_none());
         assert_eq!(app.settings_tab.window_width, original_width);
         assert_eq!(app.settings_tab.window_height, original_height);
     }
@@ -1626,7 +1659,7 @@ mod tests {
     #[test]
     fn accepted_normal_resize_survives_a_later_mini_ui_transition() {
         let mut app = OfflinePuzzles::new(false);
-        let generation = app.next_window_resize_generation();
+        let generation = app.remember_pending_window_resize(Size::new(1200.0, 800.0));
         app.mini_ui = true;
 
         assert!(app.apply_window_resize_resolution(
@@ -1641,8 +1674,8 @@ mod tests {
     #[test]
     fn stale_window_resize_resolution_cannot_overwrite_the_latest_resize() {
         let mut app = OfflinePuzzles::new(false);
-        let stale_generation = app.next_window_resize_generation();
-        let latest_generation = app.next_window_resize_generation();
+        let stale_generation = app.remember_pending_window_resize(Size::new(1200.0, 800.0));
+        let latest_generation = app.remember_pending_window_resize(Size::new(1250.0, 820.0));
 
         assert!(app.apply_window_resize_resolution(
             Size::new(1250.0, 820.0),
@@ -1656,6 +1689,47 @@ mod tests {
         ));
         assert_eq!(app.settings_tab.window_width, 1250.0);
         assert_eq!(app.settings_tab.window_height, 820.0);
+    }
+
+    #[test]
+    fn final_close_consolidates_a_pending_normal_resize_before_persisting() {
+        let mut app = OfflinePuzzles::new(false);
+        let settings_file = isolate_search_settings(&mut app, "pending-normal-resize-close");
+        app.settings_tab
+            .record_window_resize(Size::new(1200.0, 800.0), false);
+        let generation = app.remember_pending_window_resize(Size::new(1250.0, 820.0));
+
+        app.consolidate_pending_window_resize_before_exit(false);
+        assert!(!app.apply_window_resize_resolution(
+            Size::new(1250.0, 820.0),
+            false,
+            generation,
+        ));
+        app.persist_settings_before_exit();
+
+        let restored = config::load_config_from_path(&settings_file.path);
+        assert_eq!(restored.window_width, 1250.0);
+        assert_eq!(restored.window_height, 820.0);
+        assert!(!restored.maximized);
+    }
+
+    #[test]
+    fn final_close_preserves_windowed_size_for_a_pending_maximized_resize() {
+        let mut app = OfflinePuzzles::new(false);
+        let settings_file = isolate_search_settings(&mut app, "pending-maximized-resize-close");
+        app.settings_tab
+            .record_window_resize(Size::new(1200.0, 800.0), false);
+        app.remember_pending_window_resize(Size::new(1900.0, 1000.0));
+
+        app.consolidate_pending_window_resize_before_exit(true);
+        app.persist_settings_before_exit();
+
+        let restored = config::load_config_from_path(&settings_file.path);
+        assert_eq!(app.settings_tab.window_width, 1900.0);
+        assert_eq!(app.settings_tab.window_height, 1000.0);
+        assert_eq!(restored.window_width, 1200.0);
+        assert_eq!(restored.window_height, 800.0);
+        assert!(restored.maximized);
     }
 
     #[test]
