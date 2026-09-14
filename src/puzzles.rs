@@ -60,7 +60,12 @@ impl PuzzleTab {
                 let _ = open::that_detached(link);
                 Task::none()
             } PuzzleMessage::TakeScreenshot => {
-                iced::window::screenshot(self.window_id.unwrap()).map(Message::ScreenshotCreated)
+                match self.window_id {
+                    Some(window_id) => iced::window::screenshot(window_id).map(Message::ScreenshotCreated),
+                    None => Task::done(Message::ScreenshotFailed(
+                        "screenshot window is not initialized".into(),
+                    )),
+                }
             } PuzzleMessage::ExportToPDF => {
                 Task::perform(PuzzleTab::export("pdf"), Message::ExportPDF)
             } PuzzleMessage::ExportToPGN => {
@@ -142,6 +147,7 @@ pub fn validate_puzzle_batch(puzzles: &[config::Puzzle]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn puzzle(id: &str, moves: &str) -> config::Puzzle {
         config::Puzzle {
@@ -150,6 +156,17 @@ mod tests {
             moves: moves.into(),
             ..config::Puzzle::default()
         }
+    }
+
+    #[test]
+    fn taking_a_screenshot_without_a_window_id_does_not_panic() {
+        let mut tab = PuzzleTab::new();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = tab.update(PuzzleMessage::TakeScreenshot);
+        }));
+
+        assert!(result.is_ok());
     }
 
     #[test]

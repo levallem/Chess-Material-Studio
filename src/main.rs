@@ -8,7 +8,7 @@ use iced::widget::text::LineHeight;
 use styles::PieceTheme;
 use std::collections::HashMap;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::fs::File as StdFile;
 use std::str::FromStr;
 use tokio::sync::mpsc::{self, Sender};
@@ -112,7 +112,8 @@ pub enum Message {
     DropPiece(Square, iced::Point, iced::Rectangle),
     HandleDropZones(Square, Vec<(iced::advanced::widget::Id, iced::Rectangle)>),
     ScreenshotCreated(Screenshot),
-    SaveScreenshot(Option<(Screenshot, String)>),
+    SaveScreenshot(Option<(Screenshot, PathBuf)>),
+    ScreenshotFailed(String),
     ExportPDF(Option<String>),
     LoadPuzzle {
         generation: u64,
@@ -949,27 +950,22 @@ impl OfflinePuzzles {
             } (_, Message::ScreenshotCreated(screenshot)) => {
                 Task::perform(screenshot_save_dialog(screenshot), Message::SaveScreenshot)
             } (_, Message::SaveScreenshot(img_and_path)) => {
-                let (crop_height, crop_width) = if self.settings_tab.show_coordinates {
-                    (self.settings_tab.window_height - 125., self.settings_tab.window_height - 130.)
-                } else {
-                    (self.settings_tab.window_height - 135., self.settings_tab.window_height - 135.)
-                };
-                if let Some(img_and_path) = img_and_path {
-                    let screenshot = img_and_path.0;
-                    let path = img_and_path.1;
-                    let crop = screenshot.crop(Rectangle::<u32> {
-                        x: 0,
-                        y: 0,
-                        width: crop_width as u32,
-                        height: crop_height as u32,
-                    });
-                    if let Ok (screenshot) = crop {
-                        let img = RgbaImage::from_raw(screenshot.size.width, screenshot.size.height, screenshot.rgba.to_vec());
-                        if let Some(image) = img {
-                            let rgb_img = DynamicImage::ImageRgba8(image).into_rgb8();
-                            let _ = rgb_img.save_with_format(path, image::ImageFormat::Jpeg);
+                match img_and_path {
+                    Some((screenshot, path)) => match screenshot_crop_rectangle(
+                        self.settings_tab.show_coordinates,
+                        self.settings_tab.window_height,
+                    )
+                    .and_then(|crop| save_screenshot_to_path(&screenshot, crop, &path))
+                    {
+                        Ok(()) => self.puzzle_status = lang::tr(&self.lang, "screenshot_saved"),
+                        Err(error) => {
+                            self.puzzle_status = format!(
+                                "{}: {error}",
+                                lang::tr(&self.lang, "screenshot_failed")
+                            );
                         }
-                    }
+                    },
+                    None => self.puzzle_status = lang::tr(&self.lang, "screenshot_cancelled"),
                 }
                 Task::none()
             } (_, Message::ExportPDF(file_path)) => {
@@ -1004,6 +1000,12 @@ impl OfflinePuzzles {
                     },
                     None => self.puzzle_status = lang::tr(&self.lang, "normal_pgn_export_cancelled"),
                 }
+                Task::none()
+            } (_, Message::ScreenshotFailed(error)) => {
+                self.puzzle_status = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "screenshot_failed")
+                );
                 Task::none()
             } (_, Message::EventOccurred(event)) => {
                 if let Event::Window(window::Event::CloseRequested) = event {
@@ -1413,6 +1415,40 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.directory);
         }
+    }
+
+    struct TempScreenshotFile {
+        path: PathBuf,
+        directory: PathBuf,
+    }
+
+    impl TempScreenshotFile {
+        fn new(label: &str) -> Self {
+            let sequence = TEMP_PROJECT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("cms_h9_screenshot_tests")
+                .join(format!("{label}-{}-{sequence}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("screenshot test directory should be created");
+            Self {
+                path: directory.join("screenshot.jpg"),
+                directory,
+            }
+        }
+    }
+
+    impl Drop for TempScreenshotFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn screenshot(width: u32, height: u32) -> Screenshot {
+        Screenshot::new(
+            vec![255; width as usize * height as usize * 4],
+            Size::new(width, height),
+            1.0,
+        )
     }
 
     fn isolate_search_settings(app: &mut OfflinePuzzles, label: &str) -> TempSettingsFile {
@@ -2030,14 +2066,105 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_helper_saves_a_jpeg() {
+        let output = TempScreenshotFile::new("successful-save");
+
+        save_screenshot_to_path(
+            &screenshot(20, 20),
+            Rectangle::<u32> { x: 0, y: 0, width: 10, height: 10 },
+            &output.path,
+        )
+        .expect("valid screenshot should save");
+
+        assert!(output.path.is_file());
+        assert!(std::fs::metadata(&output.path).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn screenshot_helper_propagates_write_failure() {
+        let output = TempScreenshotFile::new("write-failure");
+        let missing_parent_path = output.directory.join("missing-parent").join("screenshot.jpg");
+
+        let error = save_screenshot_to_path(
+            &screenshot(20, 20),
+            Rectangle::<u32> { x: 0, y: 0, width: 10, height: 10 },
+            &missing_parent_path,
+        )
+        .expect_err("a missing destination parent must fail");
+
+        assert!(error.contains("failed to save JPEG"));
+    }
+
+    #[test]
+    fn screenshot_helper_propagates_crop_failure() {
+        let output = TempScreenshotFile::new("crop-failure");
+
+        let error = save_screenshot_to_path(
+            &screenshot(10, 10),
+            Rectangle::<u32> { x: 0, y: 0, width: 11, height: 10 },
+            &output.path,
+        )
+        .expect_err("an out-of-bounds crop must fail");
+
+        assert!(error.contains("failed to crop screenshot"));
+    }
+
+    #[test]
+    fn invalid_screenshot_crop_dimensions_are_rejected_before_conversion() {
+        let error = screenshot_crop_rectangle(false, 135.0)
+            .expect_err("zero-sized screenshot crops are unusable");
+
+        assert!(error.contains("crop dimensions are invalid"));
+    }
+
+    #[test]
+    fn invalid_screenshot_rgba_buffer_is_propagated() {
+        let invalid = Screenshot::new(vec![0; 3], Size::new(1, 1), 1.0);
+
+        let error = screenshot_rgba_image(invalid)
+            .expect_err("an invalid RGBA buffer must not be accepted");
+
+        assert!(error.contains("RGBA buffer does not match"));
+    }
+
+    #[test]
+    fn screenshot_statuses_preserve_normal_puzzle_state() {
+        let (mut app, _project) = app_with_normal_export_review_context();
+        app.settings_tab.window_height = 200.0;
+        app.settings_tab.show_coordinates = false;
+        let original_state = normal_export_state(&app);
+        let output = TempScreenshotFile::new("status-success");
+
+        let _ = app.update(Message::SaveScreenshot(None));
+        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "screenshot_cancelled"));
+        assert_normal_export_state_preserved(&app, &original_state, "screenshot cancellation");
+
+        let _ = app.update(Message::SaveScreenshot(Some((screenshot(100, 100), output.path.clone()))));
+        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "screenshot_saved"));
+        assert!(output.path.is_file());
+        assert_normal_export_state_preserved(&app, &original_state, "screenshot success");
+
+        let _ = app.update(Message::SaveScreenshot(Some((
+            screenshot(1, 1),
+            output.directory.join("crop-failure.jpg"),
+        ))));
+        assert!(app.puzzle_status.starts_with(&lang::tr(&app.lang, "screenshot_failed")));
+        assert!(app.puzzle_status.contains("failed to crop screenshot"));
+        assert_normal_export_state_preserved(&app, &original_state, "screenshot failure");
+    }
+
+    #[test]
     fn normal_export_status_translation_keys_exist_in_every_language() {
-        const NORMAL_EXPORT_KEYS: [&str; 6] = [
+        const NORMAL_EXPORT_KEYS: [&str; 9] = [
             "normal_pgn_exported",
             "normal_pgn_export_cancelled",
             "normal_pgn_export_failed",
             "normal_pdf_exported",
             "normal_pdf_export_cancelled",
             "normal_pdf_export_failed",
+            "screenshot_saved",
+            "screenshot_cancelled",
+            "screenshot_failed",
         ];
 
         for language in lang::Language::ALL {
@@ -2563,9 +2690,75 @@ mod tests {
     }
 }
 
-pub async fn screenshot_save_dialog(img: Screenshot) -> Option<(Screenshot, String)> {
+fn screenshot_crop_rectangle(
+    show_coordinates: bool,
+    window_height: f32,
+) -> Result<Rectangle<u32>, String> {
+    let (crop_height, crop_width) = if show_coordinates {
+        (window_height - 125., window_height - 130.)
+    } else {
+        (window_height - 135., window_height - 135.)
+    };
+
+    if !crop_width.is_finite()
+        || !crop_height.is_finite()
+        || crop_width <= 0.
+        || crop_height <= 0.
+        || crop_width > u32::MAX as f32
+        || crop_height > u32::MAX as f32
+    {
+        return Err("screenshot crop dimensions are invalid".into());
+    }
+
+    Ok(Rectangle::<u32> {
+        x: 0,
+        y: 0,
+        width: crop_width as u32,
+        height: crop_height as u32,
+    })
+}
+
+fn save_screenshot_to_path(
+    screenshot: &Screenshot,
+    crop: Rectangle<u32>,
+    path: &Path,
+) -> Result<(), String> {
+    validate_screenshot_rgba_buffer(screenshot)?;
+    let screenshot = screenshot
+        .crop(crop)
+        .map_err(|error| format!("failed to crop screenshot: {error}"))?;
+    let image = screenshot_rgba_image(screenshot)?;
+    let rgb_img = DynamicImage::ImageRgba8(image).into_rgb8();
+    rgb_img
+        .save_with_format(path, image::ImageFormat::Jpeg)
+        .map_err(|error| format!("failed to save JPEG: {error}"))
+}
+
+fn validate_screenshot_rgba_buffer(screenshot: &Screenshot) -> Result<(), String> {
+    let expected_len = (screenshot.size.width as usize)
+        .checked_mul(screenshot.size.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "screenshot dimensions are too large".to_string())?;
+
+    if screenshot.rgba.len() != expected_len {
+        return Err("screenshot RGBA buffer does not match its dimensions".into());
+    }
+
+    Ok(())
+}
+
+fn screenshot_rgba_image(screenshot: Screenshot) -> Result<RgbaImage, String> {
+    RgbaImage::from_raw(
+        screenshot.size.width,
+        screenshot.size.height,
+        screenshot.rgba.to_vec(),
+    )
+    .ok_or_else(|| "screenshot RGBA buffer does not match its dimensions".to_string())
+}
+
+pub async fn screenshot_save_dialog(img: Screenshot) -> Option<(Screenshot, PathBuf)> {
     let file_path = AsyncFileDialog::new().add_filter("jpg", &["jpg", "jpeg"]).save_file().await;
-    file_path.map(|file_path| (img, file_path.path().display().to_string()))
+    file_path.map(|file_path| (img, file_path.path().to_path_buf()))
 }
 
 fn gen_view<'a>(
