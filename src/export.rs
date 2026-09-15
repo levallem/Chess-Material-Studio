@@ -469,26 +469,38 @@ struct PdfSolutionSpan {
     text: String,
 }
 
-/// Map SAN piece letter to Chess Alpha light-square glyph (lowercase).
-///
-/// Chess Alpha uses uppercase for dark-square pieces and lowercase for
-/// light-square pieces. For solution figurines we always use the clean
-/// light-square variant (no striped background).
-fn chess_alpha_light_square_glyph(san_piece: char) -> char {
+/// Map a SAN piece letter to its white Unicode chess figurine.
+fn san_piece_to_unicode_symbol(san_piece: char) -> char {
     match san_piece {
-        'K' => 'k',
-        'Q' => 'q',
-        'R' => 'r',
-        'B' => 'b',
-        'N' => 'h',
+        'K' => '\u{2654}',
+        'Q' => '\u{2655}',
+        'R' => '\u{2656}',
+        'B' => '\u{2657}',
+        'N' => '\u{2658}',
         other => other,
+    }
+}
+
+fn unicode_chess_symbol(piece: Piece, color: Color) -> char {
+    match (piece, color) {
+        (Piece::King, Color::White) => '\u{2654}',
+        (Piece::Queen, Color::White) => '\u{2655}',
+        (Piece::Rook, Color::White) => '\u{2656}',
+        (Piece::Bishop, Color::White) => '\u{2657}',
+        (Piece::Knight, Color::White) => '\u{2658}',
+        (Piece::Pawn, Color::White) => '\u{2659}',
+        (Piece::King, Color::Black) => '\u{265A}',
+        (Piece::Queen, Color::Black) => '\u{265B}',
+        (Piece::Rook, Color::Black) => '\u{265C}',
+        (Piece::Bishop, Color::Black) => '\u{265D}',
+        (Piece::Knight, Color::Black) => '\u{265E}',
+        (Piece::Pawn, Color::Black) => '\u{265F}',
     }
 }
 
 /// Convert standard SAN to PDF figurine spans.
 ///
-/// Piece letters K/Q/R/B/N become Figurine spans rendered with "Chess Alpha"
-/// using the light-square glyph variant (lowercase, no striped background).
+/// Piece letters K/Q/R/B/N become Figurine spans rendered with ChessSymbols.
 /// Everything else (files, ranks, x, +, #, =, O-O) becomes Regular spans.
 fn standard_san_to_pdf_spans(san: &str) -> Vec<PdfSolutionSpan> {
     if san.starts_with("O-O") {
@@ -514,7 +526,7 @@ fn standard_san_to_pdf_spans(san: &str) -> Vec<PdfSolutionSpan> {
                 });
                 regular_buf.clear();
             }
-            let fig_char = chess_alpha_light_square_glyph(ch);
+            let fig_char = san_piece_to_unicode_symbol(ch);
             spans.push(PdfSolutionSpan {
                 font: PdfSolutionFont::Figurine,
                 text: fig_char.to_string(),
@@ -552,11 +564,18 @@ fn append_pdf_solution_spans(
     for span in spans {
         let (font_name, rise) = match span.font {
             PdfSolutionFont::Regular => ("Regular", 0),
-            PdfSolutionFont::Figurine => ("Chess Alpha", -1),
+            PdfSolutionFont::Figurine => ("ChessSymbols", -1),
         };
         let text = match span.font {
             PdfSolutionFont::Regular => encode_pdf_regular_text(&span.text)?,
-            PdfSolutionFont::Figurine => Object::string_literal(span.text.clone()),
+            PdfSolutionFont::Figurine => {
+                let symbol = span
+                    .text
+                    .chars()
+                    .next()
+                    .ok_or_else(|| "Empty PDF chess figurine span".to_string())?;
+                encode_pdf_chess_symbol(symbol)?
+            }
         };
         ops.push(Operation::new("Tf", vec![font_name.into(), 12.into()]));
         ops.push(Operation::new("Ts", vec![rise.into()]));
@@ -570,13 +589,42 @@ fn append_pdf_solution_spans(
 
 const PDF_PUZZLES_PER_PAGE: usize = 6;
 const PDF_TEXT_ENCODING: &[u8] = b"WinAnsiEncoding";
-static PDF_TEXT_FONT_FACE: LazyLock<Result<ttf_parser::Face<'static>, String>> = LazyLock::new(|| {
-    ttf_parser::Face::parse(config::PDF_TEXT_FONT_BYTES, 0)
-        .map_err(|error| format!("Error parsing embedded PDF text font: {error:?}"))
-});
+static PDF_TEXT_FONT_FACE: LazyLock<Result<ttf_parser::Face<'static>, String>> =
+    LazyLock::new(|| {
+        ttf_parser::Face::parse(config::PDF_TEXT_FONT_BYTES, 0)
+            .map_err(|error| format!("Error parsing embedded PDF text font: {error:?}"))
+    });
+static PDF_CHESS_SYMBOL_FONT_FACE: LazyLock<Result<ttf_parser::Face<'static>, String>> =
+    LazyLock::new(|| {
+        ttf_parser::Face::parse(config::PDF_CHESS_SYMBOL_FONT_BYTES, 0)
+            .map_err(|error| format!("Error parsing embedded PDF chess symbol font: {error:?}"))
+    });
 
 fn pdf_text_font() -> Result<&'static ttf_parser::Face<'static>, String> {
     PDF_TEXT_FONT_FACE.as_ref().map_err(Clone::clone)
+}
+
+fn pdf_chess_symbol_font() -> Result<&'static ttf_parser::Face<'static>, String> {
+    PDF_CHESS_SYMBOL_FONT_FACE.as_ref().map_err(Clone::clone)
+}
+
+fn encode_pdf_chess_symbol(symbol: char) -> Result<Object, String> {
+    if !(('\u{2654}'..='\u{265F}').contains(&symbol)) {
+        return Err(format!(
+            "U+{:04X} is not a supported PDF chess symbol",
+            symbol as u32
+        ));
+    }
+    let glyph = pdf_chess_symbol_font()?
+        .glyph_index(symbol)
+        .filter(|glyph| glyph.0 != 0)
+        .ok_or_else(|| {
+            format!(
+                "Embedded PDF chess symbol font has no glyph for U+{:04X}",
+                symbol as u32
+            )
+        })?;
+    Ok(Object::string_literal(glyph.0.to_be_bytes().to_vec()))
 }
 
 fn normalized_pdf_text(text: &str) -> String {
@@ -661,6 +709,134 @@ fn pdf_text_font_data() -> Result<lopdf::FontData, String> {
         .set_widths(widths)
         .set_encoding("WinAnsiEncoding".to_string());
     Ok(font_data)
+}
+
+fn scale_font_metric(value: i16, units_per_em: u16) -> i64 {
+    (i64::from(value) * 1_000) / i64::from(units_per_em)
+}
+
+fn chess_symbol_widths(font: &ttf_parser::Face<'_>) -> Result<Vec<Object>, String> {
+    let units_per_em = font.units_per_em();
+    let mut widths = Vec::new();
+    for symbol in '\u{2654}'..='\u{265F}' {
+        let glyph = font.glyph_index(symbol).ok_or_else(|| {
+            format!(
+                "Embedded PDF chess symbol font has no glyph for U+{:04X}",
+                symbol as u32
+            )
+        })?;
+        let advance = font.glyph_hor_advance(glyph).ok_or_else(|| {
+            format!(
+                "Embedded PDF chess symbol font has no advance for U+{:04X}",
+                symbol as u32
+            )
+        })?;
+        widths.push(Object::Integer(i64::from(glyph.0)));
+        widths.push(Object::Array(vec![Object::Integer(
+            (i64::from(advance) * 1_000) / i64::from(units_per_em),
+        )]));
+    }
+    Ok(widths)
+}
+
+fn chess_symbols_to_unicode_cmap(font: &ttf_parser::Face<'_>) -> Result<Vec<u8>, String> {
+    let mut mappings = String::new();
+    for symbol in '\u{2654}'..='\u{265F}' {
+        let glyph = font.glyph_index(symbol).ok_or_else(|| {
+            format!(
+                "Embedded PDF chess symbol font has no glyph for U+{:04X}",
+                symbol as u32
+            )
+        })?;
+        mappings.push_str(&format!("<{:04X}> <{:04X}>\n", glyph.0, symbol as u32));
+    }
+    Ok(format!(
+        "/CIDInit /ProcSet findresource begin\n\
+         12 dict begin\n\
+         begincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n\
+         /CMapName /ChessSymbols-Identity-H def\n\
+         /CMapType 2 def\n\
+         1 begincodespacerange\n\
+         <0000> <FFFF>\n\
+         endcodespacerange\n\
+         12 beginbfchar\n\
+         {mappings}\
+         endbfchar\n\
+         endcmap\n\
+         CMapName currentdict /CMap defineresource pop\n\
+         end\n\
+         end\n"
+    )
+    .into_bytes())
+}
+
+fn add_pdf_chess_symbol_font(doc: &mut Document) -> Result<lopdf::ObjectId, String> {
+    let font = pdf_chess_symbol_font()?;
+    for symbol in '\u{2654}'..='\u{265F}' {
+        if font.glyph_index(symbol).is_none_or(|glyph| glyph.0 == 0) {
+            return Err(format!(
+                "Embedded PDF chess symbol font has no glyph for U+{:04X}",
+                symbol as u32
+            ));
+        }
+    }
+
+    let font_file_id = doc.add_object(Stream::new(
+        dictionary! {
+            "Length1" => Object::Integer(config::PDF_CHESS_SYMBOL_FONT_BYTES.len() as i64),
+        },
+        config::PDF_CHESS_SYMBOL_FONT_BYTES.to_vec(),
+    ));
+    let bbox = font.global_bounding_box();
+    let units_per_em = font.units_per_em();
+    let capital_height = font.capital_height().ok_or_else(|| {
+        "Embedded PDF chess symbol font does not define a capital height".to_string()
+    })?;
+    let descriptor_id = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => config::PDF_CHESS_SYMBOL_FONT_NAME,
+        "Flags" => Object::Integer(4),
+        "FontBBox" => vec![
+            Object::Integer(scale_font_metric(bbox.x_min, units_per_em)),
+            Object::Integer(scale_font_metric(bbox.y_min, units_per_em)),
+            Object::Integer(scale_font_metric(bbox.x_max, units_per_em)),
+            Object::Integer(scale_font_metric(bbox.y_max, units_per_em)),
+        ],
+        "ItalicAngle" => Object::Real(font.italic_angle()),
+        "Ascent" => Object::Integer(scale_font_metric(font.ascender(), units_per_em)),
+        "Descent" => Object::Integer(scale_font_metric(bbox.y_min, units_per_em)),
+        "CapHeight" => Object::Integer(scale_font_metric(capital_height, units_per_em)),
+        "StemV" => Object::Integer(80),
+        "FontFile2" => font_file_id,
+    });
+    let cid_system_info = dictionary! {
+        "Registry" => Object::string_literal("Adobe"),
+        "Ordering" => Object::string_literal("Identity"),
+        "Supplement" => Object::Integer(0),
+    };
+    let cid_font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => config::PDF_CHESS_SYMBOL_FONT_NAME,
+        "CIDSystemInfo" => cid_system_info,
+        "FontDescriptor" => descriptor_id,
+        "DW" => Object::Integer(1_000),
+        "W" => Object::Array(chess_symbol_widths(font)?),
+        "CIDToGIDMap" => "Identity",
+    });
+    let to_unicode_id = doc.add_object(Stream::new(
+        dictionary! {},
+        chess_symbols_to_unicode_cmap(font)?,
+    ));
+    Ok(doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => config::PDF_CHESS_SYMBOL_FONT_NAME,
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![Object::Reference(cid_font_id)],
+        "ToUnicode" => to_unicode_id,
+    }))
 }
 
 fn editorial_diagram_pages(puzzle_count: usize) -> usize {
@@ -830,19 +1006,13 @@ fn create_pdf_document() -> Result<(Document, lopdf::ObjectId, lopdf::ObjectId),
         .add_font(pdf_text_font_data()?)
         .map_err(|error| format!("Error adding PDF text font: {error}"))?;
     let pages_id = doc.new_object_id();
-    let font_name = "Chess Alpha".to_string();
-    let mut font_data = lopdf::FontData::new(config::CHESS_ALPHA_BYTES, font_name.clone());
-    font_data
-        .set_flags(33)
-        .set_font_bbox((0, 0, 1000, 1000))
-        .set_first_char(32)
-        .set_last_char(255)
-        .set_widths(vec![1000.into(); 223])
-        .set_encoding("WinAnsiEncoding".to_string());
-    let font_id = doc
-        .add_font(font_data)
-        .map_err(|error| format!("Error adding PDF font: {error}"))?;
-    let resources_id = doc.add_object(dictionary! { "Font" => dictionary! { font_name => font_id, "Regular" => regular_font_id } });
+    let chess_symbols_id = add_pdf_chess_symbol_font(&mut doc)?;
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! {
+            "ChessSymbols" => chess_symbols_id,
+            "Regular" => regular_font_id,
+        },
+    });
     Ok((doc, pages_id, resources_id))
 }
 
@@ -1121,26 +1291,50 @@ fn pdf_draw_side_circle(ops: &mut Vec<Operation>, cx: i32, cy: i32, r: i32, whit
         ops.push(Operation::new("rg", vec![0.into(), 0.into(), 0.into()]));
     }
     ops.push(Operation::new("m", vec![(cx + r).into(), cy.into()]));
-    ops.push(Operation::new("c", vec![
-        (cx + r).into(), (cy + c).into(),
-        (cx + c).into(), (cy + r).into(),
-        cx.into(), (cy + r).into()
-    ]));
-    ops.push(Operation::new("c", vec![
-        (cx - c).into(), (cy + r).into(),
-        (cx - r).into(), (cy + c).into(),
-        (cx - r).into(), cy.into()
-    ]));
-    ops.push(Operation::new("c", vec![
-        (cx - r).into(), (cy - c).into(),
-        (cx - c).into(), (cy - r).into(),
-        cx.into(), (cy - r).into()
-    ]));
-    ops.push(Operation::new("c", vec![
-        (cx + c).into(), (cy - r).into(),
-        (cx + r).into(), (cy - c).into(),
-        (cx + r).into(), cy.into()
-    ]));
+    ops.push(Operation::new(
+        "c",
+        vec![
+            (cx + r).into(),
+            (cy + c).into(),
+            (cx + c).into(),
+            (cy + r).into(),
+            cx.into(),
+            (cy + r).into(),
+        ],
+    ));
+    ops.push(Operation::new(
+        "c",
+        vec![
+            (cx - c).into(),
+            (cy + r).into(),
+            (cx - r).into(),
+            (cy + c).into(),
+            (cx - r).into(),
+            cy.into(),
+        ],
+    ));
+    ops.push(Operation::new(
+        "c",
+        vec![
+            (cx - r).into(),
+            (cy - c).into(),
+            (cx - c).into(),
+            (cy - r).into(),
+            cx.into(),
+            (cy - r).into(),
+        ],
+    ));
+    ops.push(Operation::new(
+        "c",
+        vec![
+            (cx + c).into(),
+            (cy - r).into(),
+            (cx + r).into(),
+            (cy - c).into(),
+            (cx + r).into(),
+            cy.into(),
+        ],
+    ));
     ops.push(Operation::new("h", vec![]));
     if white_side {
         ops.push(Operation::new("B", vec![]));
@@ -1148,6 +1342,108 @@ fn pdf_draw_side_circle(ops: &mut Vec<Operation>, cx: i32, cy: i32, r: i32, whit
         ops.push(Operation::new("f", vec![]));
     }
     ops.push(Operation::new("Q", vec![]));
+}
+
+fn chess_symbol_text_position(
+    symbol: char,
+    square_x: f32,
+    square_y: f32,
+    square_size: f32,
+    font_size: f32,
+) -> Result<(f32, f32), String> {
+    let font = pdf_chess_symbol_font()?;
+    let glyph = font.glyph_index(symbol).ok_or_else(|| {
+        format!(
+            "Embedded PDF chess symbol font has no glyph for U+{:04X}",
+            symbol as u32
+        )
+    })?;
+    let bounds = font.glyph_bounding_box(glyph).ok_or_else(|| {
+        format!(
+            "Embedded PDF chess symbol font has no bounds for U+{:04X}",
+            symbol as u32
+        )
+    })?;
+    let scale = font_size / f32::from(font.units_per_em());
+    let glyph_width = f32::from(bounds.x_max - bounds.x_min) * scale;
+    let glyph_height = f32::from(bounds.y_max - bounds.y_min) * scale;
+    Ok((
+        square_x + (square_size - glyph_width) / 2.0 - f32::from(bounds.x_min) * scale,
+        square_y + (square_size - glyph_height) / 2.0 - f32::from(bounds.y_min) * scale,
+    ))
+}
+
+fn append_pdf_board(
+    ops: &mut Vec<Operation>,
+    board: &Board,
+    files: &[i32; 8],
+    ranks: &[i32; 8],
+    start_x: i32,
+    start_y: i32,
+) -> Result<(), String> {
+    const SQUARE_SIZE: i32 = 25;
+    const PIECE_FONT_SIZE: f32 = 23.0;
+
+    for (display_rank, &rank) in ranks.iter().enumerate() {
+        for (display_file, &file) in files.iter().enumerate() {
+            let square_x = start_y + display_file as i32 * SQUARE_SIZE;
+            let square_y = start_x - display_rank as i32 * SQUARE_SIZE;
+            let light_square = (rank + file) % 2 != 0;
+            let gray = if light_square { 0.92 } else { 0.62 };
+            ops.extend([
+                Operation::new("q", vec![]),
+                Operation::new("g", vec![Object::Real(gray)]),
+                Operation::new(
+                    "re",
+                    vec![
+                        square_x.into(),
+                        square_y.into(),
+                        SQUARE_SIZE.into(),
+                        SQUARE_SIZE.into(),
+                    ],
+                ),
+                Operation::new("f", vec![]),
+                Operation::new("Q", vec![]),
+            ]);
+        }
+    }
+
+    for (display_rank, &rank) in ranks.iter().enumerate() {
+        for (display_file, &file) in files.iter().enumerate() {
+            let square = chess::Square::make_square(
+                chess::Rank::from_index(rank as usize),
+                chess::File::from_index(file as usize),
+            );
+            let Some(piece) = board.piece_on(square) else {
+                continue;
+            };
+            let color = board
+                .color_on(square)
+                .ok_or("Board has a piece without a color")?;
+            let symbol = unicode_chess_symbol(piece, color);
+            let square_x = (start_y + display_file as i32 * SQUARE_SIZE) as f32;
+            let square_y = (start_x - display_rank as i32 * SQUARE_SIZE) as f32;
+            let (text_x, text_y) = chess_symbol_text_position(
+                symbol,
+                square_x,
+                square_y,
+                SQUARE_SIZE as f32,
+                PIECE_FONT_SIZE,
+            )?;
+            ops.extend([
+                Operation::new("BT", vec![]),
+                Operation::new(
+                    "Tf",
+                    vec!["ChessSymbols".into(), Object::Real(PIECE_FONT_SIZE)],
+                ),
+                Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
+                Operation::new("Td", vec![Object::Real(text_x), Object::Real(text_y)]),
+                Operation::new("Tj", vec![encode_pdf_chess_symbol(symbol)?]),
+                Operation::new("ET", vec![]),
+            ]);
+        }
+    }
+    Ok(())
 }
 
 fn gen_diagram_operations(
@@ -1201,60 +1497,7 @@ fn gen_diagram_operations(
         ]);
     }
 
-    ops.extend_from_slice(&[
-        Operation::new("BT", vec![]),
-        Operation::new("Tf", vec!["Chess Alpha".into(), 25.into()]),
-        Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
-        Operation::new("Td", vec![start_y.into(), start_x.into()]),
-    ]);
-
-    for rank in ranks {
-        let mut rank_string = String::new();
-        for file in &files {
-            let mut new_piece;
-            let light_square = (rank + file) % 2 != 0;
-            let square = chess::Square::make_square(chess::Rank::from_index(rank as usize),chess::File::from_index(*file as usize));
-            let (piece, color) =
-                (board.piece_on(square),
-                board.color_on(square));
-
-            if let Some(piece) = piece {
-                if color.ok_or("Board has a piece without a color")? == Color::White {
-                    match piece {
-                        Piece::Pawn => new_piece = 'P',
-                        Piece::Rook => new_piece = 'R',
-                        Piece::Knight => new_piece = 'H',
-                        Piece::Bishop => new_piece = 'B',
-                        Piece::Queen => new_piece = 'Q',
-                        Piece::King => new_piece = 'K',
-                    }
-                    if light_square {
-                        new_piece = new_piece.to_ascii_lowercase();
-                    }
-                } else {
-                    match piece {
-                        Piece::Rook => new_piece = 'T',
-                        Piece::Knight => new_piece = 'J',
-                        Piece::Bishop => new_piece = 'N',
-                        Piece::Queen => new_piece = 'W',
-                        Piece::King => new_piece = 'L',
-                        Piece::Pawn => new_piece = 'O',
-                    }
-                    if light_square {
-                        new_piece = new_piece.to_ascii_lowercase();
-                    }
-                }
-            } else if light_square {
-                new_piece = ' ';
-            } else {
-                new_piece = '+';
-            }
-            rank_string.push(new_piece);
-        }
-        ops.push(Operation::new("Tj", vec![Object::string_literal(rank_string)]));
-        ops.push(Operation::new("Td", vec![0.into(), Object::Integer(-25)]));
-    }
-    ops.push(Operation::new("ET", vec![]));
+    append_pdf_board(&mut ops, &board, &files, &ranks, start_x, start_y)?;
 
     for (i, &file) in files.iter().enumerate() {
         let label_x = start_y + (i as i32) * 25 + 10;
@@ -2337,8 +2580,13 @@ mod tests {
     fn test_pdf_side_circle_no_eyes_no_mouth() {
         let puzzle = fixture_puzzle_00010();
         let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
-        let has_re = ops.iter().any(|op| op.operator == "re");
-        assert!(!has_re, "Side circle must not use 're' (rectangle for eyes)");
+        let rectangle_count = ops.iter().filter(|op| op.operator == "re").count();
+        assert_eq!(rectangle_count, 64, "Only the 64 board squares may use 're'");
+        assert_eq!(
+            ops.iter().filter(|op| op.operator == "c").count(),
+            4,
+            "Side indicator must remain a four-curve circle",
+        );
         let has_stroke = ops.iter().any(|op| op.operator == "S");
         assert!(!has_stroke, "Side circle must not use 'S' (stroke for mouth)");
     }
@@ -2380,14 +2628,14 @@ mod tests {
     // ── CMS-016D: light-square glyph mapping ──
 
     #[test]
-    fn test_chess_alpha_light_square_glyph_mapping() {
-        assert_eq!(chess_alpha_light_square_glyph('K'), 'k');
-        assert_eq!(chess_alpha_light_square_glyph('Q'), 'q');
-        assert_eq!(chess_alpha_light_square_glyph('R'), 'r');
-        assert_eq!(chess_alpha_light_square_glyph('B'), 'b');
-        assert_eq!(chess_alpha_light_square_glyph('N'), 'h');
-        assert_eq!(chess_alpha_light_square_glyph('x'), 'x');
-        assert_eq!(chess_alpha_light_square_glyph('e'), 'e');
+    fn test_san_piece_to_unicode_symbol_mapping() {
+        assert_eq!(san_piece_to_unicode_symbol('K'), '\u{2654}');
+        assert_eq!(san_piece_to_unicode_symbol('Q'), '\u{2655}');
+        assert_eq!(san_piece_to_unicode_symbol('R'), '\u{2656}');
+        assert_eq!(san_piece_to_unicode_symbol('B'), '\u{2657}');
+        assert_eq!(san_piece_to_unicode_symbol('N'), '\u{2658}');
+        assert_eq!(san_piece_to_unicode_symbol('x'), 'x');
+        assert_eq!(san_piece_to_unicode_symbol('e'), 'e');
     }
 
     // ── CMS-016/016B: figurine span tests ──
@@ -2396,7 +2644,7 @@ mod tests {
     fn test_san_to_spans_rook() {
         let spans = standard_san_to_pdf_spans("Rb1+");
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "r".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "b1+".into() },
         ]);
     }
@@ -2405,7 +2653,7 @@ mod tests {
     fn test_san_to_spans_queen_capture() {
         let spans = standard_san_to_pdf_spans("Qxe7+");
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "q".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xe7+".into() },
         ]);
     }
@@ -2414,7 +2662,7 @@ mod tests {
     fn test_san_to_spans_knight() {
         let spans = standard_san_to_pdf_spans("Nxf7");
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "h".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♘".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xf7".into() },
         ]);
     }
@@ -2423,7 +2671,7 @@ mod tests {
     fn test_san_to_spans_bishop() {
         let spans = standard_san_to_pdf_spans("Bf5");
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "b".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♗".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "f5".into() },
         ]);
     }
@@ -2432,7 +2680,7 @@ mod tests {
     fn test_san_to_spans_king() {
         let spans = standard_san_to_pdf_spans("Kd2");
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "k".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♔".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "d2".into() },
         ]);
     }
@@ -2450,7 +2698,7 @@ mod tests {
         let spans = standard_san_to_pdf_spans("e1=Q");
         assert_eq!(spans, vec![
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e1=".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "q".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
         ]);
     }
 
@@ -2459,7 +2707,7 @@ mod tests {
         let spans = standard_san_to_pdf_spans("e1=N+");
         assert_eq!(spans, vec![
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e1=".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "h".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♘".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "+".into() },
         ]);
     }
@@ -2484,7 +2732,7 @@ mod tests {
     fn test_san_to_spans_disambiguation_file() {
         let spans = standard_san_to_pdf_spans("Nbd2");
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "h".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♘".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "bd2".into() },
         ]);
     }
@@ -2493,7 +2741,7 @@ mod tests {
     fn test_san_to_spans_disambiguation_rank() {
         let spans = standard_san_to_pdf_spans("R1a2");
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "r".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "1a2".into() },
         ]);
     }
@@ -2514,7 +2762,7 @@ mod tests {
         let board = Board::from_str("4k3/8/8/8/8/8/8/R3K3 w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "a1b1").unwrap();
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "r".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "b1".into() },
         ]);
     }
@@ -2524,7 +2772,7 @@ mod tests {
         let board = Board::from_str("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "h5f7").unwrap();
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "q".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xf7#".into() },
         ]);
     }
@@ -2534,7 +2782,7 @@ mod tests {
         let board = Board::default();
         let spans = uci_move_to_pdf_spans(&board, "g1f3").unwrap();
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "h".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♘".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "f3".into() },
         ]);
     }
@@ -2544,7 +2792,7 @@ mod tests {
         let board = Board::from_str("r1bqkbnr/pppppppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "f1c4").unwrap();
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "b".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♗".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "c4".into() },
         ]);
     }
@@ -2554,7 +2802,7 @@ mod tests {
         let board = Board::from_str("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "e1e2").unwrap();
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "k".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♔".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e2".into() },
         ]);
     }
@@ -2574,7 +2822,7 @@ mod tests {
         let spans = uci_move_to_pdf_spans(&board, "e7e8q").unwrap();
         assert_eq!(spans, vec![
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e8=".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "q".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
         ]);
     }
 
@@ -2601,7 +2849,7 @@ mod tests {
         let board = Board::from_str("4k3/8/8/8/8/8/R1R5/4K3 w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "a2b2").unwrap();
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "r".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "ab2".into() },
         ]);
     }
@@ -2611,7 +2859,7 @@ mod tests {
         let board = Board::from_str("4k3/8/8/8/8/R7/8/R3K3 w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "a1a2").unwrap();
         assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "r".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "1a2".into() },
         ]);
     }
@@ -2661,10 +2909,10 @@ mod tests {
             assert!(!spans.is_empty(), "UCI {} produced empty spans", uci);
             let cm = parse_legal_uci_move(&board, uci).unwrap();
             let san = move_to_standard_san(&board, cm).unwrap();
-            // Verify total text reconstructs the SAN (with h for knight light-square glyph)
+            // Verify total text reconstructs the SAN (with a Unicode white knight light-square glyph)
             let total: String = spans.iter().map(|s| s.text.as_str()).collect();
-            let expected_total = san.replace('N', "h");
-            assert_eq!(total, expected_total, "Span text must match standard SAN with h for knight");
+            let expected_total = san.replace('N', "♘");
+            assert_eq!(total, expected_total, "Span text must match standard SAN with a Unicode white knight");
             // Verify figurine spans exist for piece moves
             if san.starts_with(|c: char| "KQRBN".contains(c)) {
                 assert!(spans.iter().any(|s| s.font == PdfSolutionFont::Figurine),
@@ -2684,20 +2932,20 @@ mod tests {
         append_pdf_solution_spans(&mut ops, &spans).unwrap();
         ops.push(Operation::new("ET", vec![]));
 
-        let has_chess_alpha = ops.iter().any(|op| {
-            op.operator == "Tf" && op.operands.first() == Some(&"Chess Alpha".into())
+        let has_chess_symbols = ops.iter().any(|op| {
+            op.operator == "Tf" && op.operands.first() == Some(&"ChessSymbols".into())
         });
         let has_regular = ops.iter().any(|op| {
             op.operator == "Tf" && op.operands.first() == Some(&"Regular".into())
         });
-        assert!(has_chess_alpha, "Solution must use Chess Alpha font for figurine");
+        assert!(has_chess_symbols, "Solution must use ChessSymbols for figurines");
         assert!(has_regular, "Solution must use Regular font for non-figurine text");
     }
 
     #[test]
     fn test_append_solution_spans_text_rise() {
         let spans = vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "q".into() },
+            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
             PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xf7#".into() },
         ];
         let mut ops: Vec<Operation> = vec![];
@@ -3230,5 +3478,208 @@ mod tests {
         assert!(
             write_project_pdf("Proyecto", &cjk_chapter, &lang::Language::English, &path).is_err()
         );
+    }
+    #[test]
+    fn unicode_chess_mapping_covers_all_twelve_piece_color_combinations() {
+        let cases = [
+            (Piece::King, Color::White, '\u{2654}'),
+            (Piece::Queen, Color::White, '\u{2655}'),
+            (Piece::Rook, Color::White, '\u{2656}'),
+            (Piece::Bishop, Color::White, '\u{2657}'),
+            (Piece::Knight, Color::White, '\u{2658}'),
+            (Piece::Pawn, Color::White, '\u{2659}'),
+            (Piece::King, Color::Black, '\u{265A}'),
+            (Piece::Queen, Color::Black, '\u{265B}'),
+            (Piece::Rook, Color::Black, '\u{265C}'),
+            (Piece::Bishop, Color::Black, '\u{265D}'),
+            (Piece::Knight, Color::Black, '\u{265E}'),
+            (Piece::Pawn, Color::Black, '\u{265F}'),
+        ];
+        for (piece, color, expected) in cases {
+            assert_eq!(unicode_chess_symbol(piece, color), expected);
+        }
+    }
+
+    #[test]
+    fn embedded_chess_font_covers_unicode_symbols_and_encodes_big_endian_gids() {
+        let font = pdf_chess_symbol_font().unwrap();
+        for symbol in '\u{2654}'..='\u{265F}' {
+            let gid = font
+                .glyph_index(symbol)
+                .expect("official font must cover chess symbols");
+            assert_ne!(gid.0, 0);
+            let Object::String(bytes, _) = encode_pdf_chess_symbol(symbol).unwrap() else {
+                panic!("chess symbol must be emitted as a PDF string");
+            };
+            assert_eq!(bytes, gid.0.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn pdf_embeds_type0_chess_symbols_with_identity_gid_mapping_and_tounicode() {
+        let (doc, _, resources_id) = create_pdf_document().unwrap();
+        let resources = doc.get_object(resources_id).unwrap().as_dict().unwrap();
+        let fonts = resources.get(b"Font").unwrap().as_dict().unwrap();
+        assert!(fonts.get(b"Chess Alpha").is_err());
+        let type0_id = fonts.get(b"ChessSymbols").unwrap().as_reference().unwrap();
+        let type0 = doc.get_object(type0_id).unwrap().as_dict().unwrap();
+        assert_eq!(
+            type0.get(b"Subtype").unwrap(),
+            &Object::Name(b"Type0".to_vec())
+        );
+        assert_eq!(
+            type0.get(b"Encoding").unwrap(),
+            &Object::Name(b"Identity-H".to_vec())
+        );
+
+        let descendants = type0.get(b"DescendantFonts").unwrap().as_array().unwrap();
+        let cid_id = descendants[0].as_reference().unwrap();
+        let cid_font = doc.get_object(cid_id).unwrap().as_dict().unwrap();
+        assert_eq!(
+            cid_font.get(b"Subtype").unwrap(),
+            &Object::Name(b"CIDFontType2".to_vec())
+        );
+        assert_eq!(
+            cid_font.get(b"CIDToGIDMap").unwrap(),
+            &Object::Name(b"Identity".to_vec())
+        );
+        assert!(cid_font.get(b"DW").is_ok());
+        assert!(cid_font.get(b"W").is_ok());
+        let system_info = cid_font.get(b"CIDSystemInfo").unwrap().as_dict().unwrap();
+        assert_eq!(
+            system_info.get(b"Registry").unwrap().as_str().unwrap(),
+            b"Adobe"
+        );
+        assert_eq!(
+            system_info.get(b"Ordering").unwrap().as_str().unwrap(),
+            b"Identity"
+        );
+        let descriptor_id = cid_font
+            .get(b"FontDescriptor")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let descriptor = doc.get_object(descriptor_id).unwrap().as_dict().unwrap();
+        for key in [
+            b"FontBBox".as_slice(),
+            b"Ascent".as_slice(),
+            b"Descent".as_slice(),
+            b"CapHeight".as_slice(),
+            b"StemV".as_slice(),
+        ] {
+            assert!(
+                descriptor.get(key).is_ok(),
+                "missing FontDescriptor metric {key:?}"
+            );
+        }
+        let font = pdf_chess_symbol_font().unwrap();
+        let units_per_em = font.units_per_em();
+        let expected_descent = scale_font_metric(font.global_bounding_box().y_min, units_per_em);
+        let expected_cap_height = scale_font_metric(
+            font.capital_height()
+                .expect("official chess font must define a capital height"),
+            units_per_em,
+        );
+        assert_eq!(expected_descent, -422);
+        assert_eq!(expected_cap_height, 945);
+        assert_eq!(
+            descriptor.get(b"Descent").unwrap(),
+            &Object::Integer(expected_descent)
+        );
+        assert_eq!(
+            descriptor.get(b"CapHeight").unwrap(),
+            &Object::Integer(expected_cap_height)
+        );
+        let font_file_id = descriptor
+            .get(b"FontFile2")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let embedded_font = doc
+            .get_object(font_file_id)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        assert_eq!(embedded_font, config::PDF_CHESS_SYMBOL_FONT_BYTES);
+
+        let to_unicode_id = type0.get(b"ToUnicode").unwrap().as_reference().unwrap();
+        let cmap = doc
+            .get_object(to_unicode_id)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        let cmap = String::from_utf8(cmap).unwrap();
+        let font = pdf_chess_symbol_font().unwrap();
+        for symbol in '\u{2654}'..='\u{265F}' {
+            let gid = font.glyph_index(symbol).unwrap().0;
+            assert!(
+                cmap.contains(&format!("<{gid:04X}> <{:04X}>", symbol as u32)),
+                "ToUnicode must map emitted GID {gid} to U+{:04X}",
+                symbol as u32,
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_board_represents_all_twelve_unicode_chess_pieces() {
+        let board = Board::from_str("kqrbn3/7p/8/8/8/8/P7/3NBRQK w - - 0 1").unwrap();
+        let (files, ranks) = pdf_board_labels(true);
+        let mut ops = Vec::new();
+        append_pdf_board(&mut ops, &board, &files, &ranks, 750, 75).unwrap();
+        let emitted = ops
+            .iter()
+            .filter_map(|operation| {
+                match (operation.operator.as_str(), operation.operands.first()) {
+                    ("Tj", Some(Object::String(bytes, _))) if bytes.len() == 2 => {
+                        Some(bytes.clone())
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected = ('\u{2654}'..='\u{265F}')
+            .map(|symbol| match encode_pdf_chess_symbol(symbol).unwrap() {
+                Object::String(bytes, _) => bytes,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(emitted.len(), 12);
+        for gid in expected {
+            assert!(
+                emitted.contains(&gid),
+                "missing chess symbol GID {gid:02X?}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagram_draws_explicit_squares_and_uses_chess_symbols_in_both_orientations() {
+        for puzzle in [
+            fixture_puzzle_00010(),
+            config::Puzzle {
+                puzzle_id: "white-bottom".into(),
+                fen: "r3k3/8/8/8/8/8/8/4K3 b - - 0 1".into(),
+                moves: "a8a7 e1e2".into(),
+                rating: 0,
+                rating_deviation: 0,
+                popularity: 0,
+                nb_plays: 0,
+                themes: String::new(),
+                game_url: String::new(),
+                opening: String::new(),
+            },
+        ] {
+            let ops =
+                gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
+            assert_eq!(ops.iter().filter(|op| op.operator == "re").count(), 64);
+            assert!(ops.iter().any(|op| {
+                op.operator == "Tf"
+                    && op.operands.first() == Some(&Object::Name(b"ChessSymbols".to_vec()))
+            }));
+        }
     }
 }

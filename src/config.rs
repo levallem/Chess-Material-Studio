@@ -17,6 +17,9 @@ pub const CHESS_ALPHA_BYTES: &[u8] = include_bytes!("../font/Alpha.ttf");
 pub const CHESS_ALPHA: Font = iced::Font::with_name("Chess Alpha");
 pub const PDF_TEXT_FONT_BYTES: &[u8] = include_bytes!("../font/NotoSans-Regular.ttf");
 pub const PDF_TEXT_FONT_NAME: &str = "NotoSans-Regular";
+pub const PDF_CHESS_SYMBOL_FONT_BYTES: &[u8] =
+    include_bytes!("../font/NotoSansSymbols2-Regular.ttf");
+pub const PDF_CHESS_SYMBOL_FONT_NAME: &str = "NotoSansSymbols2-Regular";
 
 //pub const FONT_DIRECTORY: &str = "font/";
 pub const PUZZLES_DIRECTORY: &str = "puzzles/";
