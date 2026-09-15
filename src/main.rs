@@ -4,12 +4,9 @@ use download_db::download_lichess_db;
 use eval::{Engine, EngineStatus};
 use iced::advanced::widget::Id as GenericId;
 use iced::widget::svg::Handle;
-use iced::widget::text::LineHeight;
 use styles::PieceTheme;
 use std::collections::HashMap;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::fs::File as StdFile;
 use std::str::FromStr;
 use tokio::sync::mpsc::{self, Sender};
 use iced::widget::{button, center, container, responsive, row, text, text_input, Button, Column, Container, Radio, Row, Svg, Text};
@@ -17,7 +14,6 @@ use iced::{Element, Rectangle, Size, Subscription, Theme};
 use iced::{alignment, Task, Alignment, Length};
 use iced::window::{self, Screenshot};
 use iced::event::{self, Event};
-use std::borrow::Cow;
 use image::{DynamicImage, RgbaImage};
 use rfd::AsyncFileDialog;
 
@@ -25,13 +21,12 @@ use iced_aw::{TabLabel, Tabs};
 use chess::{Board, BoardStatus, ChessMove, Color, File, Game, Piece, Rank, Square, ALL_SQUARES};
 use chess_material_studio::project::ProjectPuzzleDecision;
 
-use rodio::{MixerDeviceSink, DeviceSinkBuilder};
+use rodio::{DeviceSinkBuilder, MixerDeviceSink, Source, source::SineWave};
 
 use rand::rng;
 use rand::seq::SliceRandom;
 
 mod config;
-use config::{ONE_PIECE_SOUND_FILE, TWO_PIECES_SOUND_FILE};
 
 mod styles;
 mod search_tab;
@@ -179,9 +174,44 @@ struct SoundPlayback {
     handle: MixerDeviceSink,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioCue {
+    OnePiece,
+    TwoPieces,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CueSpec {
+    frequency_hz: f32,
+    duration_ms: u64,
+    amplitude: f32,
+}
+
+impl CueSpec {
+    const fn new(frequency_hz: f32, duration_ms: u64, amplitude: f32) -> Self {
+        Self {
+            frequency_hz,
+            duration_ms,
+            amplitude,
+        }
+    }
+}
+
+fn cue_spec(cue: AudioCue) -> CueSpec {
+    match cue {
+        AudioCue::OnePiece => CueSpec::new(660.0, 70, 0.12),
+        AudioCue::TwoPieces => CueSpec::new(880.0, 100, 0.12),
+    }
+}
+
+fn cue_source(cue: AudioCue) -> impl Source<Item = f32> {
+    let spec = cue_spec(cue);
+    SineWave::new(spec.frequency_hz)
+        .take_duration(std::time::Duration::from_millis(spec.duration_ms))
+        .amplify(spec.amplitude)
+}
+
 impl SoundPlayback {
-    pub const ONE_PIECE_SOUND: u8 = 0;
-    pub const TWO_PIECE_SOUND: u8 = 1;
     pub fn init_sound() -> Option<Self> {
         let mut sound_playback = None;
         if let Ok(handle) = DeviceSinkBuilder::open_default_sink() {
@@ -192,26 +222,17 @@ impl SoundPlayback {
     }
         sound_playback
     }
-    pub fn play_audio(&self, audio: u8) {
-        let sink = match audio {
-            SoundPlayback::ONE_PIECE_SOUND => {
-                rodio::play(
-                    self.handle.mixer(),
-                    BufReader::new(
-                        StdFile::open(ONE_PIECE_SOUND_FILE).unwrap()
-                    )).unwrap()
-            },
-            _ => {
-                rodio::play(
-                    self.handle.mixer(),
-                    BufReader::new(
-                        StdFile::open(TWO_PIECES_SOUND_FILE).unwrap()
-                    )).unwrap()
-            },
-        };
-        sink.play();
-        sink.detach();
+    pub fn play_audio(&self, cue: AudioCue) {
+        self.handle.mixer().add(cue_source(cue));
     }
+}
+
+fn play_audio_if_available(playback: Option<&SoundPlayback>, cue: AudioCue) -> bool {
+    let Some(playback) = playback else {
+        return false;
+    };
+    playback.play_audio(cue);
+    true
 }
 
 fn get_image_handles(theme: &PieceTheme) -> Vec<Handle> {
@@ -422,9 +443,8 @@ impl OfflinePuzzles {
                     && let Err(e) = sender.blocking_send(san_correct_ep(self.analysis.current_position().to_string())) {
                         self.record_engine_failure(format!("lost contact with engine: {e}"));
                 }
-                if self.settings_tab.saved_configs.play_sound
-                    && let Some(audio) = &self.sound_playback {
-                        audio.play_audio(SoundPlayback::ONE_PIECE_SOUND);
+                if self.settings_tab.saved_configs.play_sound {
+                    play_audio_if_available(self.sound_playback.as_ref(), AudioCue::OnePiece);
                 }
             }
         } else if !self.puzzle_tab.puzzles.is_empty() {
@@ -452,9 +472,8 @@ impl OfflinePuzzles {
                 self.puzzle_tab.current_puzzle_move += 1;
 
                 if self.puzzle_tab.current_puzzle_move == correct_moves.len() {
-                    if self.settings_tab.saved_configs.play_sound
-                        && let Some(audio) = &self.sound_playback {
-                            audio.play_audio(SoundPlayback::ONE_PIECE_SOUND);
+                    if self.settings_tab.saved_configs.play_sound {
+                        play_audio_if_available(self.sound_playback.as_ref(), AudioCue::OnePiece);
                     }
                     if self.puzzle_tab.current_puzzle < self.puzzle_tab.puzzles.len() - 1 {
                         if self.settings_tab.saved_configs.auto_load_next {
@@ -482,9 +501,8 @@ impl OfflinePuzzles {
                         self.puzzle_status = lang::tr(&self.lang, "all_puzzles_done");
                     }
                 } else {
-                    if self.settings_tab.saved_configs.play_sound
-                        && let Some(audio) = &self.sound_playback {
-                            audio.play_audio(SoundPlayback::TWO_PIECE_SOUND);
+                    if self.settings_tab.saved_configs.play_sound {
+                        play_audio_if_available(self.sound_playback.as_ref(), AudioCue::TwoPieces);
                     }
                     movement = ChessMove::new(
                         Square::from_str(&String::from(&correct_moves[self.puzzle_tab.current_puzzle_move][..2])).unwrap(),
@@ -768,8 +786,7 @@ impl OfflinePuzzles {
         let has_lichess_db = config::puzzle_source_exists(&config::SETTINGS);
         (
             Self::new(has_lichess_db),
-            Task::discard(iced::font::load(Cow::from(config::CHESS_ALPHA_BYTES))).chain(window::latest())
-            .map(Message::WindowInitialized)
+            window::latest().map(Message::WindowInitialized),
         )
     }
 
@@ -1449,6 +1466,31 @@ impl OfflinePuzzles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthesized_audio_cues_have_distinct_specs() {
+        assert_eq!(cue_spec(AudioCue::OnePiece), CueSpec::new(660.0, 70, 0.12));
+        assert_eq!(
+            cue_spec(AudioCue::TwoPieces),
+            CueSpec::new(880.0, 100, 0.12)
+        );
+    }
+
+    #[test]
+    fn synthesized_audio_cues_are_finite() {
+        let one_piece_samples = cue_source(AudioCue::OnePiece).count();
+        let two_piece_samples = cue_source(AudioCue::TwoPieces).count();
+
+        assert!(one_piece_samples > 0);
+        assert!(two_piece_samples > one_piece_samples);
+        assert!(two_piece_samples < 10_000);
+    }
+
+    #[test]
+    fn unavailable_audio_device_is_a_no_op() {
+        assert!(!play_audio_if_available(None, AudioCue::OnePiece));
+        assert!(!play_audio_if_available(None, AudioCue::TwoPieces));
+    }
     use chess_material_studio::models::Puzzle as PersistentPuzzle;
     use chess_material_studio::project::{create_chapter, create_project, set_puzzle_decision};
     use crate::lang::PickListWrapper;
@@ -3008,7 +3050,7 @@ fn gen_view<'a>(
     last_move_from: Option<Square>,
     last_move_to: Option<Square>,
     hint_square: Option<Square>,
-    piece_theme: styles::PieceTheme,
+    _piece_theme: styles::PieceTheme,
     board_theme: styles::BoardTheme,
     puzzle_status: &'a str,
     is_fav: Option<bool>,
@@ -3040,7 +3082,6 @@ fn gen_view<'a>(
     imgs: &[Handle],
 ) -> Element<'a, Message, Theme, iced::Renderer> {
 
-    let font = piece_theme == PieceTheme::FontAlpha;
     let mut board_col = Column::new().spacing(0).align_x(Alignment::Center);
     let mut board_row = Row::new().spacing(0).align_y(Alignment::Center);
 
@@ -3076,7 +3117,6 @@ fn gen_view<'a>(
                     }
                 };
 
-            let mut text;
             let light_square = (rank + file) % 2 != 0;
 
             let selected =
@@ -3088,147 +3128,90 @@ fn gen_view<'a>(
                 } else {
                     from_square == Some(pos)
             };
-            if font {
-                let square_style = if selected {
-                    styles::board_button_style(
+            let square_style;
+            let container_style;
+
+            if light_square {
+                if selected {
+                    square_style = styles::board_button_style(
                         board_theme,
-                        styles::BoardSquareStyle::Light,
-                    )
+                        styles::BoardSquareStyle::SelectedLight,
+                    );
+                    container_style = styles::board_container_style(
+                        board_theme,
+                        styles::BoardSquareStyle::SelectedLight,
+                    );
                 } else {
-                    styles::board_button_style(
+                    square_style =
+                        styles::board_button_style(board_theme, styles::BoardSquareStyle::Light);
+                    container_style =
+                        styles::board_container_style(board_theme, styles::BoardSquareStyle::Light);
+                }
+            } else {
+                if selected {
+                    square_style = styles::board_button_style(
                         board_theme,
-                        styles::BoardSquareStyle::Paper,
-                    )
+                        styles::BoardSquareStyle::SelectedDark,
+                    );
+                    container_style = styles::board_container_style(
+                        board_theme,
+                        styles::BoardSquareStyle::SelectedDark,
+                    );
+                } else {
+                    square_style =
+                        styles::board_button_style(board_theme, styles::BoardSquareStyle::Dark);
+                    container_style =
+                        styles::board_container_style(board_theme, styles::BoardSquareStyle::Dark);
+                }
+            }
+
+            if let Some(piece) = piece {
+                let piece_index = if color.unwrap() == Color::White {
+                    match piece {
+                        Piece::Pawn => PieceWithColor::WhitePawn.index(),
+                        Piece::Rook => PieceWithColor::WhiteRook.index(),
+                        Piece::Knight => PieceWithColor::WhiteKnight.index(),
+                        Piece::Bishop => PieceWithColor::WhiteBishop.index(),
+                        Piece::Queen => PieceWithColor::WhiteQueen.index(),
+                        Piece::King => PieceWithColor::WhiteKing.index(),
+                    }
+                } else {
+                    match piece {
+                        Piece::Pawn => PieceWithColor::BlackPawn.index(),
+                        Piece::Rook => PieceWithColor::BlackRook.index(),
+                        Piece::Knight => PieceWithColor::BlackKnight.index(),
+                        Piece::Bishop => PieceWithColor::BlackBishop.index(),
+                        Piece::Queen => PieceWithColor::BlackQueen.index(),
+                        Piece::King => PieceWithColor::BlackKing.index(),
+                    }
                 };
 
-                if let Some(piece) = piece {
-                    if color.unwrap() == Color::White {
-                        text = match piece {
-                            Piece::Pawn => String::from("P"),
-                            Piece::Rook => String::from("R"),
-                            Piece::Knight => String::from("H"),
-                            Piece::Bishop => String::from("B"),
-                            Piece::Queen => String::from("Q"),
-                            Piece::King => String::from("K"),
-                        };
-                    } else {
-                        text = match piece {
-                            Piece::Pawn => String::from("O"),
-                            Piece::Rook => String::from("T"),
-                            Piece::Knight => String::from("J"),
-                            Piece::Bishop => String::from("N"),
-                            Piece::Queen => String::from("W"),
-                            Piece::King => String::from("L"),
-                        };
-                    }
-                    if light_square {
-                        text = text.to_lowercase();
-                    }
-                } else if light_square {
-                    text = String::from(" ");
-                } else {
-                    text = String::from("+");
-                }
-
-                board_row =
-                    board_row.push(Button::new(
-                        Text::new(text)
-                        .width(board_height)
-                        .height(board_height)
-                        .font(config::CHESS_ALPHA)
-                        .size(board_height)
-                        .align_y(alignment::Vertical::Center)
-                        .line_height(LineHeight::Absolute(board_height.into())
-                    ))
-                .padding(0)
-                .on_press(Message::SelectSquare(pos))
-                .style(square_style)
+                board_row = board_row.push(
+                    container(
+                        iced_drop::droppable(
+                            Svg::new(imgs[piece_index].clone())
+                                .width(board_height)
+                                .height(board_height),
+                        )
+                        .drag_hide(true)
+                        .drag_center(true)
+                        .on_drop(move |point, rect| Message::DropPiece(pos, point, rect))
+                        .on_click(Message::SelectSquare(pos)),
+                    )
+                    .style(container_style)
+                    .id(board_ids[pos.to_index()].clone()),
                 );
             } else {
-                let square_style;
-                let container_style;
-
-                if light_square {
-                    if selected {
-                        square_style = styles::board_button_style(
-                            board_theme,
-                            styles::BoardSquareStyle::SelectedLight,
-                        );
-                        container_style = styles::board_container_style(
-                            board_theme,
-                            styles::BoardSquareStyle::SelectedLight,
-                        );
-                    } else {
-                        square_style = styles::board_button_style(
-                            board_theme,
-                            styles::BoardSquareStyle::Light,
-                        );
-                        container_style = styles::board_container_style(
-                            board_theme,
-                            styles::BoardSquareStyle::Light,
-                        );
-                    }
-                } else {
-                    if selected {
-                        square_style = styles::board_button_style(
-                            board_theme,
-                            styles::BoardSquareStyle::SelectedDark,
-                        );
-                        container_style = styles::board_container_style(
-                            board_theme,
-                            styles::BoardSquareStyle::SelectedDark,
-                        );
-                    } else {
-                        square_style = styles::board_button_style(
-                            board_theme,
-                            styles::BoardSquareStyle::Dark,
-                        );
-                        container_style = styles::board_container_style(
-                            board_theme,
-                            styles::BoardSquareStyle::Dark,
-                        );
-                    }
-                }
-
-                if let Some(piece) = piece {
-                    let piece_index = if color.unwrap() == Color::White {
-                        match piece {
-                            Piece::Pawn => PieceWithColor::WhitePawn.index(),
-                            Piece::Rook => PieceWithColor::WhiteRook.index(),
-                            Piece::Knight => PieceWithColor::WhiteKnight.index(),
-                            Piece::Bishop => PieceWithColor::WhiteBishop.index(),
-                            Piece::Queen => PieceWithColor::WhiteQueen.index(),
-                            Piece::King => PieceWithColor::WhiteKing.index(),
-                        }
-                    } else {
-                        match piece {
-                            Piece::Pawn => PieceWithColor::BlackPawn.index(),
-                            Piece::Rook => PieceWithColor::BlackRook.index(),
-                            Piece::Knight => PieceWithColor::BlackKnight.index(),
-                            Piece::Bishop => PieceWithColor::BlackBishop.index(),
-                            Piece::Queen => PieceWithColor::BlackQueen.index(),
-                            Piece::King => PieceWithColor::BlackKing.index(),
-                        }
-                    };
-
-                    board_row = board_row.push(
-                        container(
-                            iced_drop::droppable(
-                                Svg::new(imgs[piece_index].clone()).width(board_height)
-                                .height(board_height)
-                            ).drag_hide(true).drag_center(true).on_drop(move |point, rect| Message::DropPiece(pos, point, rect)).on_click(Message::SelectSquare(pos))
-                        ).style(container_style).id(board_ids[pos.to_index()].clone())
-                     );
-                } else {
-                    board_row = board_row.push(container(
-                            Button::new(Text::new(""))
+                board_row = board_row.push(
+                    container(
+                        Button::new(Text::new(""))
                             .width(board_height)
                             .height(board_height)
                             .on_press(Message::SelectSquare(pos))
-                            .style(square_style)
-                        ).id(board_ids[pos.to_index()].clone())
-                    );
-                }
+                            .style(square_style),
+                    )
+                    .id(board_ids[pos.to_index()].clone()),
+                );
             }
         }
 

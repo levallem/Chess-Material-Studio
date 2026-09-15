@@ -133,19 +133,12 @@ Chess Material Studio is an independent project derived from [offline-chess-puzz
 - [Lichess](https://lichess.org/) for creating and publishing the [Lichess Puzzle Database](https://database.lichess.org/#puzzles), which Chess Material Studio supports as its primary puzzle source.
 - [chess-engine](https://github.com/adam-mcdaniel/chess-engine/) for serving as a starting point for the original GUI work.
 - The [Iced](https://github.com/iced-rs/iced) project, which provides the GUI framework used by the application.
-- The creators of the bundled chess piece sets and fonts listed below.
+- Colin M. L. Burnett and the Noto Project Authors for the bundled chess piece set and fonts.
 
 ## License and third-party assets
 
 The source code is distributed under the [MIT License](LICENSE), preserving the existing upstream copyright and license notice.
 
-Third-party fonts, chess piece sets, and other assets may use separate licenses or usage terms and are not covered by a blanket MIT claim. The repository currently records these credits:
+Third-party assets are not covered by the source-code MIT license. The bundled assets are the **Cburnett** SVG chess pieces, **Noto Sans**, and **Noto Sans Symbols 2**. Move sounds are synthesized at runtime, so no third-party audio files are shipped. The full Lichess puzzle database is supported as an optional download but is not included.
 
-- **cburnett** — created by Colin M. L. Burnett and provided under CC BY-SA 3.0 Unported; see `pieces/cburnett/license.txt`.
-- **California** — created by Jerry S.; currently attributed as CC BY-NC-SA 4.0.
-- **Cardinal, Dubrovny, Gioco, Icpieces, Maestro, Staunty, Governor, and Tatiana** — created by sadsnake1, currently attributed as CC BY-NC-SA 4.0, and obtained from the Lichess/lila project.
-- **Chess Alpha** piece set and font — created by Eric Bentzen; the included documentation describes it as free for personal, non-commercial use. See the documents in `font/`.
-- **Noto Sans** — created by The Noto Project Authors. `NotoSans-Regular.ttf` is embedded as the regular text font in current PDF generation and is distributed under the SIL Open Font License 1.1; see [font/OFL.txt](font/OFL.txt).
-- **Merida** — the original font was created by Armando Hernandez Marroquin and described as freeware. The shaded version used here was created by Felix Kling and obtained from the Lichess/lila project.
-
-Consult the notices included with individual assets before redistributing them, and do not assume that every asset is licensed under MIT.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for authorship, versions, hashes, and license details.

@@ -4,7 +4,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
-use iced::Font;
 
 pub use crate::models::Puzzle;
 
@@ -13,8 +12,6 @@ pub static SETTINGS: LazyLock<OfflinePuzzlesConfig> = LazyLock::new(|| {
 });
 
 pub const MAX_RATING: i32 = 3600;
-pub const CHESS_ALPHA_BYTES: &[u8] = include_bytes!("../font/Alpha.ttf");
-pub const CHESS_ALPHA: Font = iced::Font::with_name("Chess Alpha");
 pub const PDF_TEXT_FONT_BYTES: &[u8] = include_bytes!("../font/NotoSans-Regular.ttf");
 pub const PDF_TEXT_FONT_NAME: &str = "NotoSans-Regular";
 pub const PDF_CHESS_SYMBOL_FONT_BYTES: &[u8] =
@@ -26,8 +23,6 @@ pub const PUZZLES_DIRECTORY: &str = "puzzles/";
 pub const TRANSLATIONS_DIRECTORY: &str = "./translations/";
 pub const PIECES_DIRECTORY: &str = "pieces/";
 pub const SETTINGS_FILE: &str = "settings.json";
-pub const ONE_PIECE_SOUND_FILE: &str = "1piece.ogg";
-pub const TWO_PIECES_SOUND_FILE: &str = "2pieces.ogg";
 pub const DATABASE_URL: &str = "ocp.db";
 
 // Iced widget IDs need to be static
@@ -519,17 +514,36 @@ mod tests {
     }
 
     #[test]
-    fn deserializing_config_normalizes_retired_piece_themes_only() {
-        let mut config_json = serde_json::to_value(OfflinePuzzlesConfig::default())
-            .expect("default config should serialize");
-        config_json["piece_theme"] = serde_json::json!("Tatiana");
-        config_json["engine_limit"] = serde_json::json!("nodes 42");
+    fn deserializing_config_normalizes_every_legacy_piece_theme() {
+        for legacy_theme in [
+            "Alpha",
+            "FontAlpha",
+            "Merida",
+            "California",
+            "Cardinal",
+            "Governor",
+            "Dubrovny",
+            "Gioco",
+            "Icpieces",
+            "Maestro",
+            "Staunty",
+            "Tatiana",
+        ] {
+            let mut config_json = serde_json::to_value(OfflinePuzzlesConfig::default())
+                .expect("default config should serialize");
+            config_json["piece_theme"] = serde_json::json!(legacy_theme);
+            config_json["engine_limit"] = serde_json::json!("nodes 42");
 
-        let config = deserialize_config(config_json.to_string().as_bytes())
-            .expect("persisted config should deserialize");
+            let config = deserialize_config(config_json.to_string().as_bytes())
+                .expect("persisted config should deserialize");
 
-        assert_eq!(config.piece_theme, styles::PieceTheme::Cburnett);
-        assert_eq!(config.engine_limit, "nodes 42");
+            assert_eq!(
+                config.piece_theme,
+                styles::PieceTheme::Cburnett,
+                "{legacy_theme}"
+            );
+            assert_eq!(config.engine_limit, "nodes 42", "{legacy_theme}");
+        }
     }
 
     fn tmp_path(name: &str) -> std::path::PathBuf {

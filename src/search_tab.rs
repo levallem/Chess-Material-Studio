@@ -1,6 +1,5 @@
 use iced::widget::svg::Handle;
 use iced::widget::{Container, Button, column as col, Text, Radio, row, Row, Svg, PickList, Slider, Scrollable, Space};
-use iced::widget::text::LineHeight;
 use iced::{alignment, Alignment, Element, Length, Task, Theme};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -691,61 +690,23 @@ impl Tab for SearchTab {
         }
 
         let mut row_promotion = Row::new().spacing(5).align_y(Alignment::Center);
-        if self.piece_theme_promotion == PieceTheme::FontAlpha {
-            // Promotion piece selector
-            for i in 0..4 {
-                let piece;
-                let mut text;
-                match i {
-                    0 => {
-                        piece = Piece::Rook;
-                        text = String::from("r");
-                    }
-                    1 => {
-                        piece = Piece::Knight;
-                        text = String::from("h");
-                    }
-                    2 => {
-                        piece = Piece::Bishop;
-                        text = String::from("b");
-                    }
-                    _ => {
-                        piece = Piece::Queen;
-                        text = String::from("q");
-                    }
-                };
-                if self.piece_to_promote_to == piece {
-                    text = text.to_uppercase();
-                };
-                row_promotion = row_promotion.push(Row::new().spacing(0).align_y(Alignment::Center)
-                    .push(Button::new(
-                        Text::new(text).font(config::CHESS_ALPHA).size(60).align_y(Alignment::Center).line_height(LineHeight::Absolute(60.into()))
-                    )
-                    .padding(0)
+        for piece in PROMOTION_PIECES {
+            let square_style: styles::ChessBtn = if self.piece_to_promote_to == piece {
+                styles::btn_style_dark_square
+            } else {
+                styles::btn_style_light_square
+            };
+            row_promotion = row_promotion.push(
+                Row::new()
                     .width(60)
                     .height(60)
-                    .style(styles::btn_style_paper)
-                    .on_press(SearchMesssage::SelectPiecePromotion(piece))
-                ));
-            }
-        } else {
-            for piece in PROMOTION_PIECES {
-                let square_style: styles::ChessBtn =
-                    if self.piece_to_promote_to == piece {
-                        styles::btn_style_dark_square
-                    } else {
-                        styles::btn_style_light_square
-                    };
-                row_promotion = row_promotion.push(
-                    Row::new().width(60).height(60).align_y(Alignment::Start)
-                    .push(Button::new(
-                        Svg::new(self.promotion_piece_img[piece.to_index()].clone())
-                    )
-                    .on_press(SearchMesssage::SelectPiecePromotion(piece))
-                    .style(square_style)
-                ));
-            }
-
+                    .align_y(Alignment::Start)
+                    .push(
+                        Button::new(Svg::new(self.promotion_piece_img[piece.to_index()].clone()))
+                            .on_press(SearchMesssage::SelectPiecePromotion(piece))
+                            .style(square_style),
+                    ),
+            );
         }
 
         search_col = search_col.push(Space::new().height(10));

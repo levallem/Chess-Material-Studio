@@ -71,15 +71,13 @@ pub enum PieceTheme {
 }
 
 impl PieceTheme {
-    pub const ALL: [PieceTheme; 3] = [
-        PieceTheme::Cburnett,
-        PieceTheme::Alpha,
-        PieceTheme::FontAlpha,
-    ];
+    pub const ALL: [PieceTheme; 1] = [PieceTheme::Cburnett];
 
     pub fn normalize(self) -> Self {
         match self {
-            Self::California
+            Self::Alpha
+            | Self::FontAlpha
+            | Self::California
             | Self::Cardinal
             | Self::Governor
             | Self::Dubrovny
@@ -89,7 +87,7 @@ impl PieceTheme {
             | Self::Staunty
             | Self::Tatiana
             | Self::Merida => Self::Cburnett,
-            retained => retained,
+            Self::Cburnett => Self::Cburnett,
         }
     }
 }
@@ -99,19 +97,15 @@ mod piece_theme_tests {
     use super::PieceTheme;
 
     #[test]
-    fn retained_piece_themes_remain_available_and_unchanged() {
-        for theme in [
-            PieceTheme::Cburnett,
-            PieceTheme::Alpha,
-            PieceTheme::FontAlpha,
-        ] {
-            assert_eq!(theme.normalize(), theme);
-        }
+    fn retained_piece_theme_remains_available_and_unchanged() {
+        assert_eq!(PieceTheme::Cburnett.normalize(), PieceTheme::Cburnett);
     }
 
     #[test]
     fn retired_piece_themes_normalize_to_cburnett() {
         for theme in [
+            PieceTheme::Alpha,
+            PieceTheme::FontAlpha,
             PieceTheme::California,
             PieceTheme::Cardinal,
             PieceTheme::Governor,
@@ -129,38 +123,34 @@ mod piece_theme_tests {
 
     #[test]
     fn available_piece_themes_only_lists_retained_themes() {
-        assert_eq!(
-            PieceTheme::ALL,
-            [
-                PieceTheme::Cburnett,
-                PieceTheme::Alpha,
-                PieceTheme::FontAlpha,
-            ]
-        );
+        assert_eq!(PieceTheme::ALL, [PieceTheme::Cburnett]);
+    }
+
+    #[test]
+    fn every_piece_theme_uses_the_retained_asset_directory_name() {
+        for theme in [
+            PieceTheme::Cburnett,
+            PieceTheme::Alpha,
+            PieceTheme::FontAlpha,
+            PieceTheme::California,
+            PieceTheme::Cardinal,
+            PieceTheme::Governor,
+            PieceTheme::Dubrovny,
+            PieceTheme::Gioco,
+            PieceTheme::Icpieces,
+            PieceTheme::Maestro,
+            PieceTheme::Staunty,
+            PieceTheme::Tatiana,
+            PieceTheme::Merida,
+        ] {
+            assert_eq!(theme.to_string(), "cburnett");
+        }
     }
 }
 
 impl std::fmt::Display for PieceTheme {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                PieceTheme::Alpha => "alpha",
-                PieceTheme::Merida => "merida",
-                PieceTheme::California => "california",
-                PieceTheme::Cardinal => "cardinal",
-                PieceTheme::Governor => "governor",
-                PieceTheme::Dubrovny => "dubrovny",
-                PieceTheme::Gioco => "gioco",
-                PieceTheme::Icpieces => "icpieces",
-                PieceTheme::Maestro => "maestro",
-                PieceTheme::Staunty => "staunty",
-                PieceTheme::Tatiana => "tatiana",
-                PieceTheme::FontAlpha => "Paper - chess alpha",
-                _ => "cburnett",
-            }
-        )
+        f.write_str("cburnett")
     }
 }
 
@@ -336,27 +326,12 @@ pub fn btn_style_dark_square(theme: &iced::Theme, _status: iced::widget::button:
     }
 }
 
-pub fn btn_style_paper(_theme: &iced::Theme, _status: iced::widget::button::Status) -> button::Style {
-    //let palette = theme.palette();
-    button::Style {
-        background: Some(iced::Background::Color(rgb!(245., 245., 245.))),
-        text_color: rgb!(45., 45., 45.),
-        border: Border {
-            color: iced::Color::BLACK,
-            width: 0.,
-            radius: 0.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoardSquareStyle {
     Light,
     Dark,
     SelectedLight,
     SelectedDark,
-    Paper,
 }
 
 pub fn board_button_style(
@@ -370,7 +345,6 @@ pub fn board_button_style(
             BoardSquareStyle::Dark => palette.dark_square,
             BoardSquareStyle::SelectedLight => palette.selected_light_square,
             BoardSquareStyle::SelectedDark => palette.selected_dark_square,
-            BoardSquareStyle::Paper => rgb!(245., 245., 245.),
         };
 
         button::Style {
@@ -477,20 +451,6 @@ pub fn slider_style(theme: &iced::Theme, status: slider::Status) -> slider::Styl
     }
 }
 
-pub fn _container_style_paper(_theme: &iced::Theme) -> container::Style {
-    //let palette = theme.palette();
-    container::Style {
-        background: Some(iced::Background::Color(rgb!(245., 245., 245.))),
-        text_color: Some(rgb!(45., 45., 45.)),
-        border: Border {
-            color: iced::Color::BLACK,
-            width: 0.,
-            radius: 0.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
 pub fn board_container_style(
     board_theme: BoardTheme,
     square_style: BoardSquareStyle,
@@ -502,7 +462,6 @@ pub fn board_container_style(
             BoardSquareStyle::Dark => palette.dark_square,
             BoardSquareStyle::SelectedLight => palette.selected_light_square,
             BoardSquareStyle::SelectedDark => palette.selected_dark_square,
-            BoardSquareStyle::Paper => rgb!(245., 245., 245.),
         };
 
         container::Style {
