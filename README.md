@@ -124,6 +124,10 @@ sudo apt-get install libasound2-dev libgtk-3-dev libsqlite3-dev
 
 Package names may differ on other Linux distributions. The project is also configured to build on macOS and on 64-bit and 32-bit Windows; no additional platform-specific prerequisites are currently documented for those systems.
 
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, quality gates, and pull request expectations.
+
 ## Project history and upstream
 
 Chess Material Studio is an independent project derived from [offline-chess-puzzles](https://github.com/brianch/offline-chess-puzzles), originally created by [brianch](https://github.com/brianch). The project retains the original attribution and MIT license while continuing under its current name and scope.
