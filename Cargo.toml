@@ -1,8 +1,14 @@
 [package]
 name = "chess-material-studio"
-version = "2.5.2"
+version = "2.6.0"
 authors = ["brianch <brianch@users.noreply.github.com>"]
 edition = "2024"
+description = "Offline desktop studio for searching, solving, reviewing, and exporting chess puzzles."
+license = "MIT"
+repository = "https://github.com/levallem/Chess-Material-Studio"
+readme = "README.md"
+keywords = ["chess", "chess-puzzles", "chess-training", "offline", "iced"]
+categories = ["games", "gui"]
 
 [dependencies]
 iced = { version = "0.14", default-features = false, features = ["svg", "tokio", "lazy", "advanced", "advanced-shaping"] }

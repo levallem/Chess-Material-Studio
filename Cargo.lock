@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "chess-material-studio"
-version = "2.5.2"
+version = "2.6.0"
 dependencies = [
  "chess",
  "chrono",
