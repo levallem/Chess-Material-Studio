@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 pub use crate::models::Puzzle;
 
-pub static SETTINGS: LazyLock<OfflinePuzzlesConfig> = LazyLock::new(|| load_config());
+pub static SETTINGS: LazyLock<OfflinePuzzlesConfig> = LazyLock::new(load_config);
 
 pub const MAX_RATING: i32 = 3600;
 pub const PDF_TEXT_FONT_BYTES: &[u8] = include_bytes!("../font/NotoSans-Regular.ttf");

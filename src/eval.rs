@@ -43,11 +43,11 @@ fn parse_uci_info_line(line: &str) -> (Option<String>, Option<String>) {
                 }
             }
             "pv" => {
-                if let Some(candidate) = tokens.get(index + 1) {
-                    if crate::puzzles::parse_uci_move(candidate).is_ok() {
-                        best_move = Some((*candidate).to_string());
-                        break;
-                    }
+                if let Some(candidate) = tokens.get(index + 1)
+                    && crate::puzzles::parse_uci_move(candidate).is_ok()
+                {
+                    best_move = Some((*candidate).to_string());
+                    break;
                 }
             }
             _ => {}
@@ -158,6 +158,10 @@ mod tests {
         );
     }
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The engine state owns process resources; boxing would change lifecycle ownership."
+)]
 pub enum EngineState {
     Start,
     Thinking(

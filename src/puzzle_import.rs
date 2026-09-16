@@ -139,10 +139,10 @@ fn import_puzzles_from_reader_chunked_impl<R: std::io::Read>(
     if source_key.is_empty() {
         return Err("source_key must not be empty".into());
     }
-    if let Some(limit) = max_rows {
-        if limit == 0 {
-            return Err("max_rows must be greater than 0".into());
-        }
+    if let Some(limit) = max_rows
+        && limit == 0
+    {
+        return Err("max_rows must be greater than 0".into());
     }
 
     let mut reader = csv::ReaderBuilder::new()
@@ -155,10 +155,10 @@ fn import_puzzles_from_reader_chunked_impl<R: std::io::Read>(
     }
 
     // When limited, if already at or past the target, nothing to do.
-    if let Some(limit) = max_rows {
-        if completed_rows as usize >= limit {
-            return Ok(0);
-        }
+    if let Some(limit) = max_rows
+        && completed_rows as usize >= limit
+    {
+        return Ok(0);
     }
 
     let max_insertable = max_rows.map(|limit| limit - completed_rows as usize);

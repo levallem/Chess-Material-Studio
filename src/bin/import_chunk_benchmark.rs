@@ -99,7 +99,7 @@ fn parse_args() -> Result<ParseOutcome, String> {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 fn ceiling_div(n: usize, d: usize) -> usize {
-    (n + d - 1) / d
+    n.div_ceil(d)
 }
 
 fn row_count(conn: &mut SqliteConnection) -> Result<i64, String> {

@@ -372,6 +372,10 @@ fn adapt_sqlite_puzzle(puzzle: chess_material_studio::models::Puzzle) -> config:
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserves the established search-filter API without a redesign."
+)]
 fn search_csv_from_path(
     csv_path: &Path,
     min_rating: i32,
@@ -406,7 +410,7 @@ fn search_csv_from_path(
                 csv_path.display()
             )
         })?;
-        let opening_matches = opening_tag.map_or(true, |tag| record.opening.contains(tag));
+        let opening_matches = opening_tag.is_none_or(|tag| record.opening.contains(tag));
         let side_matches = match (opening_tag, side) {
             (None, _) | (_, OpeningSide::Any) => true,
             (Some(_), OpeningSide::Black) => !record.game_url.contains("black"),
@@ -443,6 +447,10 @@ fn validate_search_input(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserves the established search-filter API without a redesign."
+)]
 fn search_sqlite_from_path(
     db_path: &Path,
     min_rating: i32,
@@ -515,6 +523,10 @@ fn filter_excluded_puzzles(
         .collect()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserves the established search-filter API without a redesign."
+)]
 pub fn search_with_config(
     config: &config::OfflinePuzzlesConfig,
     min_rating: i32,
@@ -555,6 +567,10 @@ pub fn search_with_config(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserves the established search-filter API without a redesign."
+)]
 fn search_with_config_excluding(
     config: &config::OfflinePuzzlesConfig,
     min_rating: i32,
@@ -671,6 +687,10 @@ impl SearchTab {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Preserves the established persisted-filter API without a redesign."
+    )]
     fn save_search_settings_to_path(
         path: &Path,
         min_rating: i32,
@@ -693,6 +713,10 @@ impl SearchTab {
         config::persist_config_to_path(&config, path)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Preserves the established asynchronous search API without a redesign."
+    )]
     pub async fn search_favs(
         min_rating: i32,
         max_rating: i32,
@@ -789,6 +813,10 @@ impl SearchTab {
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Preserves the established asynchronous search API without a redesign."
+    )]
     pub async fn search(
         min_rating: i32,
         max_rating: i32,
@@ -1238,8 +1266,10 @@ mod tests {
 
     #[test]
     fn exclusions_propagate_search_errors() {
-        let mut cfg = config::OfflinePuzzlesConfig::default();
-        cfg.puzzle_db_location = tmp_path("missing.csv").to_string_lossy().into_owned();
+        let cfg = config::OfflinePuzzlesConfig {
+            puzzle_db_location: tmp_path("missing.csv").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
         let excluded = std::collections::HashSet::from(["already-reviewed".to_owned()]);
 
         assert!(
@@ -1264,8 +1294,10 @@ mod tests {
         let csv_path = setup_test_csv();
         let db_path = setup_test_sqlite();
         let excluded = std::collections::HashSet::from(["00008".to_owned()]);
-        let mut csv_config = config::OfflinePuzzlesConfig::default();
-        csv_config.puzzle_db_location = csv_path.to_string_lossy().into_owned();
+        let csv_config = config::OfflinePuzzlesConfig {
+            puzzle_db_location: csv_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
         let mut sqlite_config = csv_config.clone();
         sqlite_config.puzzle_sqlite_location = Some(db_path.to_string_lossy().into_owned());
 
@@ -1296,8 +1328,10 @@ mod tests {
         let db_path = setup_test_sqlite();
         let csv_path = setup_test_csv();
         let excluded = std::collections::HashSet::from(["00008".to_owned(), "00009".to_owned()]);
-        let mut csv_config = config::OfflinePuzzlesConfig::default();
-        csv_config.puzzle_db_location = csv_path.to_string_lossy().into_owned();
+        let csv_config = config::OfflinePuzzlesConfig {
+            puzzle_db_location: csv_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
         let mut sqlite_config = csv_config.clone();
         sqlite_config.puzzle_sqlite_location = Some(db_path.to_string_lossy().into_owned());
 
@@ -1374,10 +1408,12 @@ mod tests {
     #[test]
     fn save_search_settings_preserves_custom_limit_and_unrelated_fields() {
         let path = tmp_path("search_settings_existing.json");
-        let mut existing = config::OfflinePuzzlesConfig::default();
-        existing.search_results_limit = 500;
-        existing.engine_limit = "nodes 42".into();
-        existing.interface_theme = styles::InterfaceTheme::Dark;
+        let existing = config::OfflinePuzzlesConfig {
+            search_results_limit: 500,
+            engine_limit: "nodes 42".into(),
+            interface_theme: styles::InterfaceTheme::Dark,
+            ..Default::default()
+        };
         serde_json::to_writer_pretty(
             std::fs::File::create(&path).expect("test settings should be created"),
             &existing,
@@ -1422,8 +1458,10 @@ mod tests {
     #[test]
     fn save_current_search_settings_persists_live_filters_without_starting_search() {
         let path = tmp_path("live_search_settings.json");
-        let mut existing = config::OfflinePuzzlesConfig::default();
-        existing.engine_limit = "nodes 77".into();
+        let existing = config::OfflinePuzzlesConfig {
+            engine_limit: "nodes 77".into(),
+            ..Default::default()
+        };
         config::persist_config_to_path(&existing, &path).expect("test settings should persist");
 
         let mut search_tab = SearchTab::new();
@@ -1501,9 +1539,11 @@ mod tests {
     #[test]
     fn test_none_sqlite_uses_csv() {
         let csv_path = setup_test_csv();
-        let mut cfg = config::OfflinePuzzlesConfig::default();
-        cfg.puzzle_sqlite_location = None;
-        cfg.puzzle_db_location = csv_path.to_str().unwrap().to_string();
+        let cfg = config::OfflinePuzzlesConfig {
+            puzzle_sqlite_location: None,
+            puzzle_db_location: csv_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
 
         let results = search_with_config(
             &cfg,
@@ -1529,9 +1569,11 @@ mod tests {
     #[test]
     fn test_some_sqlite_uses_sqlite() {
         let db_path = setup_test_sqlite();
-        let mut cfg = config::OfflinePuzzlesConfig::default();
-        cfg.puzzle_sqlite_location = Some(db_path.to_str().unwrap().to_string());
-        cfg.puzzle_db_location = "/nonexistent/path.csv".to_string();
+        let cfg = config::OfflinePuzzlesConfig {
+            puzzle_sqlite_location: Some(db_path.to_str().unwrap().to_string()),
+            puzzle_db_location: "/nonexistent/path.csv".to_string(),
+            ..Default::default()
+        };
 
         let results = search_with_config(
             &cfg,
@@ -1557,9 +1599,11 @@ mod tests {
     #[test]
     fn test_sqlite_error_no_fallback() {
         let csv_path = setup_test_csv();
-        let mut cfg = config::OfflinePuzzlesConfig::default();
-        cfg.puzzle_sqlite_location = Some("/nonexistent/db.sqlite".to_string());
-        cfg.puzzle_db_location = csv_path.to_str().unwrap().to_string();
+        let cfg = config::OfflinePuzzlesConfig {
+            puzzle_sqlite_location: Some("/nonexistent/db.sqlite".to_string()),
+            puzzle_db_location: csv_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
 
         let results = search_with_config(
             &cfg,

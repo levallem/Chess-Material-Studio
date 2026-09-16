@@ -836,10 +836,10 @@ impl ProjectTab {
     fn load_puzzle_review_after_error(&mut self, context: PuzzleReviewContext, error: String) {
         self.load_puzzle_review(context, true);
         let error_status = self.review_error_status(&error);
-        if let Some(cache) = self.review_cache.as_mut() {
-            if cache.status.is_empty() {
-                cache.status = error_status;
-            }
+        if let Some(cache) = self.review_cache.as_mut()
+            && cache.status.is_empty()
+        {
+            cache.status = error_status;
         }
     }
 

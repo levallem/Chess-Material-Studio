@@ -273,10 +273,8 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
 
     // Full mode: DB must be within target/cms_full_import/
-    if args.mode == ImportMode::Full {
-        if !is_path_within_full_import_dir(&args.db)? {
-            return Err("Full import DB must be within target/cms_full_import/ directory".into());
-        }
+    if args.mode == ImportMode::Full && !is_path_within_full_import_dir(&args.db)? {
+        return Err("Full import DB must be within target/cms_full_import/ directory".into());
     }
 
     if args.db.exists() && !args.resume {
@@ -396,7 +394,6 @@ fn main() {
     match parse_args() {
         Ok(ParseOutcome::Help) => {
             print_usage();
-            return;
         }
         Ok(ParseOutcome::Run(args)) => {
             if let Err(e) = validate_args(&args) {
@@ -478,18 +475,18 @@ fn main() {
             let elapsed = start.elapsed();
 
             // Verify the source key did not change between preflight and import.
-            if let Some(ref expected) = preflight_source_key {
-                if &result.source_key != expected {
-                    let import_kind = match &args.mode {
-                        ImportMode::Limited { .. } => "limited import",
-                        ImportMode::Full => "full import",
-                    };
-                    eprintln!(
-                        "Cannot resume {}: CSV source identity does not match checkpoint",
-                        import_kind
-                    );
-                    std::process::exit(1);
-                }
+            if let Some(ref expected) = preflight_source_key
+                && &result.source_key != expected
+            {
+                let import_kind = match &args.mode {
+                    ImportMode::Limited { .. } => "limited import",
+                    ImportMode::Full => "full import",
+                };
+                eprintln!(
+                    "Cannot resume {}: CSV source identity does not match checkpoint",
+                    import_kind
+                );
+                std::process::exit(1);
             }
 
             let final_rows = match row_count(&mut conn) {

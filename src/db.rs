@@ -26,6 +26,10 @@ fn establish_connection_at(database_url: &str) -> Result<SqliteConnection, Strin
     Ok(connection)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserves the established favorites filter API without a redesign."
+)]
 pub fn get_favorites(
     min_rating: i32,
     max_rating: i32,
@@ -50,6 +54,10 @@ pub fn get_favorites(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserves the established favorites filter argument order."
+)]
 fn get_favorites_with_connection(
     conn: &mut SqliteConnection,
     min_rating: i32,

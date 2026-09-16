@@ -234,7 +234,7 @@ pub fn create_project(path: &Path, project_name: &str) -> Result<ProjectMetadata
 
     let path_string = project_path_string(path)?;
     let result = (|| {
-        let mut connection = SqliteConnection::establish(&path_string)
+        let mut connection = SqliteConnection::establish(path_string)
             .map_err(|error| format!("cannot create SQLite project: {error}"))?;
         connection
             .run_pending_migrations(PROJECT_MIGRATIONS)
@@ -551,7 +551,7 @@ fn open_validated_project_connection(path: &Path) -> Result<SqliteConnection, St
     }
 
     let path_string = project_path_string(path)?;
-    let mut connection = SqliteConnection::establish(&path_string)
+    let mut connection = SqliteConnection::establish(path_string)
         .map_err(|error| format!("cannot open SQLite project: {error}"))?;
     let row = read_project_metadata(&mut connection)?;
     if row.application_id != PROJECT_APPLICATION_ID {
@@ -589,7 +589,7 @@ fn open_read_only_project_connection(path: &Path) -> Result<SqliteConnection, St
     }
 
     let path_string = project_path_string(path)?;
-    let mut connection = SqliteConnection::establish(&path_string)
+    let mut connection = SqliteConnection::establish(path_string)
         .map_err(|error| format!("cannot open SQLite project: {error}"))?;
     let row = read_project_metadata(&mut connection)?;
     if row.application_id != PROJECT_APPLICATION_ID {

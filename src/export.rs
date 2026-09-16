@@ -2209,9 +2209,10 @@ mod tests {
         assert_eq!(tokens.len(), expected_uci.len());
 
         for (san, uci) in tokens.iter().zip(expected_uci.iter()) {
-            let mv_san =
-                ChessMove::from_san(&board, san).expect(&format!("Failed to parse SAN: {}", san));
-            let mv_uci = ChessMove::from_str(uci).expect(&format!("Failed to parse UCI: {}", uci));
+            let mv_san = ChessMove::from_san(&board, san)
+                .unwrap_or_else(|_| panic!("Failed to parse SAN: {}", san));
+            let mv_uci =
+                ChessMove::from_str(uci).unwrap_or_else(|_| panic!("Failed to parse UCI: {}", uci));
             assert_eq!(mv_san, mv_uci, "SAN/UCI mismatch: {} vs {}", san, uci);
             assert!(board.legal(mv_san));
             board = board.make_move_new(mv_san);
@@ -2626,10 +2627,10 @@ mod tests {
     fn extract_tj_texts(ops: &[Operation]) -> Vec<String> {
         ops.iter()
             .filter_map(|op| {
-                if op.operator == "Tj" {
-                    if let Some(Object::String(s, _)) = op.operands.first() {
-                        return String::from_utf8(s.clone()).ok();
-                    }
+                if op.operator == "Tj"
+                    && let Some(Object::String(s, _)) = op.operands.first()
+                {
+                    return String::from_utf8(s.clone()).ok();
                 }
                 None
             })

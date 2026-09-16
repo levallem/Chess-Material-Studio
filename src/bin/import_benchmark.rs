@@ -16,6 +16,10 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
+#[allow(
+    dead_code,
+    reason = "Only a subset of benchmark mapping types is used."
+)]
 #[path = "../models.rs"]
 mod models;
 #[path = "../schema.rs"]

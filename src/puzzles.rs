@@ -154,6 +154,10 @@ pub fn validate_puzzle_batch(puzzles: &[config::Puzzle]) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "Tests remain beside their behavior to avoid a large source-order-only move."
+)]
 mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};

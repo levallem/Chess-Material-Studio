@@ -417,6 +417,10 @@ impl SettingsTab {
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Preserves the existing settings payload contract without a UI refactor."
+    )]
     fn change_payload(
         mut config: config::OfflinePuzzlesConfig,
         play_sound: bool,
@@ -444,6 +448,10 @@ impl SettingsTab {
         config
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Preserves the existing asynchronous settings contract without a UI refactor."
+    )]
     pub async fn send_changes(
         play_sound: bool,
         auto_load: bool,
@@ -469,6 +477,10 @@ impl SettingsTab {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "Tests remain beside their behavior to avoid a large source-order-only move."
+)]
 mod tests {
     use super::*;
     use diesel::Connection;
@@ -521,17 +533,17 @@ mod tests {
             window_height: 600.0,
             ..config::OfflinePuzzlesConfig::default()
         };
-        config::persist_config_to_path(&persisted, &path)
+        config::persist_config_to_path(&persisted, path)
             .expect("test configuration should persist");
         let mut settings_tab = settings_tab_from_config(persisted);
         settings_tab.record_window_resize(iced::Size::new(1234.0, 567.0), false);
         settings_tab.record_window_resize(iced::Size::new(1900.0, 1000.0), true);
 
         settings_tab
-            .save_window_size_to_path(&path)
+            .save_window_size_to_path(path)
             .expect("window size should use the safe persistence helper");
 
-        let restored = config::load_config_from_path(&path);
+        let restored = config::load_config_from_path(path);
         assert_eq!(restored.window_width, 1234.0);
         assert_eq!(restored.window_height, 567.0);
         assert!(restored.maximized);
@@ -762,11 +774,13 @@ mod tests {
 
     #[test]
     fn puzzle_sqlite_location_update_preserves_unrelated_persisted_config() {
-        let mut persisted = config::OfflinePuzzlesConfig::default();
-        persisted.engine_limit = "nodes 123".into();
-        persisted.puzzle_db_location = "custom-puzzles.csv".into();
-        persisted.last_min_rating = 1234;
-        persisted.last_max_rating = 2345;
+        let persisted = config::OfflinePuzzlesConfig {
+            engine_limit: "nodes 123".into(),
+            puzzle_db_location: "custom-puzzles.csv".into(),
+            last_min_rating: 1234,
+            last_max_rating: 2345,
+            ..Default::default()
+        };
 
         let updated = with_puzzle_sqlite_location(persisted, Some("puzzles.sqlite".into()));
 
@@ -784,9 +798,11 @@ mod tests {
     fn sqlite_file_choice_updates_source_config_without_changing_other_settings() {
         let database = TempPuzzleDb::new("valid-selection");
         create_valid_puzzle_db(database.path());
-        let mut persisted = config::OfflinePuzzlesConfig::default();
-        persisted.engine_limit = "nodes 123".into();
-        persisted.puzzle_db_location = "custom-puzzles.csv".into();
+        let persisted = config::OfflinePuzzlesConfig {
+            engine_limit: "nodes 123".into(),
+            puzzle_db_location: "custom-puzzles.csv".into(),
+            ..Default::default()
+        };
 
         let selected = puzzle_sqlite_config_for_file_choice(persisted, Some(database.path()))
             .expect("a valid puzzle SQLite database should be accepted")

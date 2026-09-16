@@ -825,12 +825,12 @@ impl OfflinePuzzles {
     }
 
     fn consolidate_pending_window_resize_before_exit(&mut self, maximized: bool) {
-        if let Some(pending) = self.pending_window_resize.take() {
-            if pending.generation == self.window_resize_generation {
-                self.settings_tab
-                    .record_window_resize(pending.size, maximized);
-                return;
-            }
+        if let Some(pending) = self.pending_window_resize.take()
+            && pending.generation == self.window_resize_generation
+        {
+            self.settings_tab
+                .record_window_resize(pending.size, maximized);
+            return;
         }
 
         self.settings_tab.maximized = maximized;
@@ -931,11 +931,11 @@ impl OfflinePuzzles {
                 if message == config::GameMode::Analysis {
                     self.analysis = Game::new_with_board(self.board);
                 } else {
-                    if self.engine_state != EngineStatus::TurnedOff && self.engine_sender.is_some()
+                    if self.engine_state != EngineStatus::TurnedOff
+                        && self.engine_sender.is_some()
+                        && let Err(error) = self.send_engine_command(eval::STOP_COMMAND)
                     {
-                        if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
-                            return self.handle_engine_failure(error, false);
-                        }
+                        return self.handle_engine_failure(error, false);
                     }
                     self.analysis_history
                         .truncate(self.puzzle_tab.current_puzzle_move);
@@ -1001,10 +1001,11 @@ impl OfflinePuzzles {
                     return Task::none();
                 }
                 self.from_square = None;
-                if self.engine_state != EngineStatus::TurnedOff && self.engine_sender.is_some() {
-                    if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
-                        return self.handle_engine_failure(error, false);
-                    }
+                if self.engine_state != EngineStatus::TurnedOff
+                    && self.engine_sender.is_some()
+                    && let Err(error) = self.send_engine_command(eval::STOP_COMMAND)
+                {
+                    return self.handle_engine_failure(error, false);
                 }
                 self.refresh_current_favorite_status()
             }
@@ -1026,11 +1027,11 @@ impl OfflinePuzzles {
                         return Task::none();
                     }
                     self.from_square = None;
-                    if self.engine_state != EngineStatus::TurnedOff && self.engine_sender.is_some()
+                    if self.engine_state != EngineStatus::TurnedOff
+                        && self.engine_sender.is_some()
+                        && let Err(error) = self.send_engine_command(eval::STOP_COMMAND)
                     {
-                        if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
-                            return self.handle_engine_failure(error, false);
-                        }
+                        return self.handle_engine_failure(error, false);
                     }
                     return self.refresh_current_favorite_status();
                 } else {
@@ -1062,10 +1063,9 @@ impl OfflinePuzzles {
                             self.from_square = None;
                             if self.engine_state != EngineStatus::TurnedOff
                                 && self.engine_sender.is_some()
+                                && let Err(error) = self.send_engine_command(eval::STOP_COMMAND)
                             {
-                                if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
-                                    return self.handle_engine_failure(error, false);
-                                }
+                                return self.handle_engine_failure(error, false);
                             }
                             self.refresh_current_favorite_status()
                         } else {
@@ -1490,10 +1490,10 @@ impl OfflinePuzzles {
             (_, Message::HandleDropZones(from, zones)) => {
                 if !zones.is_empty() {
                     let id: &GenericId = &zones[0].0.clone();
-                    if let Some(to) = self.square_ids.get(id) {
-                        if self.verify_and_make_move(from, *to) {
-                            return self.refresh_current_favorite_status();
-                        }
+                    if let Some(to) = self.square_ids.get(id)
+                        && self.verify_and_make_move(from, *to)
+                    {
+                        return self.refresh_current_favorite_status();
                     }
                 }
                 Task::none()
@@ -1654,6 +1654,10 @@ impl OfflinePuzzles {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "Tests remain beside their behavior to avoid a large source-order-only move."
+)]
 mod tests {
     use super::*;
 
@@ -2140,20 +2144,22 @@ mod tests {
         );
     }
 
+    type PuzzleBatch = Vec<(
+        String,
+        String,
+        String,
+        i32,
+        i32,
+        i32,
+        i32,
+        String,
+        String,
+        String,
+    )>;
+
     #[derive(Debug, PartialEq, Eq)]
     struct NormalExportState {
-        puzzle_batch: Vec<(
-            String,
-            String,
-            String,
-            i32,
-            i32,
-            i32,
-            i32,
-            String,
-            String,
-            String,
-        )>,
+        puzzle_batch: PuzzleBatch,
         current_puzzle: usize,
         current_puzzle_move: usize,
         current_puzzle_side: Color,
@@ -3410,6 +3416,10 @@ pub async fn screenshot_save_dialog(img: Screenshot) -> Option<(Screenshot, Path
     file_path.map(|file_path| (img, file_path.path().to_path_buf()))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "View construction mirrors application state; restructuring it is outside this baseline."
+)]
 fn gen_view<'a>(
     game_mode: config::GameMode,
     current_puzzle_side: Color,
@@ -3463,14 +3473,16 @@ fn gen_view<'a>(
         + if puzzle_review.is_some() { 55. } else { 0. };
     let board_height = (size.height - board_controls_height) / 8.;
 
-    let ranks;
-    let files;
-    if is_white {
-        ranks = (0..8).rev().collect::<Vec<i32>>();
-        files = (0..8).collect::<Vec<i32>>();
+    let (ranks, files) = if is_white {
+        (
+            (0..8).rev().collect::<Vec<i32>>(),
+            (0..8).collect::<Vec<i32>>(),
+        )
     } else {
-        ranks = (0..8).collect::<Vec<i32>>();
-        files = (0..8).rev().collect::<Vec<i32>>();
+        (
+            (0..8).collect::<Vec<i32>>(),
+            (0..8).rev().collect::<Vec<i32>>(),
+        )
     };
     for rank in ranks {
         for file in &files {
