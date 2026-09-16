@@ -167,9 +167,10 @@ fn import_puzzles_from_reader_chunked_impl<R: std::io::Read>(
 
     // Skip already-confirmed rows, validating deserialization on each.
     for _ in 0..completed_rows {
-        iter.next()
-            .ok_or("checkpoint exceeds source rows — \
-                     source_key may refer to a different source")??;
+        iter.next().ok_or(
+            "checkpoint exceeds source rows — \
+                     source_key may refer to a different source",
+        )??;
     }
 
     let mut total_inserted = 0usize;
@@ -355,13 +356,8 @@ pub fn import_puzzles_from_file_chunked_limited<P: AsRef<std::path::Path>>(
 
     let source_key = puzzle_source_key_from_open_file(&mut file)?;
 
-    let inserted = import_puzzles_from_reader_chunked_limited(
-        conn,
-        file,
-        &source_key,
-        chunk_size,
-        max_rows,
-    )?;
+    let inserted =
+        import_puzzles_from_reader_chunked_limited(conn, file, &source_key, chunk_size, max_rows)?;
 
     Ok(PuzzleFileImportResult {
         source_key,
@@ -514,7 +510,10 @@ mod tests {
             .expect("puzzle 00010 should exist");
 
         assert_eq!(p.puzzle_id, "00010");
-        assert_eq!(p.fen, "r1bqkb1r/pppppppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3");
+        assert_eq!(
+            p.fen,
+            "r1bqkb1r/pppppppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3"
+        );
         assert_eq!(p.moves, "f3g5 e7e6 g5f7");
         assert_eq!(p.rating, 1700);
         assert_eq!(p.rating_deviation, 80);
@@ -535,20 +534,29 @@ mod tests {
             .filter(crate::schema::puzzles::dsl::puzzle_id.eq("00009"))
             .first::<Puzzle>(&mut conn)
             .expect("puzzle 00009 should exist");
-        assert_eq!(p.opening, "", "empty OpeningTags should be empty string, not NULL");
+        assert_eq!(
+            p.opening, "",
+            "empty OpeningTags should be empty string, not NULL"
+        );
     }
 
     #[test]
     fn test_importer_daily_date_ignored() {
         let mut conn = setup_test_db();
         let result = super::import_puzzles_from_reader(&mut conn, FIXTURE.as_bytes());
-        assert!(result.is_ok(), "importing CSV with DailyDate column should succeed");
+        assert!(
+            result.is_ok(),
+            "importing CSV with DailyDate column should succeed"
+        );
 
         let p: Puzzle = crate::schema::puzzles::table
             .filter(crate::schema::puzzles::dsl::puzzle_id.eq("00010"))
             .first::<Puzzle>(&mut conn)
             .expect("puzzle 00010 should exist");
-        assert_eq!(p.rating, 1700, "DailyDate should be ignored, puzzle parsed correctly");
+        assert_eq!(
+            p.rating, 1700,
+            "DailyDate should be ignored, puzzle parsed correctly"
+        );
     }
 
     #[test]
@@ -562,9 +570,8 @@ mod tests {
     #[test]
     fn test_transactional_importer_inserts_all_fixture_puzzles() {
         let mut conn = setup_test_db();
-        let count =
-            super::import_puzzles_from_reader_transactional(&mut conn, FIXTURE.as_bytes())
-                .expect("transactional import should succeed");
+        let count = super::import_puzzles_from_reader_transactional(&mut conn, FIXTURE.as_bytes())
+            .expect("transactional import should succeed");
         assert_eq!(count, 4, "fixture contains 4 puzzles");
 
         let rows: i64 = crate::schema::puzzles::table
@@ -591,7 +598,10 @@ mod tests {
             .count()
             .get_result(&mut conn)
             .expect("count query should succeed");
-        assert_eq!(rows, 0, "entire transaction should roll back, no partial rows");
+        assert_eq!(
+            rows, 0,
+            "entire transaction should roll back, no partial rows"
+        );
     }
 
     // ── CMS-006 tests ──────────────────────────────────────────────
@@ -636,13 +646,8 @@ mod tests {
     fn test_cms006_second_run_does_not_duplicate() {
         let mut conn = setup_test_db();
 
-        super::import_puzzles_from_reader_chunked(
-            &mut conn,
-            FIXTURE.as_bytes(),
-            "fixture-v1",
-            2,
-        )
-        .expect("first import");
+        super::import_puzzles_from_reader_chunked(&mut conn, FIXTURE.as_bytes(), "fixture-v1", 2)
+            .expect("first import");
 
         let inserted = super::import_puzzles_from_reader_chunked(
             &mut conn,
@@ -685,8 +690,7 @@ PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,Open
             .expect("seed partial state");
 
         // Step 2: set checkpoint for fixture-v1 = 2
-        super::upsert_checkpoint(&mut conn, "fixture-v1", 2)
-            .expect("set checkpoint");
+        super::upsert_checkpoint(&mut conn, "fixture-v1", 2).expect("set checkpoint");
 
         let rows: i64 = crate::schema::puzzles::table
             .count()
@@ -776,12 +780,8 @@ PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,Open
     #[test]
     fn test_cms006_empty_source_key_returns_error() {
         let mut conn = setup_test_db();
-        let result = super::import_puzzles_from_reader_chunked(
-            &mut conn,
-            FIXTURE.as_bytes(),
-            "",
-            2,
-        );
+        let result =
+            super::import_puzzles_from_reader_chunked(&mut conn, FIXTURE.as_bytes(), "", 2);
         assert!(result.is_err(), "empty source_key should return Err");
     }
 
@@ -798,20 +798,22 @@ PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,Open
             .execute(&mut conn)
             .expect("insert checkpoint");
 
-        let result = super::import_puzzles_from_reader_chunked(
-            &mut conn,
-            FIXTURE.as_bytes(),
-            "big-cp",
-            2,
+        let result =
+            super::import_puzzles_from_reader_chunked(&mut conn, FIXTURE.as_bytes(), "big-cp", 2);
+        assert!(
+            result.is_err(),
+            "checkpoint > source rows should return Err"
         );
-        assert!(result.is_err(), "checkpoint > source rows should return Err");
 
         // Verify no puzzles were inserted
         let rows: i64 = crate::schema::puzzles::table
             .count()
             .get_result(&mut conn)
             .expect("count");
-        assert_eq!(rows, 0, "no puzzles should be inserted when checkpoint is incompatible");
+        assert_eq!(
+            rows, 0,
+            "no puzzles should be inserted when checkpoint is incompatible"
+        );
     }
 
     #[test]
@@ -842,7 +844,10 @@ Rating,GameUrl,PuzzleId,OpeningTags,FEN,Moves,RatingDeviation,Popularity,NbPlays
 
         assert_eq!(p.puzzle_id, "00099");
         assert_eq!(p.rating, 2100);
-        assert_eq!(p.fen, "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+        assert_eq!(
+            p.fen,
+            "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+        );
         assert_eq!(p.opening, "Sicilian_Defense");
     }
 
@@ -903,7 +908,10 @@ Rating,GameUrl,PuzzleId,OpeningTags,FEN,Moves,RatingDeviation,Popularity,NbPlays
         let b = write_tmp("path_b", b"abc\n123\n");
         let ka = super::puzzle_source_key_from_file(&a).unwrap();
         let kb = super::puzzle_source_key_from_file(&b).unwrap();
-        assert_eq!(ka, kb, "same content must produce same key regardless of path");
+        assert_eq!(
+            ka, kb,
+            "same content must produce same key regardless of path"
+        );
         std::fs::remove_file(&a).ok();
         std::fs::remove_file(&b).ok();
     }
@@ -926,7 +934,11 @@ Rating,GameUrl,PuzzleId,OpeningTags,FEN,Moves,RatingDeviation,Popularity,NbPlays
         let key = super::puzzle_source_key_from_file(&p).unwrap();
         let expected_size = content.len();
         let prefix = format!("cms-source-v1:{}:", expected_size);
-        assert!(key.starts_with(&prefix), "key should contain file size, got: {}", key);
+        assert!(
+            key.starts_with(&prefix),
+            "key should contain file size, got: {}",
+            key
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -954,7 +966,10 @@ Rating,GameUrl,PuzzleId,OpeningTags,FEN,Moves,RatingDeviation,Popularity,NbPlays
         let result = super::import_puzzles_from_file_chunked(&mut conn, &p, 2)
             .expect("wrapper import should succeed");
         assert_eq!(result.inserted_rows, 4, "fixture has 4 puzzles");
-        assert!(!result.source_key.is_empty(), "source_key must not be empty");
+        assert!(
+            !result.source_key.is_empty(),
+            "source_key must not be empty"
+        );
 
         let rows: i64 = crate::schema::puzzles::table
             .count()
@@ -977,12 +992,10 @@ Rating,GameUrl,PuzzleId,OpeningTags,FEN,Moves,RatingDeviation,Popularity,NbPlays
         let p = write_tmp("fixture2", FIXTURE.as_bytes());
         let mut conn = setup_test_db();
 
-        let r1 = super::import_puzzles_from_file_chunked(&mut conn, &p, 2)
-            .expect("first import");
+        let r1 = super::import_puzzles_from_file_chunked(&mut conn, &p, 2).expect("first import");
         assert_eq!(r1.inserted_rows, 4);
 
-        let r2 = super::import_puzzles_from_file_chunked(&mut conn, &p, 2)
-            .expect("second import");
+        let r2 = super::import_puzzles_from_file_chunked(&mut conn, &p, 2).expect("second import");
         assert_eq!(r2.inserted_rows, 0, "second run should insert 0");
         assert_eq!(r1.source_key, r2.source_key, "source_key must be stable");
 
@@ -1154,7 +1167,10 @@ Rating,GameUrl,PuzzleId,OpeningTags,FEN,Moves,RatingDeviation,Popularity,NbPlays
 
         // source_key must be identical to full-file source_key
         let full_key = super::puzzle_source_key_from_file(&p).unwrap();
-        assert_eq!(result.source_key, full_key, "limited source_key must match full");
+        assert_eq!(
+            result.source_key, full_key,
+            "limited source_key must match full"
+        );
 
         let rows: i64 = crate::schema::puzzles::table
             .count()

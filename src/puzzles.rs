@@ -1,10 +1,10 @@
-use iced::widget::{Container, column as col, row, Scrollable, Text, TextInput, Button};
-use iced::window::Id;
-use iced::{alignment, Alignment, Element, Length, Task, Theme};
 use chess::{Board, ChessMove, Color, Piece, Square};
-use std::str::FromStr;
+use iced::widget::{Button, Container, Scrollable, Text, TextInput, column as col, row};
+use iced::window::Id;
+use iced::{Alignment, Element, Length, Task, Theme, alignment};
 use iced_aw::TabLabel;
 use rfd::AsyncFileDialog;
+use std::str::FromStr;
 
 use crate::styles::btn_style_simple;
 use crate::{Message, Tab, config, lang};
@@ -16,12 +16,14 @@ pub enum PuzzleMessage {
     OpenLink(String),
     TakeScreenshot,
     ExportToPDF,
-    ExportToPGN
+    ExportToPGN,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum GameStatus {
-    Playing, PuzzleEnded, NoPuzzles,
+    Playing,
+    PuzzleEnded,
+    NoPuzzles,
 }
 
 #[derive(Debug, Clone)]
@@ -52,30 +54,35 @@ impl PuzzleTab {
 
     pub fn update(&mut self, message: PuzzleMessage) -> Task<Message> {
         match message {
-            PuzzleMessage::ChangeTextInputs(_) => {
-                Task::none()
-            } PuzzleMessage::CopyText(text) => {
-                iced::clipboard::write::<Message>(text)
-            } PuzzleMessage::OpenLink(link) => {
+            PuzzleMessage::ChangeTextInputs(_) => Task::none(),
+            PuzzleMessage::CopyText(text) => iced::clipboard::write::<Message>(text),
+            PuzzleMessage::OpenLink(link) => {
                 let _ = open::that_detached(link);
                 Task::none()
-            } PuzzleMessage::TakeScreenshot => {
-                match self.window_id {
-                    Some(window_id) => iced::window::screenshot(window_id).map(Message::ScreenshotCreated),
-                    None => Task::done(Message::ScreenshotFailed(
-                        "screenshot window is not initialized".into(),
-                    )),
+            }
+            PuzzleMessage::TakeScreenshot => match self.window_id {
+                Some(window_id) => {
+                    iced::window::screenshot(window_id).map(Message::ScreenshotCreated)
                 }
-            } PuzzleMessage::ExportToPDF => {
+                None => Task::done(Message::ScreenshotFailed(
+                    "screenshot window is not initialized".into(),
+                )),
+            },
+            PuzzleMessage::ExportToPDF => {
                 Task::perform(PuzzleTab::export("pdf"), Message::ExportPDF)
-            } PuzzleMessage::ExportToPGN => {
+            }
+            PuzzleMessage::ExportToPGN => {
                 Task::perform(PuzzleTab::export("pgn"), Message::ExportPGN)
             }
         }
     }
 
     pub async fn export(format: &str) -> Option<String> {
-        let file_path = AsyncFileDialog::new().add_filter(format,&[format]).set_file_name(String::from("puzzles.") + format).save_file().await;
+        let file_path = AsyncFileDialog::new()
+            .add_filter(format, &[format])
+            .set_file_name(String::from("puzzles.") + format)
+            .save_file()
+            .await;
         file_path.map(|file_path| file_path.path().display().to_string())
     }
 
@@ -122,7 +129,9 @@ pub fn validate_puzzle(puzzle: &config::Puzzle) -> Result<(), String> {
     let mut board = Board::from_str(&puzzle.fen).map_err(|_| String::from("invalid FEN"))?;
     let moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
     if moves.len() < 2 {
-        return Err(String::from("moves are insufficient: need at least 2 moves"));
+        return Err(String::from(
+            "moves are insufficient: need at least 2 moves",
+        ));
     }
 
     for token in moves {
@@ -147,7 +156,7 @@ pub fn validate_puzzle_batch(puzzles: &[config::Puzzle]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     fn puzzle(id: &str, moves: &str) -> config::Puzzle {
         config::Puzzle {
@@ -162,10 +171,16 @@ mod tests {
     fn taking_a_screenshot_without_a_window_id_returns_a_recoverable_failure_task() {
         let mut tab = PuzzleTab::new();
 
-        let task = catch_unwind(AssertUnwindSafe(|| tab.update(PuzzleMessage::TakeScreenshot)))
-            .expect("missing window id must not panic");
+        let task = catch_unwind(AssertUnwindSafe(|| {
+            tab.update(PuzzleMessage::TakeScreenshot)
+        }))
+        .expect("missing window id must not panic");
 
-        assert_eq!(task.units(), 1, "missing window id must produce a failure task");
+        assert_eq!(
+            task.units(),
+            1,
+            "missing window id must produce a failure task"
+        );
     }
 
     #[test]
@@ -178,8 +193,16 @@ mod tests {
 
     #[test]
     fn validate_puzzle_rejects_missing_or_insufficient_moves() {
-        assert!(validate_puzzle(&puzzle("empty", "")).unwrap_err().contains("at least 2"));
-        assert!(validate_puzzle(&puzzle("short", "a1a2")).unwrap_err().contains("at least 2"));
+        assert!(
+            validate_puzzle(&puzzle("empty", ""))
+                .unwrap_err()
+                .contains("at least 2")
+        );
+        assert!(
+            validate_puzzle(&puzzle("short", "a1a2"))
+                .unwrap_err()
+                .contains("at least 2")
+        );
     }
 
     #[test]
@@ -191,12 +214,16 @@ mod tests {
 
     #[test]
     fn validate_puzzle_rejects_illegal_initial_and_later_moves() {
-        assert!(validate_puzzle(&puzzle("illegal-first", "a1a3 h1h2"))
-            .unwrap_err()
-            .contains("illegal move 'a1a3'"));
-        assert!(validate_puzzle(&puzzle("illegal-later", "a1a2 h1h2 a2a4"))
-            .unwrap_err()
-            .contains("illegal move 'a2a4'"));
+        assert!(
+            validate_puzzle(&puzzle("illegal-first", "a1a3 h1h2"))
+                .unwrap_err()
+                .contains("illegal move 'a1a3'")
+        );
+        assert!(
+            validate_puzzle(&puzzle("illegal-later", "a1a2 h1h2 a2a4"))
+                .unwrap_err()
+                .contains("illegal move 'a2a4'")
+        );
     }
 
     #[test]
@@ -207,9 +234,11 @@ mod tests {
             puzzle("invalid-third", "a1a2 i1i2"),
         ];
 
-        assert!(validate_puzzle_batch(&batch)
-            .unwrap_err()
-            .contains("Invalid puzzle data for invalid-third"));
+        assert!(
+            validate_puzzle_batch(&batch)
+                .unwrap_err()
+                .contains("Invalid puzzle data for invalid-third")
+        );
     }
 
     #[test]
@@ -224,9 +253,11 @@ mod tests {
 
     #[test]
     fn validate_puzzle_rejects_a_promotion_token_without_a_legal_promotion() {
-        assert!(validate_puzzle(&puzzle("not-a-promotion", "a1a2q h1h2"))
-            .unwrap_err()
-            .contains("illegal move 'a1a2q'"));
+        assert!(
+            validate_puzzle(&puzzle("not-a-promotion", "a1a2q h1h2"))
+                .unwrap_err()
+                .contains("illegal move 'a1a2q'")
+        );
     }
 }
 
@@ -242,53 +273,107 @@ impl Tab for PuzzleTab {
     }
 
     fn content(&self) -> Element<'_, Message> {
-        let col_puzzle_info = if !self.puzzles.is_empty() && self.current_puzzle < self.puzzles.len() {
-            Scrollable::new(col![
-                Text::new(lang::tr(&self.lang, "puzzle_link")),
-                row![
-                    TextInput::new("",
-                        &("https://lichess.org/training/".to_owned() + &self.puzzles[self.current_puzzle].puzzle_id),
-                    ).on_input(PuzzleMessage::ChangeTextInputs),
-                    Button::new(Text::new(lang::tr(&self.lang, "copy"))).on_press(PuzzleMessage::CopyText("https://lichess.org/training/".to_owned() + &self.puzzles[self.current_puzzle].puzzle_id)).style(btn_style_simple),
-                    Button::new(Text::new(lang::tr(&self.lang, "open"))).on_press(PuzzleMessage::OpenLink("https://lichess.org/training/".to_owned() + &self.puzzles[self.current_puzzle].puzzle_id)).style(btn_style_simple),
-
-                ],
-                Text::new(lang::tr(&self.lang, "fen")),
-                row![
-                    TextInput::new(
-                        &self.current_puzzle_fen,
-                        &self.current_puzzle_fen,
-                    ).on_input(PuzzleMessage::ChangeTextInputs),
-                    Button::new(Text::new(lang::tr(&self.lang, "copy"))).on_press(PuzzleMessage::CopyText(self.current_puzzle_fen.clone())).style(btn_style_simple),
-                ],
-                Text::new(lang::tr(&self.lang, "rating") + &self.puzzles[self.current_puzzle].rating.to_string()),
-                Text::new(lang::tr(&self.lang, "rd") + &self.puzzles[self.current_puzzle].rating_deviation.to_string()),
-                Text::new(lang::tr(&self.lang, "popularity") + &self.puzzles[self.current_puzzle].popularity.to_string()),
-                Text::new(lang::tr(&self.lang, "times_played") + &self.puzzles[self.current_puzzle].nb_plays.to_string()),
-                Text::new(lang::tr(&self.lang, "themes")),
-                Text::new(&self.puzzles[self.current_puzzle].themes),
-                Text::new(lang::tr(&self.lang, "url")),
-                row![
-                    TextInput::new(
-                        &self.puzzles[self.current_puzzle].game_url,
-                        &self.puzzles[self.current_puzzle].game_url,
-                    ).on_input(PuzzleMessage::ChangeTextInputs),
-                    Button::new(Text::new(lang::tr(&self.lang, "copy"))).on_press(PuzzleMessage::CopyText(self.puzzles[self.current_puzzle].game_url.clone())).style(btn_style_simple),
-                    Button::new(Text::new(lang::tr(&self.lang, "open"))).on_press(PuzzleMessage::OpenLink(self.puzzles[self.current_puzzle].game_url.clone())).style(btn_style_simple),
-                ],
-                Button::new(Text::new(lang::tr(&self.lang, "screenshot"))).on_press(PuzzleMessage::TakeScreenshot).style(btn_style_simple),
-                Button::new(Text::new(lang::tr(&self.lang, "export_pdf_btn"))).on_press(PuzzleMessage::ExportToPDF).style(btn_style_simple),
-                Button::new(Text::new(lang::tr(&self.lang, "export_pgn"))).padding(5).on_press(PuzzleMessage::ExportToPGN).style(btn_style_simple),
-            ].padding([0, 30]).spacing(10).align_x(Alignment::Center))
-        } else {
-            Scrollable::new(col![
-                    Text::new(lang::tr(&self.lang, "no_puzzle"))
-                    .align_x(alignment::Horizontal::Center)
-                    .width(Length::Fill)
-                ].spacing(10))
-        };
-        let content: Element<PuzzleMessage, Theme, iced::Renderer> = Container::new(col_puzzle_info)
-            .align_x(alignment::Horizontal::Center).height(Length::Fill).into();
+        let col_puzzle_info =
+            if !self.puzzles.is_empty() && self.current_puzzle < self.puzzles.len() {
+                Scrollable::new(
+                    col![
+                        Text::new(lang::tr(&self.lang, "puzzle_link")),
+                        row![
+                            TextInput::new(
+                                "",
+                                &("https://lichess.org/training/".to_owned()
+                                    + &self.puzzles[self.current_puzzle].puzzle_id),
+                            )
+                            .on_input(PuzzleMessage::ChangeTextInputs),
+                            Button::new(Text::new(lang::tr(&self.lang, "copy")))
+                                .on_press(PuzzleMessage::CopyText(
+                                    "https://lichess.org/training/".to_owned()
+                                        + &self.puzzles[self.current_puzzle].puzzle_id
+                                ))
+                                .style(btn_style_simple),
+                            Button::new(Text::new(lang::tr(&self.lang, "open")))
+                                .on_press(PuzzleMessage::OpenLink(
+                                    "https://lichess.org/training/".to_owned()
+                                        + &self.puzzles[self.current_puzzle].puzzle_id
+                                ))
+                                .style(btn_style_simple),
+                        ],
+                        Text::new(lang::tr(&self.lang, "fen")),
+                        row![
+                            TextInput::new(&self.current_puzzle_fen, &self.current_puzzle_fen,)
+                                .on_input(PuzzleMessage::ChangeTextInputs),
+                            Button::new(Text::new(lang::tr(&self.lang, "copy")))
+                                .on_press(PuzzleMessage::CopyText(self.current_puzzle_fen.clone()))
+                                .style(btn_style_simple),
+                        ],
+                        Text::new(
+                            lang::tr(&self.lang, "rating")
+                                + &self.puzzles[self.current_puzzle].rating.to_string()
+                        ),
+                        Text::new(
+                            lang::tr(&self.lang, "rd")
+                                + &self.puzzles[self.current_puzzle]
+                                    .rating_deviation
+                                    .to_string()
+                        ),
+                        Text::new(
+                            lang::tr(&self.lang, "popularity")
+                                + &self.puzzles[self.current_puzzle].popularity.to_string()
+                        ),
+                        Text::new(
+                            lang::tr(&self.lang, "times_played")
+                                + &self.puzzles[self.current_puzzle].nb_plays.to_string()
+                        ),
+                        Text::new(lang::tr(&self.lang, "themes")),
+                        Text::new(&self.puzzles[self.current_puzzle].themes),
+                        Text::new(lang::tr(&self.lang, "url")),
+                        row![
+                            TextInput::new(
+                                &self.puzzles[self.current_puzzle].game_url,
+                                &self.puzzles[self.current_puzzle].game_url,
+                            )
+                            .on_input(PuzzleMessage::ChangeTextInputs),
+                            Button::new(Text::new(lang::tr(&self.lang, "copy")))
+                                .on_press(PuzzleMessage::CopyText(
+                                    self.puzzles[self.current_puzzle].game_url.clone()
+                                ))
+                                .style(btn_style_simple),
+                            Button::new(Text::new(lang::tr(&self.lang, "open")))
+                                .on_press(PuzzleMessage::OpenLink(
+                                    self.puzzles[self.current_puzzle].game_url.clone()
+                                ))
+                                .style(btn_style_simple),
+                        ],
+                        Button::new(Text::new(lang::tr(&self.lang, "screenshot")))
+                            .on_press(PuzzleMessage::TakeScreenshot)
+                            .style(btn_style_simple),
+                        Button::new(Text::new(lang::tr(&self.lang, "export_pdf_btn")))
+                            .on_press(PuzzleMessage::ExportToPDF)
+                            .style(btn_style_simple),
+                        Button::new(Text::new(lang::tr(&self.lang, "export_pgn")))
+                            .padding(5)
+                            .on_press(PuzzleMessage::ExportToPGN)
+                            .style(btn_style_simple),
+                    ]
+                    .padding([0, 30])
+                    .spacing(10)
+                    .align_x(Alignment::Center),
+                )
+            } else {
+                Scrollable::new(
+                    col![
+                        Text::new(lang::tr(&self.lang, "no_puzzle"))
+                            .align_x(alignment::Horizontal::Center)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(10),
+                )
+            };
+        let content: Element<PuzzleMessage, Theme, iced::Renderer> =
+            Container::new(col_puzzle_info)
+                .align_x(alignment::Horizontal::Center)
+                .height(Length::Fill)
+                .into();
 
         content.map(Message::PuzzleInfo)
     }

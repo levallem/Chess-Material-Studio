@@ -1,10 +1,10 @@
+use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Rank, Square};
+use lopdf::content::{Content, Operation};
+use lopdf::dictionary;
+use lopdf::{Document, Object, Stream};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::LazyLock;
-use lopdf::dictionary;
-use lopdf::{Document, Object, Stream};
-use lopdf::content::{Content, Operation};
-use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Rank, Square};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{config, lang};
@@ -106,9 +106,7 @@ fn move_to_standard_san(board: &Board, chess_move: ChessMove) -> Result<String, 
             if legal_m == chess_move {
                 continue;
             }
-            if board.piece_on(legal_m.get_source()) == Some(piece)
-                && legal_m.get_dest() == dest
-            {
+            if board.piece_on(legal_m.get_source()) == Some(piece) && legal_m.get_dest() == dest {
                 has_ambiguity = true;
                 if legal_m.get_source().get_file() == source.get_file() {
                     same_file = true;
@@ -274,10 +272,7 @@ fn build_pgn_game_with_context(
     let mut pgn = String::new();
     pgn.push_str("[Event \"Chess Puzzle\"]\n");
     let site = format!("https://lichess.org/training/{}", puzzle.puzzle_id);
-    pgn.push_str(&format!(
-        "[Site \"{}\"]\n",
-        escape_pgn_tag_value(&site)
-    ));
+    pgn.push_str(&format!("[Site \"{}\"]\n", escape_pgn_tag_value(&site)));
     if let Some(context) = context {
         pgn.push_str(&format!(
             "[Project \"{}\"]\n",
@@ -375,10 +370,7 @@ fn build_pgn_game_with_context(
 }
 
 /// Build the full PGN content for multiple puzzles.
-fn build_pgn_content(
-    puzzles: &[config::Puzzle],
-    date: &str,
-) -> Result<String, String> {
+fn build_pgn_content(puzzles: &[config::Puzzle], date: &str) -> Result<String, String> {
     let mut content = String::new();
     for (i, puzzle) in puzzles.iter().enumerate() {
         let game = build_pgn_game(puzzle, date)?;
@@ -1537,7 +1529,10 @@ mod tests {
 
     fn fixture_puzzle_00010() -> config::Puzzle {
         let puzzles = read_fixture_puzzles();
-        puzzles.into_iter().find(|p| p.puzzle_id == "00010").expect("fixture must contain puzzle 00010")
+        puzzles
+            .into_iter()
+            .find(|p| p.puzzle_id == "00010")
+            .expect("fixture must contain puzzle 00010")
     }
 
     // ── parse_legal_uci_move ──
@@ -1613,7 +1608,9 @@ mod tests {
     #[test]
     fn test_san_bishop() {
         // Italian Game position where Bc4 is legal (e2 pawn moved to e4)
-        let board = Board::from_str("r1bqkbnr/pppppppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3").unwrap();
+        let board =
+            Board::from_str("r1bqkbnr/pppppppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3")
+                .unwrap();
         let mv = ChessMove::new(Square::F1, Square::C4, None);
         let san = move_to_standard_san(&board, mv).unwrap();
         assert_eq!(san, "Bc4");
@@ -1650,11 +1647,14 @@ mod tests {
 
     #[test]
     fn test_san_capture() {
-        let board = Board::from_str("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").unwrap();
+        let board =
+            Board::from_str("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").unwrap();
         let mv = ChessMove::new(Square::D7, Square::D5, None);
         let _san = move_to_standard_san(&board, mv).unwrap();
         // d5 is not a capture from d7
-        let board2 = Board::from_str("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2").unwrap();
+        let board2 =
+            Board::from_str("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2")
+                .unwrap();
         let mv2 = ChessMove::new(Square::D7, Square::D5, None);
         let san2 = move_to_standard_san(&board2, mv2).unwrap();
         assert_eq!(san2, "d5");
@@ -1663,7 +1663,8 @@ mod tests {
     #[test]
     fn test_san_pawn_capture() {
         // Create a position where exd5 is a pawn capture
-        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2").unwrap();
+        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2")
+            .unwrap();
         let mv = ChessMove::new(Square::E4, Square::D5, None);
         let san = move_to_standard_san(&board, mv).unwrap();
         assert_eq!(san, "exd5");
@@ -1672,7 +1673,8 @@ mod tests {
     #[test]
     fn test_san_en_passant() {
         // White pawn on e5, black pawn just played d7d5
-        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3").unwrap();
+        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3")
+            .unwrap();
         let mv = ChessMove::new(Square::E5, Square::D6, None);
         let san = move_to_standard_san(&board, mv).unwrap();
         assert_eq!(san, "exd6");
@@ -1698,7 +1700,9 @@ mod tests {
     #[test]
     fn test_san_check() {
         // Position where Bxf7+ gives check (Italian Game)
-        let board = Board::from_str("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4").unwrap();
+        let board =
+            Board::from_str("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+                .unwrap();
         let mv = ChessMove::new(Square::C4, Square::F7, None);
         let san = move_to_standard_san(&board, mv).unwrap();
         assert!(san.ends_with('+'), "Expected check, got: {}", san);
@@ -1707,7 +1711,9 @@ mod tests {
     #[test]
     fn test_san_checkmate() {
         // Scholar's mate position
-        let board = Board::from_str("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4").unwrap();
+        let board =
+            Board::from_str("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4")
+                .unwrap();
         let mv = ChessMove::new(Square::H5, Square::F7, None);
         let san = move_to_standard_san(&board, mv).unwrap();
         assert!(san.ends_with('#'), "Expected checkmate, got: {}", san);
@@ -1797,7 +1803,10 @@ mod tests {
     fn test_board_to_pgn_fen_basic() {
         let board = Board::default();
         let fen = board_to_pgn_fen(&board).unwrap();
-        assert_eq!(fen, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(
+            fen,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        );
     }
 
     #[test]
@@ -1815,10 +1824,15 @@ mod tests {
     fn test_board_to_pgn_fen_en_passant_target_square() {
         // Position where a pawn double-pushed and an opposing pawn can capture en passant.
         // After ...d5, white pawn on e5 can capture en passant on d6.
-        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3").unwrap();
+        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3")
+            .unwrap();
         let fen = board_to_pgn_fen(&board).unwrap();
         let ep_field = fen.split_whitespace().nth(3).unwrap();
-        assert_eq!(ep_field, "d6", "En passant target should be d6, got: {}", ep_field);
+        assert_eq!(
+            ep_field, "d6",
+            "En passant target should be d6, got: {}",
+            ep_field
+        );
     }
 
     // ── build_pgn_game ──
@@ -1832,7 +1846,10 @@ mod tests {
         assert!(pgn.contains("[SetUp \"1\"]"));
         assert!(pgn.contains("[FEN \""));
         assert!(pgn.contains("[Event \"Chess Puzzle\"]"));
-        assert!(pgn.contains(&format!("[Site \"https://lichess.org/training/{}\"]", puzzle.puzzle_id)));
+        assert!(pgn.contains(&format!(
+            "[Site \"https://lichess.org/training/{}\"]",
+            puzzle.puzzle_id
+        )));
         assert!(pgn.contains("[Result \"*\"]"));
 
         // After trigger (f3g5), it's Black's turn
@@ -1841,7 +1858,10 @@ mod tests {
         assert!(pgn.contains("[Black \"Player\"]"));
 
         // Check move text starts with 1...
-        assert!(pgn.contains("1... "), "Move text should start with '1...' for Black to move");
+        assert!(
+            pgn.contains("1... "),
+            "Move text should start with '1...' for Black to move"
+        );
 
         // Check trigger is NOT in move text
         let trigger_san = {
@@ -1850,7 +1870,11 @@ mod tests {
             move_to_standard_san(&original_board, trigger).unwrap()
         };
         let move_section = pgn.split("\n\n").last().unwrap_or("");
-        assert!(!move_section.contains(&trigger_san), "Trigger SAN '{}' must not appear in move text", trigger_san);
+        assert!(
+            !move_section.contains(&trigger_san),
+            "Trigger SAN '{}' must not appear in move text",
+            trigger_san
+        );
 
         // Check result
         assert!(pgn.ends_with("*\n"));
@@ -1865,7 +1889,10 @@ mod tests {
         // The trigger move is Nf3-g5 = Ng5 (knight from f3 to g5)
         // After applying it, the solution starts with e7e6 = e6
         // Verify "Ng5" does not appear in move text
-        assert!(!move_text.contains("Ng5"), "Trigger move must not be in solution");
+        assert!(
+            !move_text.contains("Ng5"),
+            "Trigger move must not be in solution"
+        );
     }
 
     #[test]
@@ -1885,7 +1912,10 @@ mod tests {
         let trigger = parse_legal_uci_move(&original_board, "f3g5").unwrap();
         let expected_board = original_board.make_move_new(trigger);
 
-        assert_eq!(exported_board, expected_board, "Exported FEN must match board after trigger");
+        assert_eq!(
+            exported_board, expected_board,
+            "Exported FEN must match board after trigger"
+        );
     }
 
     #[test]
@@ -1904,14 +1934,20 @@ mod tests {
         // Parse SAN tokens, ignoring move numbers and result
         let tokens: Vec<&str> = move_text
             .split_whitespace()
-            .filter(|t| !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "...")
+            .filter(|t| {
+                !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "..."
+            })
             .collect();
 
         // Expected UCI solution moves (excluding trigger)
         let all_moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
         let expected_uci: Vec<&str> = all_moves[1..].to_vec();
 
-        assert_eq!(tokens.len(), expected_uci.len(), "SAN token count must match solution move count");
+        assert_eq!(
+            tokens.len(),
+            expected_uci.len(),
+            "SAN token count must match solution move count"
+        );
 
         for (san, uci) in tokens.iter().zip(expected_uci.iter()) {
             // Parse SAN with from_san
@@ -1922,7 +1958,11 @@ mod tests {
             let mv_from_uci = ChessMove::from_str(uci)
                 .unwrap_or_else(|e| panic!("Failed to parse UCI '{}': {:?}", uci, e));
 
-            assert_eq!(mv_from_san, mv_from_uci, "SAN '{}' must equal UCI '{}'", san, uci);
+            assert_eq!(
+                mv_from_san, mv_from_uci,
+                "SAN '{}' must equal UCI '{}'",
+                san, uci
+            );
 
             board = board.make_move_new(mv_from_san);
         }
@@ -1940,14 +1980,20 @@ mod tests {
         let move_text = pgn.split("\n\n").last().unwrap_or("");
         let tokens: Vec<&str> = move_text
             .split_whitespace()
-            .filter(|t| !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "...")
+            .filter(|t| {
+                !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "..."
+            })
             .collect();
 
         // Every SAN must parse and be legal
         for san in &tokens {
             let mv = ChessMove::from_san(&board, san)
                 .unwrap_or_else(|e| panic!("SAN '{}' not parseable: {:?}", san, e));
-            assert!(board.legal(mv), "SAN '{}' is not legal on current board", san);
+            assert!(
+                board.legal(mv),
+                "SAN '{}' is not legal on current board",
+                san
+            );
             board = board.make_move_new(mv);
         }
     }
@@ -2052,11 +2098,19 @@ mod tests {
         let puzzle = fixture_puzzle_00010();
         let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
         // Standard SAN letters, not localized
-        assert!(pgn.contains("Nf7") || pgn.contains("e6"),
-            "PGN should contain standard SAN notation");
+        assert!(
+            pgn.contains("Nf7") || pgn.contains("e6"),
+            "PGN should contain standard SAN notation"
+        );
         // No Spanish/French piece names
-        assert!(!pgn.contains("Cf"), "PGN must not contain localized piece names");
-        assert!(!pgn.contains("Td"), "PGN must not contain localized piece names");
+        assert!(
+            !pgn.contains("Cf"),
+            "PGN must not contain localized piece names"
+        );
+        assert!(
+            !pgn.contains("Td"),
+            "PGN must not contain localized piece names"
+        );
     }
 
     // ── Side tags after trigger ──
@@ -2092,7 +2146,11 @@ mod tests {
         assert!(pgn.contains("[Black \"Opponent\"]"));
         // Move text must start with white move
         let move_text = pgn.split("\n\n").last().unwrap_or("");
-        assert!(move_text.starts_with("1. Ke2"), "Move text should start with '1. Ke2', got: {}", move_text);
+        assert!(
+            move_text.starts_with("1. Ke2"),
+            "Move text should start with '1. Ke2', got: {}",
+            move_text
+        );
     }
 
     // ── FEN correctness ──
@@ -2112,7 +2170,10 @@ mod tests {
         let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
         let fen_line = pgn.lines().find(|l| l.starts_with("[FEN ")).unwrap();
         let fen = fen_line.split('"').nth(1).unwrap();
-        assert_ne!(fen, puzzle.fen, "Exported FEN must differ from original puzzle FEN");
+        assert_ne!(
+            fen, puzzle.fen,
+            "Exported FEN must differ from original puzzle FEN"
+        );
     }
 
     // ── Full fixture validation ──
@@ -2137,7 +2198,9 @@ mod tests {
         let move_text = pgn.split("\n\n").last().unwrap_or("");
         let tokens: Vec<&str> = move_text
             .split_whitespace()
-            .filter(|t| !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "...")
+            .filter(|t| {
+                !t.starts_with(|c: char| c.is_ascii_digit()) && !t.starts_with('*') && *t != "..."
+            })
             .collect();
 
         let all_moves: Vec<&str> = puzzle.moves.split_whitespace().collect();
@@ -2146,7 +2209,8 @@ mod tests {
         assert_eq!(tokens.len(), expected_uci.len());
 
         for (san, uci) in tokens.iter().zip(expected_uci.iter()) {
-            let mv_san = ChessMove::from_san(&board, san).expect(&format!("Failed to parse SAN: {}", san));
+            let mv_san =
+                ChessMove::from_san(&board, san).expect(&format!("Failed to parse SAN: {}", san));
             let mv_uci = ChessMove::from_str(uci).expect(&format!("Failed to parse UCI: {}", uci));
             assert_eq!(mv_san, mv_uci, "SAN/UCI mismatch: {} vs {}", san, uci);
             assert!(board.legal(mv_san));
@@ -2154,7 +2218,10 @@ mod tests {
         }
 
         // Verify move text structure
-        assert!(move_text.starts_with("1... "), "Should start with '1...' for Black");
+        assert!(
+            move_text.starts_with("1... "),
+            "Should start with '1...' for Black"
+        );
         assert!(move_text.trim_end().ends_with("*"), "Should end with '*'");
     }
 
@@ -2291,12 +2358,27 @@ mod tests {
         let headers = pgn.split_once("\n\n").unwrap().0;
         let header_lines = headers.lines().collect::<Vec<_>>();
 
-        assert_eq!(header_lines.len(), 16, "unexpected physical PGN tag lines: {headers}");
-        assert!(header_lines.iter().all(|line| line.starts_with('[') && line.ends_with(']')));
-        assert!(!header_lines.iter().any(|line| line.starts_with("[Injected ")));
+        assert_eq!(
+            header_lines.len(),
+            16,
+            "unexpected physical PGN tag lines: {headers}"
+        );
+        assert!(
+            header_lines
+                .iter()
+                .all(|line| line.starts_with('[') && line.ends_with(']'))
+        );
+        assert!(
+            !header_lines
+                .iter()
+                .any(|line| line.starts_with("[Injected "))
+        );
         assert!(pgn.contains(&format!(
             "[Site \"{}\"]",
-            escape_pgn_tag_value(&format!("https://lichess.org/training/{}", puzzle.puzzle_id))
+            escape_pgn_tag_value(&format!(
+                "https://lichess.org/training/{}",
+                puzzle.puzzle_id
+            ))
         )));
         assert!(pgn.contains(&format!(
             "[GameID \"{}\"]",
@@ -2357,13 +2439,20 @@ mod tests {
         std::fs::create_dir_all(&dir).ok();
         let path = dir.join(format!("cms014_sample_{}.pgn", std::process::id()));
 
-        to_pgn(&puzzles, &lang::Language::English, path.to_str().unwrap().to_string())
-            .expect("valid PGN export should succeed");
+        to_pgn(
+            &puzzles,
+            &lang::Language::English,
+            path.to_str().unwrap().to_string(),
+        )
+        .expect("valid PGN export should succeed");
 
         let content = std::fs::read_to_string(&path).expect("PGN file should exist");
         assert!(content.contains("[SetUp \"1\"]"));
         assert!(content.contains("[FEN \""));
-        assert!(content.contains("1... ") || content.contains("1. "), "Should have move text");
+        assert!(
+            content.contains("1... ") || content.contains("1. "),
+            "Should have move text"
+        );
 
         // Clean up
         let _ = std::fs::remove_file(&path);
@@ -2374,19 +2463,23 @@ mod tests {
         let mut invalid = fixture_puzzle_00010();
         invalid.moves.clear();
 
-        assert!(to_pgn(
-            &[invalid.clone()],
-            &lang::Language::English,
-            pdf_test_path("invalid-normal-export").display().to_string(),
-        )
-        .is_err());
-        assert!(to_pdf(
-            &[invalid],
-            1,
-            &lang::Language::English,
-            pdf_test_path("invalid-normal-export").display().to_string(),
-        )
-        .is_err());
+        assert!(
+            to_pgn(
+                &[invalid.clone()],
+                &lang::Language::English,
+                pdf_test_path("invalid-normal-export").display().to_string(),
+            )
+            .is_err()
+        );
+        assert!(
+            to_pdf(
+                &[invalid],
+                1,
+                &lang::Language::English,
+                pdf_test_path("invalid-normal-export").display().to_string(),
+            )
+            .is_err()
+        );
     }
 
     // ── Existing tests preserved ──
@@ -2411,7 +2504,8 @@ mod tests {
 
     #[test]
     fn test_san_pawn_capture_no_promotion() {
-        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2").unwrap();
+        let board = Board::from_str("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2")
+            .unwrap();
         let mv = ChessMove::new(Square::E4, Square::D5, None);
         let san = move_to_standard_san(&board, mv).unwrap();
         assert_eq!(san, "exd5");
@@ -2420,7 +2514,9 @@ mod tests {
     #[test]
     fn test_san_piece_capture_check() {
         // Bxf7+ in Italian Game
-        let board = Board::from_str("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4").unwrap();
+        let board =
+            Board::from_str("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+                .unwrap();
         let mv = ChessMove::new(Square::C4, Square::F7, None);
         let san = move_to_standard_san(&board, mv).unwrap();
         assert_eq!(san, "Bxf7+");
@@ -2559,7 +2655,10 @@ mod tests {
         let ops = gen_diagram_operations(42, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let texts = extract_tj_texts(&ops);
         let all_text = texts.join("");
-        assert!(all_text.contains("42"), "Header must contain exercise number '42'");
+        assert!(
+            all_text.contains("42"),
+            "Header must contain exercise number '42'"
+        );
     }
 
     #[test]
@@ -2573,7 +2672,11 @@ mod tests {
             let trigger = parse_legal_uci_move(&board, "f3g5").unwrap();
             move_to_standard_san(&board, trigger).unwrap()
         };
-        assert!(!all_text.contains(&trigger_san), "Trigger SAN '{}' must not appear in diagram", trigger_san);
+        assert!(
+            !all_text.contains(&trigger_san),
+            "Trigger SAN '{}' must not appear in diagram",
+            trigger_san
+        );
     }
 
     #[test]
@@ -2581,14 +2684,20 @@ mod tests {
         let puzzle = fixture_puzzle_00010();
         let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let rectangle_count = ops.iter().filter(|op| op.operator == "re").count();
-        assert_eq!(rectangle_count, 64, "Only the 64 board squares may use 're'");
+        assert_eq!(
+            rectangle_count, 64,
+            "Only the 64 board squares may use 're'"
+        );
         assert_eq!(
             ops.iter().filter(|op| op.operator == "c").count(),
             4,
             "Side indicator must remain a four-curve circle",
         );
         let has_stroke = ops.iter().any(|op| op.operator == "S");
-        assert!(!has_stroke, "Side circle must not use 'S' (stroke for mouth)");
+        assert!(
+            !has_stroke,
+            "Side circle must not use 'S' (stroke for mouth)"
+        );
     }
 
     #[test]
@@ -2597,8 +2706,13 @@ mod tests {
             puzzle_id: "coord_w".to_string(),
             fen: "r3k3/8/8/8/8/8/8/4K3 b - - 0 1".to_string(),
             moves: "a8a7 e1e2".to_string(),
-            rating: 0, rating_deviation: 0, popularity: 0, nb_plays: 0,
-            themes: String::new(), game_url: String::new(), opening: String::new(),
+            rating: 0,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: String::new(),
+            game_url: String::new(),
+            opening: String::new(),
         };
         let ops = gen_diagram_operations(1, &puzzle, 750, 75, &lang::Language::English).unwrap();
         let texts = extract_tj_texts(&ops);
@@ -2643,116 +2757,217 @@ mod tests {
     #[test]
     fn test_san_to_spans_rook() {
         let spans = standard_san_to_pdf_spans("Rb1+");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "b1+".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♖".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "b1+".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_queen_capture() {
         let spans = standard_san_to_pdf_spans("Qxe7+");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xe7+".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♕".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "xe7+".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_knight() {
         let spans = standard_san_to_pdf_spans("Nxf7");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♘".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xf7".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♘".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "xf7".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_bishop() {
         let spans = standard_san_to_pdf_spans("Bf5");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♗".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "f5".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♗".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "f5".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_king() {
         let spans = standard_san_to_pdf_spans("Kd2");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♔".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "d2".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♔".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "d2".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_pawn() {
         let spans = standard_san_to_pdf_spans("e4");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e4".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "e4".into()
+            },]
+        );
     }
 
     #[test]
     fn test_san_to_spans_promotion() {
         let spans = standard_san_to_pdf_spans("e1=Q");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e1=".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "e1=".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♕".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_promotion_knight() {
         let spans = standard_san_to_pdf_spans("e1=N+");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e1=".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♘".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "+".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "e1=".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♘".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "+".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_castling_kingside() {
         let spans = standard_san_to_pdf_spans("O-O");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "O-O".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "O-O".into()
+            },]
+        );
     }
 
     #[test]
     fn test_san_to_spans_castling_queenside() {
         let spans = standard_san_to_pdf_spans("O-O-O");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "O-O-O".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "O-O-O".into()
+            },]
+        );
     }
 
     #[test]
     fn test_san_to_spans_disambiguation_file() {
         let spans = standard_san_to_pdf_spans("Nbd2");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♘".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "bd2".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♘".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "bd2".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_disambiguation_rank() {
         let spans = standard_san_to_pdf_spans("R1a2");
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "1a2".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♖".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "1a2".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_san_to_spans_pgn_unchanged() {
         let puzzle = fixture_puzzle_00010();
         let pgn = build_pgn_game(&puzzle, "2026.09.03").unwrap();
-        assert!(pgn.contains("Nf3") || pgn.contains("e6") || pgn.contains("Ng5"),
-            "PGN must contain standard SAN letters, not figurines");
-        assert!(!pgn.contains("H"), "PGN must not contain Chess Alpha knight glyph");
+        assert!(
+            pgn.contains("Nf3") || pgn.contains("e6") || pgn.contains("Ng5"),
+            "PGN must contain standard SAN letters, not figurines"
+        );
+        assert!(
+            !pgn.contains("H"),
+            "PGN must not contain Chess Alpha knight glyph"
+        );
     }
 
     // ── CMS-016B: UCI → span tests ──
@@ -2761,107 +2976,195 @@ mod tests {
     fn test_uci_to_spans_rook() {
         let board = Board::from_str("4k3/8/8/8/8/8/8/R3K3 w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "a1b1").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "b1".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♖".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "b1".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_queen_capture_checkmate() {
-        let board = Board::from_str("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4").unwrap();
+        let board =
+            Board::from_str("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4")
+                .unwrap();
         let spans = uci_move_to_pdf_spans(&board, "h5f7").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xf7#".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♕".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "xf7#".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_knight() {
         let board = Board::default();
         let spans = uci_move_to_pdf_spans(&board, "g1f3").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♘".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "f3".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♘".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "f3".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_bishop() {
-        let board = Board::from_str("r1bqkbnr/pppppppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3").unwrap();
+        let board =
+            Board::from_str("r1bqkbnr/pppppppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3")
+                .unwrap();
         let spans = uci_move_to_pdf_spans(&board, "f1c4").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♗".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "c4".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♗".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "c4".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_king() {
         let board = Board::from_str("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "e1e2").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♔".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e2".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♔".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "e2".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_pawn() {
         let board = Board::default();
         let spans = uci_move_to_pdf_spans(&board, "e2e4").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e4".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "e4".into()
+            },]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_promotion() {
         let board = Board::from_str("8/4P3/8/8/8/8/8/4K2k w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "e7e8q").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "e8=".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "e8=".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♕".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_castling_kingside() {
         let board = Board::from_str("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "e1g1").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "O-O".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "O-O".into()
+            },]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_castling_queenside() {
         let board = Board::from_str("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "e1c1").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "O-O-O".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "O-O-O".into()
+            },]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_disambiguation_file() {
         let board = Board::from_str("4k3/8/8/8/8/8/R1R5/4K3 w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "a2b2").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "ab2".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♖".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "ab2".into()
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_uci_to_spans_disambiguation_rank() {
         let board = Board::from_str("4k3/8/8/8/8/R7/8/R3K3 w - - 0 1").unwrap();
         let spans = uci_move_to_pdf_spans(&board, "a1a2").unwrap();
-        assert_eq!(spans, vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♖".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "1a2".into() },
-        ]);
+        assert_eq!(
+            spans,
+            vec![
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Figurine,
+                    text: "♖".into()
+                },
+                PdfSolutionSpan {
+                    font: PdfSolutionFont::Regular,
+                    text: "1a2".into()
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2869,7 +3172,10 @@ mod tests {
         let board = Board::default();
         let spans_en = uci_move_to_pdf_spans(&board, "e2e4").unwrap();
         let spans_es = uci_move_to_pdf_spans(&board, "e2e4").unwrap();
-        assert_eq!(spans_en, spans_es, "Spans must be identical regardless of language");
+        assert_eq!(
+            spans_en, spans_es,
+            "Spans must be identical regardless of language"
+        );
     }
 
     #[test]
@@ -2912,11 +3218,17 @@ mod tests {
             // Verify total text reconstructs the SAN (with a Unicode white knight light-square glyph)
             let total: String = spans.iter().map(|s| s.text.as_str()).collect();
             let expected_total = san.replace('N', "♘");
-            assert_eq!(total, expected_total, "Span text must match standard SAN with a Unicode white knight");
+            assert_eq!(
+                total, expected_total,
+                "Span text must match standard SAN with a Unicode white knight"
+            );
             // Verify figurine spans exist for piece moves
             if san.starts_with(|c: char| "KQRBN".contains(c)) {
-                assert!(spans.iter().any(|s| s.font == PdfSolutionFont::Figurine),
-                    "Piece move {} must have figurine span", san);
+                assert!(
+                    spans.iter().any(|s| s.font == PdfSolutionFont::Figurine),
+                    "Piece move {} must have figurine span",
+                    san
+                );
             }
             board = board.make_move_new(cm);
         }
@@ -2924,7 +3236,9 @@ mod tests {
 
     #[test]
     fn test_pdf_solution_spans_produce_mixed_fonts() {
-        let board = Board::from_str("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4").unwrap();
+        let board =
+            Board::from_str("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4")
+                .unwrap();
         let spans = uci_move_to_pdf_spans(&board, "h5f7").unwrap();
         let mut ops: Vec<Operation> = vec![];
         ops.push(Operation::new("BT", vec![]));
@@ -2932,37 +3246,55 @@ mod tests {
         append_pdf_solution_spans(&mut ops, &spans).unwrap();
         ops.push(Operation::new("ET", vec![]));
 
-        let has_chess_symbols = ops.iter().any(|op| {
-            op.operator == "Tf" && op.operands.first() == Some(&"ChessSymbols".into())
-        });
-        let has_regular = ops.iter().any(|op| {
-            op.operator == "Tf" && op.operands.first() == Some(&"Regular".into())
-        });
-        assert!(has_chess_symbols, "Solution must use ChessSymbols for figurines");
-        assert!(has_regular, "Solution must use Regular font for non-figurine text");
+        let has_chess_symbols = ops
+            .iter()
+            .any(|op| op.operator == "Tf" && op.operands.first() == Some(&"ChessSymbols".into()));
+        let has_regular = ops
+            .iter()
+            .any(|op| op.operator == "Tf" && op.operands.first() == Some(&"Regular".into()));
+        assert!(
+            has_chess_symbols,
+            "Solution must use ChessSymbols for figurines"
+        );
+        assert!(
+            has_regular,
+            "Solution must use Regular font for non-figurine text"
+        );
     }
 
     #[test]
     fn test_append_solution_spans_text_rise() {
         let spans = vec![
-            PdfSolutionSpan { font: PdfSolutionFont::Figurine, text: "♕".into() },
-            PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "xf7#".into() },
+            PdfSolutionSpan {
+                font: PdfSolutionFont::Figurine,
+                text: "♕".into(),
+            },
+            PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "xf7#".into(),
+            },
         ];
         let mut ops: Vec<Operation> = vec![];
         append_pdf_solution_spans(&mut ops, &spans).unwrap();
 
         // Find Ts operations and their values in order
-        let ts_values: Vec<i32> = ops.iter()
+        let ts_values: Vec<i32> = ops
+            .iter()
             .filter(|op| op.operator == "Ts")
-            .filter_map(|op| op.operands.first().and_then(|v| match v {
-                Object::Integer(n) => Some(*n as i32),
-                _ => None,
-            }))
+            .filter_map(|op| {
+                op.operands.first().and_then(|v| match v {
+                    Object::Integer(n) => Some(*n as i32),
+                    _ => None,
+                })
+            })
             .collect();
 
         // Figurine gets Ts -2, then Regular gets Ts 0, then trailing Ts 0
-        assert!(ts_values.windows(2).any(|w| w[0] == -1 && w[1] == 0),
-            "Must have Ts -1 (figurine) followed by Ts 0 (regular), got: {:?}", ts_values);
+        assert!(
+            ts_values.windows(2).any(|w| w[0] == -1 && w[1] == 0),
+            "Must have Ts -1 (figurine) followed by Ts 0 (regular), got: {:?}",
+            ts_values
+        );
 
         // Verify the structure: Tf, Ts, Tj for each span, then final Ts 0
         let tf_count = ops.iter().filter(|op| op.operator == "Tf").count();
@@ -2970,7 +3302,10 @@ mod tests {
         let ts_count = ops.iter().filter(|op| op.operator == "Ts").count();
         assert_eq!(tf_count, 2, "Must have 2 Tf ops");
         assert_eq!(tj_count, 2, "Must have 2 Tj ops");
-        assert_eq!(ts_count, 3, "Must have 3 Ts ops (one per span + trailing reset)");
+        assert_eq!(
+            ts_count, 3,
+            "Must have 3 Ts ops (one per span + trailing reset)"
+        );
     }
 
     // ── CMS-016C: exercise number prefix ──
@@ -2990,9 +3325,15 @@ mod tests {
 
         let puzzle_number: usize = 0;
         let mut move_spans: Vec<PdfSolutionSpan> = Vec::new();
-        move_spans.push(PdfSolutionSpan { font: PdfSolutionFont::Regular, text: format!("{})", puzzle_number + 1) });
+        move_spans.push(PdfSolutionSpan {
+            font: PdfSolutionFont::Regular,
+            text: format!("{})", puzzle_number + 1),
+        });
         if board.side_to_move() == Color::Black {
-            move_spans.push(PdfSolutionSpan { font: PdfSolutionFont::Regular, text: " 1. ... ".to_string() });
+            move_spans.push(PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: " 1. ... ".to_string(),
+            });
         }
         for chess_move in &moves {
             let spans = uci_move_to_pdf_spans(&board, chess_move).unwrap();
@@ -3000,14 +3341,28 @@ mod tests {
             let movement = ChessMove::new(
                 Square::from_str(&String::from(&chess_move[..2])).unwrap(),
                 Square::from_str(&String::from(&chess_move[2..4])).unwrap(),
-                PuzzleTab::check_promotion(chess_move));
+                PuzzleTab::check_promotion(chess_move),
+            );
             board = board.make_move_new(movement);
         }
 
-        assert_eq!(move_spans[0], PdfSolutionSpan { font: PdfSolutionFont::Regular, text: "1)".into() });
-        assert!(move_spans.len() > 1, "Must have moves after exercise number");
+        assert_eq!(
+            move_spans[0],
+            PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "1)".into()
+            }
+        );
+        assert!(
+            move_spans.len() > 1,
+            "Must have moves after exercise number"
+        );
         let total: String = move_spans.iter().map(|s| s.text.as_str()).collect();
-        assert!(total.starts_with("1) 1. ..."), "Must start with '1) 1. ...', got: {}", total);
+        assert!(
+            total.starts_with("1) 1. ..."),
+            "Must start with '1) 1. ...', got: {}",
+            total
+        );
     }
 
     #[test]

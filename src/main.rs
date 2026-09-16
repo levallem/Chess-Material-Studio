@@ -3,23 +3,26 @@
 use download_db::download_lichess_db;
 use eval::{Engine, EngineStatus};
 use iced::advanced::widget::Id as GenericId;
+use iced::event::{self, Event};
 use iced::widget::svg::Handle;
-use styles::PieceTheme;
+use iced::widget::{
+    Button, Column, Container, Radio, Row, Svg, Text, button, center, container, responsive, row,
+    text, text_input,
+};
+use iced::window::{self, Screenshot};
+use iced::{Alignment, Length, Task, alignment};
+use iced::{Element, Rectangle, Size, Subscription, Theme};
+use image::{DynamicImage, RgbaImage};
+use rfd::AsyncFileDialog;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use styles::PieceTheme;
 use tokio::sync::mpsc::{self, Sender};
-use iced::widget::{button, center, container, responsive, row, text, text_input, Button, Column, Container, Radio, Row, Svg, Text};
-use iced::{Element, Rectangle, Size, Subscription, Theme};
-use iced::{alignment, Task, Alignment, Length};
-use iced::window::{self, Screenshot};
-use iced::event::{self, Event};
-use image::{DynamicImage, RgbaImage};
-use rfd::AsyncFileDialog;
 
-use iced_aw::{TabLabel, Tabs};
-use chess::{Board, BoardStatus, ChessMove, Color, File, Game, Piece, Rank, Square, ALL_SQUARES};
+use chess::{ALL_SQUARES, Board, BoardStatus, ChessMove, Color, File, Game, Piece, Rank, Square};
 use chess_material_studio::project::ProjectPuzzleDecision;
+use iced_aw::{TabLabel, Tabs};
 
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Source, source::SineWave};
 
@@ -28,16 +31,16 @@ use rand::seq::SliceRandom;
 
 mod config;
 
-mod styles;
-mod search_tab;
 pub mod download_db;
+mod search_tab;
+mod styles;
 use search_tab::{SearchMesssage, SearchTab};
 
 mod settings;
 use settings::{SettingsMessage, SettingsTab};
 
 mod puzzles;
-use puzzles::{PuzzleMessage, PuzzleTab, GameStatus, validate_puzzle_batch};
+use puzzles::{GameStatus, PuzzleMessage, PuzzleTab, validate_puzzle_batch};
 
 mod project_tab;
 use project_tab::{ProjectMessage, ProjectTab, PuzzleReviewView};
@@ -49,9 +52,9 @@ mod export;
 mod lang;
 mod openings;
 
+mod db;
 pub mod models;
 pub mod schema;
-mod db;
 
 #[macro_use]
 extern crate diesel;
@@ -79,8 +82,18 @@ pub enum TabId {
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, PartialOrd, Ord)]
 enum PieceWithColor {
-    WhitePawn, WhiteRook, WhiteKnight, WhiteBishop, WhiteQueen, WhiteKing,
-    BlackPawn, BlackRook, BlackKnight, BlackBishop, BlackQueen, BlackKing,
+    WhitePawn,
+    WhiteRook,
+    WhiteKnight,
+    WhiteBishop,
+    WhiteQueen,
+    WhiteKing,
+    BlackPawn,
+    BlackRook,
+    BlackKnight,
+    BlackBishop,
+    BlackQueen,
+    BlackKing,
 }
 
 impl PieceWithColor {
@@ -134,7 +147,10 @@ pub enum Message {
     EventOccurred(iced::Event),
     StartEngine,
     EngineStopped(bool),
-    EngineFailed { reason: String, exit_requested: bool },
+    EngineFailed {
+        reason: String,
+        exit_requested: bool,
+    },
     UpdateEval((Option<String>, Option<String>)),
     EngineReady(mpsc::Sender<String>),
     EngineFileChosen(Option<String>),
@@ -215,11 +231,8 @@ impl SoundPlayback {
     pub fn init_sound() -> Option<Self> {
         let mut sound_playback = None;
         if let Ok(handle) = DeviceSinkBuilder::open_default_sink() {
-            sound_playback = Some (
-                SoundPlayback {
-                    handle,
-            });
-    }
+            sound_playback = Some(SoundPlayback { handle });
+        }
         sound_playback
     }
     pub fn play_audio(&self, cue: AudioCue) {
@@ -239,19 +252,55 @@ fn get_image_handles(theme: &PieceTheme) -> Vec<Handle> {
     let mut handles = Vec::<Handle>::with_capacity(12);
     let theme_str = &theme.to_string();
 
-    handles.insert(PieceWithColor::WhitePawn.index(), Handle::from_path(String::from("pieces/") + theme_str + "/wP.svg"));
-    handles.insert(PieceWithColor::WhiteRook.index(), Handle::from_path(String::from("pieces/") + theme_str + "/wR.svg"));
-    handles.insert(PieceWithColor::WhiteKnight.index(), Handle::from_path(String::from("pieces/") + theme_str + "/wN.svg"));
-    handles.insert(PieceWithColor::WhiteBishop.index(), Handle::from_path(String::from("pieces/") + theme_str + "/wB.svg"));
-    handles.insert(PieceWithColor::WhiteQueen.index(), Handle::from_path(String::from("pieces/") + theme_str + "/wQ.svg"));
-    handles.insert(PieceWithColor::WhiteKing.index(), Handle::from_path(String::from("pieces/") + theme_str + "/wK.svg"));
+    handles.insert(
+        PieceWithColor::WhitePawn.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/wP.svg"),
+    );
+    handles.insert(
+        PieceWithColor::WhiteRook.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/wR.svg"),
+    );
+    handles.insert(
+        PieceWithColor::WhiteKnight.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/wN.svg"),
+    );
+    handles.insert(
+        PieceWithColor::WhiteBishop.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/wB.svg"),
+    );
+    handles.insert(
+        PieceWithColor::WhiteQueen.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/wQ.svg"),
+    );
+    handles.insert(
+        PieceWithColor::WhiteKing.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/wK.svg"),
+    );
 
-    handles.insert(PieceWithColor::BlackPawn.index(), Handle::from_path(String::from("pieces/") + theme_str + "/bP.svg"));
-    handles.insert(PieceWithColor::BlackRook.index(), Handle::from_path(String::from("pieces/") + theme_str + "/bR.svg"));
-    handles.insert(PieceWithColor::BlackKnight.index(), Handle::from_path(String::from("pieces/") + theme_str + "/bN.svg"));
-    handles.insert(PieceWithColor::BlackBishop.index(), Handle::from_path(String::from("pieces/") + theme_str + "/bB.svg"));
-    handles.insert(PieceWithColor::BlackQueen.index(), Handle::from_path(String::from("pieces/") + theme_str + "/bQ.svg"));
-    handles.insert(PieceWithColor::BlackKing.index(), Handle::from_path(String::from("pieces/") + theme_str + "/bK.svg"));
+    handles.insert(
+        PieceWithColor::BlackPawn.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/bP.svg"),
+    );
+    handles.insert(
+        PieceWithColor::BlackRook.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/bR.svg"),
+    );
+    handles.insert(
+        PieceWithColor::BlackKnight.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/bN.svg"),
+    );
+    handles.insert(
+        PieceWithColor::BlackBishop.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/bB.svg"),
+    );
+    handles.insert(
+        PieceWithColor::BlackQueen.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/bQ.svg"),
+    );
+    handles.insert(
+        PieceWithColor::BlackKing.index(),
+        Handle::from_path(String::from("pieces/") + theme_str + "/bK.svg"),
+    );
 
     handles
 }
@@ -280,34 +329,36 @@ fn san_correct_ep(fen: String) -> String {
     let mut tokens_vec: Vec<&str> = fen.split_whitespace().collect::<Vec<&str>>();
     let mut new_ep_square = String::from("-");
     if let Some(en_passant) = tokens_vec.get(3)
-        && en_passant != &"-" {
-            let rank = if String::from(&en_passant[1..2]).parse::<usize>().unwrap() == 4 {
-                3
-            } else {
-                6
-            };
-            new_ep_square = String::from(&en_passant[0..1]) + &rank.to_string();
+        && en_passant != &"-"
+    {
+        let rank = if String::from(&en_passant[1..2]).parse::<usize>().unwrap() == 4 {
+            3
+        } else {
+            6
+        };
+        new_ep_square = String::from(&en_passant[0..1]) + &rank.to_string();
     }
     tokens_vec[3] = &new_ep_square;
     tokens_vec.join(" ")
 }
 
 fn get_notation_string(board: Board, promo_piece: Piece, from: Square, to: Square) -> String {
-
     let mut move_made_notation = from.to_string() + &to.to_string();
     let piece = board.piece_on(from);
     let color = board.color_on(from);
 
     // Check for promotion and adjust the notation accordingly
     if let (Some(piece), Some(color)) = (piece, color)
-        && piece == Piece::Pawn && ((color == Color::White && to.get_rank() == Rank::Eighth) ||
-                                   (color == Color::Black && to.get_rank() == Rank::First)) {
-            match promo_piece {
-                Piece::Rook => move_made_notation += "r",
-                Piece::Knight => move_made_notation += "n",
-                Piece::Bishop => move_made_notation += "b",
-                _ => move_made_notation += "q"
-            }
+        && piece == Piece::Pawn
+        && ((color == Color::White && to.get_rank() == Rank::Eighth)
+            || (color == Color::Black && to.get_rank() == Rank::First))
+    {
+        match promo_piece {
+            Piece::Rook => move_made_notation += "r",
+            Piece::Knight => move_made_notation += "n",
+            Piece::Bishop => move_made_notation += "b",
+            _ => move_made_notation += "q",
+        }
     }
     move_made_notation
 }
@@ -360,7 +411,6 @@ impl Default for OfflinePuzzles {
 }
 
 impl OfflinePuzzles {
-
     pub fn new(has_lichess_db: bool) -> Self {
         Self {
             window_id: None,
@@ -378,7 +428,7 @@ impl OfflinePuzzles {
             engine: Engine::new(
                 config::SETTINGS.engine_path.clone(),
                 config::SETTINGS.engine_limit.clone(),
-                String::from("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+                String::from("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
             ),
             engine_sender: None,
             engine_move: String::new(),
@@ -410,16 +460,14 @@ impl OfflinePuzzles {
 
     fn verify_and_make_move(&mut self, from: Square, to: Square) -> bool {
         let mut current_puzzle_changed = false;
-        let side =
-        match self.game_mode {
-            config::GameMode::Analysis => { self.analysis.side_to_move() }
-            config::GameMode::Puzzle => { self.board.side_to_move() }
+        let side = match self.game_mode {
+            config::GameMode::Analysis => self.analysis.side_to_move(),
+            config::GameMode::Puzzle => self.board.side_to_move(),
         };
-        let color =
-            match self.game_mode {
-                config::GameMode::Analysis => { self.analysis.current_position().color_on(to) }
-                config::GameMode::Puzzle => { self.board.color_on(to) }
-            };
+        let color = match self.game_mode {
+            config::GameMode::Analysis => self.analysis.current_position().color_on(to),
+            config::GameMode::Puzzle => self.board.color_on(to),
+        };
         // If the user clicked on another piece of his own side,
         // just replace the previous selection and exit
         if self.puzzle_tab.game_status == GameStatus::Playing && color == Some(side) {
@@ -429,19 +477,27 @@ impl OfflinePuzzles {
         self.from_square = None;
 
         if self.game_mode == config::GameMode::Analysis {
-            let move_made_notation =
-                get_notation_string(self.analysis.current_position(), self.search_tab.piece_to_promote_to, from, to);
+            let move_made_notation = get_notation_string(
+                self.analysis.current_position(),
+                self.search_tab.piece_to_promote_to,
+                from,
+                to,
+            );
 
             let move_made = ChessMove::new(
                 Square::from_str(&String::from(&move_made_notation[..2])).unwrap(),
-                Square::from_str(&String::from(&move_made_notation[2..4])).unwrap(), PuzzleTab::check_promotion(&move_made_notation));
+                Square::from_str(&String::from(&move_made_notation[2..4])).unwrap(),
+                PuzzleTab::check_promotion(&move_made_notation),
+            );
 
             if self.analysis.make_move(move_made) {
                 self.analysis_history.push(self.analysis.current_position());
                 self.engine.position = self.analysis.current_position().to_string();
                 if let Some(sender) = &self.engine_sender
-                    && let Err(e) = sender.blocking_send(san_correct_ep(self.analysis.current_position().to_string())) {
-                        self.record_engine_failure(format!("lost contact with engine: {e}"));
+                    && let Err(e) = sender
+                        .blocking_send(san_correct_ep(self.analysis.current_position().to_string()))
+                {
+                    self.record_engine_failure(format!("lost contact with engine: {e}"));
                 }
                 if self.settings_tab.saved_configs.play_sound {
                     play_audio_if_available(self.sound_playback.as_ref(), AudioCue::OnePiece);
@@ -454,18 +510,31 @@ impl OfflinePuzzles {
 
             let move_made = ChessMove::new(
                 Square::from_str(&String::from(&move_made_notation[..2])).unwrap(),
-                Square::from_str(&String::from(&move_made_notation[2..4])).unwrap(), PuzzleTab::check_promotion(&move_made_notation));
+                Square::from_str(&String::from(&move_made_notation[2..4])).unwrap(),
+                PuzzleTab::check_promotion(&move_made_notation),
+            );
 
-            let is_mate = self.board.legal(move_made) && self.board.make_move_new(move_made).status() == BoardStatus::Checkmate;
+            let is_mate = self.board.legal(move_made)
+                && self.board.make_move_new(move_made).status() == BoardStatus::Checkmate;
 
-            let correct_moves : Vec<&str> = self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle].moves.split_whitespace().collect::<Vec<&str>>();
+            let correct_moves: Vec<&str> = self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle]
+                .moves
+                .split_whitespace()
+                .collect::<Vec<&str>>();
             let correct_move = ChessMove::new(
-                Square::from_str(&String::from(&correct_moves[self.puzzle_tab.current_puzzle_move][..2])).unwrap(),
-                Square::from_str(&String::from(&correct_moves[self.puzzle_tab.current_puzzle_move][2..4])).unwrap(), PuzzleTab::check_promotion(correct_moves[self.puzzle_tab.current_puzzle_move]));
+                Square::from_str(&String::from(
+                    &correct_moves[self.puzzle_tab.current_puzzle_move][..2],
+                ))
+                .unwrap(),
+                Square::from_str(&String::from(
+                    &correct_moves[self.puzzle_tab.current_puzzle_move][2..4],
+                ))
+                .unwrap(),
+                PuzzleTab::check_promotion(correct_moves[self.puzzle_tab.current_puzzle_move]),
+            );
 
             // If the move is correct we can apply it to the board
             if is_mate || (move_made == correct_move) {
-
                 self.board = self.board.make_move_new(move_made);
                 self.analysis_history.push(self.board);
 
@@ -505,8 +574,18 @@ impl OfflinePuzzles {
                         play_audio_if_available(self.sound_playback.as_ref(), AudioCue::TwoPieces);
                     }
                     movement = ChessMove::new(
-                        Square::from_str(&String::from(&correct_moves[self.puzzle_tab.current_puzzle_move][..2])).unwrap(),
-                        Square::from_str(&String::from(&correct_moves[self.puzzle_tab.current_puzzle_move][2..4])).unwrap(), PuzzleTab::check_promotion(correct_moves[self.puzzle_tab.current_puzzle_move]));
+                        Square::from_str(&String::from(
+                            &correct_moves[self.puzzle_tab.current_puzzle_move][..2],
+                        ))
+                        .unwrap(),
+                        Square::from_str(&String::from(
+                            &correct_moves[self.puzzle_tab.current_puzzle_move][2..4],
+                        ))
+                        .unwrap(),
+                        PuzzleTab::check_promotion(
+                            correct_moves[self.puzzle_tab.current_puzzle_move],
+                        ),
+                    );
 
                     self.last_move_from = Some(movement.get_source());
                     self.last_move_to = Some(movement.get_dest());
@@ -535,15 +614,21 @@ impl OfflinePuzzles {
         if inc_counter {
             self.inc_puzzle_counter();
         }
-        let puzzle_moves: Vec<&str> = self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle].moves.split_whitespace().collect();
+        let puzzle_moves: Vec<&str> = self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle]
+            .moves
+            .split_whitespace()
+            .collect();
 
         // The opponent's last move (before the puzzle starts)
         // is in the "moves" field of the cvs, so we need to apply it.
-        self.board = Board::from_str(&self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle].fen).unwrap();
+        self.board =
+            Board::from_str(&self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle].fen).unwrap();
 
         let movement = ChessMove::new(
             Square::from_str(&String::from(&puzzle_moves[0][..2])).unwrap(),
-            Square::from_str(&String::from(&puzzle_moves[0][2..4])).unwrap(), PuzzleTab::check_promotion(puzzle_moves[0]));
+            Square::from_str(&String::from(&puzzle_moves[0][2..4])).unwrap(),
+            PuzzleTab::check_promotion(puzzle_moves[0]),
+        );
 
         self.last_move_from = Some(movement.get_source());
         self.last_move_to = Some(movement.get_dest());
@@ -564,7 +649,11 @@ impl OfflinePuzzles {
         self.refresh_current_puzzle_review();
     }
 
-    fn replace_puzzle_batch(&mut self, mut puzzles: Vec<config::Puzzle>, shuffle: bool) -> Result<(), String> {
+    fn replace_puzzle_batch(
+        &mut self,
+        mut puzzles: Vec<config::Puzzle>,
+        shuffle: bool,
+    ) -> Result<(), String> {
         validate_puzzle_batch(&puzzles)?;
         if shuffle {
             puzzles.shuffle(&mut rng());
@@ -725,10 +814,7 @@ impl OfflinePuzzles {
         generation: u64,
     ) -> bool {
         if generation != self.window_resize_generation
-            || self
-                .pending_window_resize
-                .map(|pending| pending.generation)
-                != Some(generation)
+            || self.pending_window_resize.map(|pending| pending.generation) != Some(generation)
         {
             return false;
         }
@@ -741,7 +827,8 @@ impl OfflinePuzzles {
     fn consolidate_pending_window_resize_before_exit(&mut self, maximized: bool) {
         if let Some(pending) = self.pending_window_resize.take() {
             if pending.generation == self.window_resize_generation {
-                self.settings_tab.record_window_resize(pending.size, maximized);
+                self.settings_tab
+                    .record_window_resize(pending.size, maximized);
                 return;
             }
         }
@@ -776,9 +863,12 @@ impl OfflinePuzzles {
     }
 
     fn send_engine_command(&self, command: &str) -> Result<(), String> {
-        let sender = self.engine_sender.as_ref()
+        let sender = self
+            .engine_sender
+            .as_ref()
             .ok_or_else(|| String::from("engine control channel is unavailable"))?;
-        sender.blocking_send(command.to_string())
+        sender
+            .blocking_send(command.to_string())
             .map_err(|error| format!("lost contact with engine: {error}"))
     }
     // Old Iced application trait stuff
@@ -793,92 +883,116 @@ impl OfflinePuzzles {
     fn update(&mut self, message: self::Message) -> Task<Message> {
         match (self.from_square, message) {
             (None, Message::SelectSquare(pos)) => {
-                let side =
-                    match self.game_mode {
-                        config::GameMode::Analysis => { self.analysis.side_to_move() }
-                        config::GameMode::Puzzle => { self.board.side_to_move() }
-                    };
-                let color =
-                    match self.game_mode {
-                        config::GameMode::Analysis => { self.analysis.current_position().color_on(pos) }
-                        config::GameMode::Puzzle => { self.board.color_on(pos) }
-                    };
+                let side = match self.game_mode {
+                    config::GameMode::Analysis => self.analysis.side_to_move(),
+                    config::GameMode::Puzzle => self.board.side_to_move(),
+                };
+                let color = match self.game_mode {
+                    config::GameMode::Analysis => self.analysis.current_position().color_on(pos),
+                    config::GameMode::Puzzle => self.board.color_on(pos),
+                };
 
-                if (self.puzzle_tab.game_status == GameStatus::Playing || self.game_mode == config::GameMode::Analysis) && color == Some(side) {
+                if (self.puzzle_tab.game_status == GameStatus::Playing
+                    || self.game_mode == config::GameMode::Analysis)
+                    && color == Some(side)
+                {
                     self.hint_square = None;
                     self.from_square = Some(pos);
                 }
                 Task::none()
-            } (Some(from), Message::SelectSquare(to)) if from != to => {
+            }
+            (Some(from), Message::SelectSquare(to)) if from != to => {
                 if self.verify_and_make_move(from, to) {
                     self.refresh_current_favorite_status()
                 } else {
                     Task::none()
                 }
-            } (Some(_), Message::SelectSquare(to)) => {
+            }
+            (Some(_), Message::SelectSquare(to)) => {
                 self.from_square = Some(to);
                 Task::none()
-            } (_, Message::TabSelected(selected)) => {
+            }
+            (_, Message::TabSelected(selected)) => {
                 self.active_tab = selected;
                 Task::none()
-            } (_, Message::Settings(message)) => {
-                self.settings_tab.update(message)
-            } (_, Message::Project(message)) => {
+            }
+            (_, Message::Settings(message)) => self.settings_tab.update(message),
+            (_, Message::Project(message)) => {
                 let task = self.project_tab.update(message);
                 self.refresh_current_puzzle_review();
                 task
-            } (_, Message::PuzzleSqliteSourceSelected) => {
+            }
+            (_, Message::PuzzleSqliteSourceSelected) => {
                 self.has_db = config::puzzle_source_exists(&self.settings_tab.saved_configs);
                 Task::none()
-            } (_, Message::SelectMode(message)) => {
+            }
+            (_, Message::SelectMode(message)) => {
                 self.game_mode = message;
                 if message == config::GameMode::Analysis {
                     self.analysis = Game::new_with_board(self.board);
                 } else {
-                    if self.engine_state != EngineStatus::TurnedOff
-                        && self.engine_sender.is_some() {
-                            if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
-                                return self.handle_engine_failure(error, false);
-                            }
+                    if self.engine_state != EngineStatus::TurnedOff && self.engine_sender.is_some()
+                    {
+                        if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                            return self.handle_engine_failure(error, false);
+                        }
                     }
-                    self.analysis_history.truncate(self.puzzle_tab.current_puzzle_move);
+                    self.analysis_history
+                        .truncate(self.puzzle_tab.current_puzzle_move);
                 }
                 Task::none()
-            } (_, Message::ShowHint) => {
-                let moves = self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle].moves.split_whitespace().collect::<Vec<&str>>();
+            }
+            (_, Message::ShowHint) => {
+                let moves = self.puzzle_tab.puzzles[self.puzzle_tab.current_puzzle]
+                    .moves
+                    .split_whitespace()
+                    .collect::<Vec<&str>>();
                 if !moves.is_empty() && moves.len() > self.puzzle_tab.current_puzzle_move {
-                    self.hint_square = Some(Square::from_str(&moves[self.puzzle_tab.current_puzzle_move][..2]).unwrap());
+                    self.hint_square = Some(
+                        Square::from_str(&moves[self.puzzle_tab.current_puzzle_move][..2]).unwrap(),
+                    );
                 } else {
                     self.hint_square = None;
                 }
 
                 Task::none()
-            } (_, Message::ShowNextPuzzle) => {
+            }
+            (_, Message::ShowNextPuzzle) => {
                 self.inc_puzzle_counter();
                 self.load_puzzle(false);
                 self.refresh_current_favorite_status()
-            } (_, Message::ShowPreviousPuzzle) => {
-                if self.puzzle_tab.current_puzzle > 0 && self.game_mode == config::GameMode::Puzzle {
+            }
+            (_, Message::ShowPreviousPuzzle) => {
+                if self.puzzle_tab.current_puzzle > 0 && self.game_mode == config::GameMode::Puzzle
+                {
                     self.dec_puzzle_counter();
                     self.load_puzzle(false);
                     self.refresh_current_favorite_status()
                 } else {
                     Task::none()
                 }
-            } (_, Message::GoBackMove) => {
-                if self.game_mode == config::GameMode::Analysis && self.analysis_history.len() > self.puzzle_tab.current_puzzle_move {
+            }
+            (_, Message::GoBackMove) => {
+                if self.game_mode == config::GameMode::Analysis
+                    && self.analysis_history.len() > self.puzzle_tab.current_puzzle_move
+                {
                     self.analysis_history.pop();
                     self.analysis = Game::new_with_board(*self.analysis_history.last().unwrap());
                     if let Some(sender) = &self.engine_sender
-                        && let Err(e) = sender.blocking_send(san_correct_ep(self.analysis.current_position().to_string())) {
-                            self.record_engine_failure(format!("lost contact with engine: {e}"));
+                        && let Err(e) = sender.blocking_send(san_correct_ep(
+                            self.analysis.current_position().to_string(),
+                        ))
+                    {
+                        self.record_engine_failure(format!("lost contact with engine: {e}"));
                     }
                 }
                 Task::none()
-            } (_, Message::RedoPuzzle) => {
+            }
+            (_, Message::RedoPuzzle) => {
                 self.load_puzzle(false);
                 Task::none()
-            } (_, Message::LoadProjectPuzzles(puzzles_vec)) => {
+            }
+            (_, Message::LoadProjectPuzzles(puzzles_vec)) => {
                 if puzzles_vec.is_empty() {
                     return Task::none();
                 }
@@ -887,14 +1001,14 @@ impl OfflinePuzzles {
                     return Task::none();
                 }
                 self.from_square = None;
-                if self.engine_state != EngineStatus::TurnedOff
-                    && self.engine_sender.is_some() {
-                        if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
-                                return self.handle_engine_failure(error, false);
-                            }
+                if self.engine_state != EngineStatus::TurnedOff && self.engine_sender.is_some() {
+                    if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                        return self.handle_engine_failure(error, false);
+                    }
                 }
                 self.refresh_current_favorite_status()
-            } (_, Message::LoadPuzzle { generation, result }) => {
+            }
+            (_, Message::LoadPuzzle { generation, result }) => {
                 if !self.search_response_is_current(generation) {
                     return Task::none();
                 }
@@ -912,11 +1026,11 @@ impl OfflinePuzzles {
                         return Task::none();
                     }
                     self.from_square = None;
-                    if self.engine_state != EngineStatus::TurnedOff
-                        && self.engine_sender.is_some() {
-                            if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
-                                return self.handle_engine_failure(error, false);
-                            }
+                    if self.engine_state != EngineStatus::TurnedOff && self.engine_sender.is_some()
+                    {
+                        if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                            return self.handle_engine_failure(error, false);
+                        }
                     }
                     return self.refresh_current_favorite_status();
                 } else {
@@ -932,7 +1046,8 @@ impl OfflinePuzzles {
                 }
                 self.refresh_current_puzzle_review();
                 Task::none()
-            } (_, Message::LoadFavorites { generation, result }) => {
+            }
+            (_, Message::LoadFavorites { generation, result }) => {
                 if !self.search_response_is_current(generation) {
                     return Task::none();
                 }
@@ -946,10 +1061,11 @@ impl OfflinePuzzles {
                             }
                             self.from_square = None;
                             if self.engine_state != EngineStatus::TurnedOff
-                                && self.engine_sender.is_some() {
-                                    if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
-                                        return self.handle_engine_failure(error, false);
-                                    }
+                                && self.engine_sender.is_some()
+                            {
+                                if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                                    return self.handle_engine_failure(error, false);
+                                }
                             }
                             self.refresh_current_favorite_status()
                         } else {
@@ -970,7 +1086,15 @@ impl OfflinePuzzles {
                         Task::none()
                     }
                 }
-            } (_, Message::FavoriteStatusLoaded { puzzle_id, generation, result }) => {
+            }
+            (
+                _,
+                Message::FavoriteStatusLoaded {
+                    puzzle_id,
+                    generation,
+                    result,
+                },
+            ) => {
                 if self.favorite_response_is_current(&puzzle_id, generation) {
                     match result {
                         Ok(is_favorite) => self.current_favorite = Some(is_favorite),
@@ -981,7 +1105,15 @@ impl OfflinePuzzles {
                     }
                 }
                 Task::none()
-            } (_, Message::FavoriteToggled { puzzle_id, generation, result }) => {
+            }
+            (
+                _,
+                Message::FavoriteToggled {
+                    puzzle_id,
+                    generation,
+                    result,
+                },
+            ) => {
                 if self.favorite_response_is_current(&puzzle_id, generation) {
                     match result {
                         Ok(is_favorite) => self.current_favorite = Some(is_favorite),
@@ -992,7 +1124,8 @@ impl OfflinePuzzles {
                     }
                 }
                 Task::none()
-            } (_, Message::ChangeSettings(message)) => {
+            }
+            (_, Message::ChangeSettings(message)) => {
                 if let Some(settings) = message {
                     self.search_tab.piece_theme_promotion = self.settings_tab.piece_theme;
                     self.engine.engine_path = self.settings_tab.engine_path.clone();
@@ -1004,25 +1137,25 @@ impl OfflinePuzzles {
                     self.project_tab.lang = self.lang;
                     self.settings_tab.saved_configs = settings;
                     self.piece_imgs = get_image_handles(&self.settings_tab.piece_theme);
-                    self.search_tab.promotion_piece_img = search_tab::gen_piece_vec(&self.settings_tab.piece_theme);
+                    self.search_tab.promotion_piece_img =
+                        search_tab::gen_piece_vec(&self.settings_tab.piece_theme);
                 }
                 Task::none()
             }
-             (_, Message::PuzzleInfo(message)) => {
-                self.puzzle_tab.update(message)
-            } (_, Message::Search(SearchMesssage::ClickSearch)) => {
+            (_, Message::PuzzleInfo(message)) => self.puzzle_tab.update(message),
+            (_, Message::Search(SearchMesssage::ClickSearch)) => {
                 let generation = self.next_search_generation();
                 let task = if self.search_tab.is_favorites() {
                     self.search_tab.start_favorites_search(generation)
                 } else {
                     match self.project_tab.reviewed_puzzle_ids_for_active_chapter() {
-                        Ok(excluded_ids) => self.search_tab.start_lichess_search(
-                            generation,
-                            excluded_ids.unwrap_or_default(),
-                        ),
+                        Ok(excluded_ids) => self
+                            .search_tab
+                            .start_lichess_search(generation, excluded_ids.unwrap_or_default()),
                         Err(error) => {
                             self.search_tab.show_searching_msg = false;
-                            self.puzzle_status = format!("{}: {error}", lang::tr(&self.lang, "review_error"));
+                            self.puzzle_status =
+                                format!("{}: {error}", lang::tr(&self.lang, "review_error"));
                             return Task::none();
                         }
                     }
@@ -1035,34 +1168,41 @@ impl OfflinePuzzles {
                         Task::none()
                     }
                 }
-            } (_, Message::Search(message)) => {
-                self.search_tab.update(message)
-            } (_, Message::PuzzleInputIndexChange(puzzle_input)) => {
+            }
+            (_, Message::Search(message)) => self.search_tab.update(message),
+            (_, Message::PuzzleInputIndexChange(puzzle_input)) => {
                 self.puzzle_number_ui = puzzle_input;
                 Task::none()
-            } (_, Message::JumpToPuzzle) => {
+            }
+            (_, Message::JumpToPuzzle) => {
                 // Test if puzzle index typed is valid
                 let puzzle_index = self.puzzle_number_ui.parse::<usize>();
                 if let Ok(index) = puzzle_index
-                    && index > 0 && index <= self.puzzle_tab.puzzles.len() {
-                        // The user typed value starts on 1, not zero, so we subtract 1
-                        self.puzzle_tab.current_puzzle = index - 1;
+                    && index > 0
+                    && index <= self.puzzle_tab.puzzles.len()
+                {
+                    // The user typed value starts on 1, not zero, so we subtract 1
+                    self.puzzle_tab.current_puzzle = index - 1;
                 }
                 self.load_puzzle(false);
                 self.refresh_current_favorite_status()
-            } (_, Message::SetPuzzleReview(decision)) => {
+            }
+            (_, Message::SetPuzzleReview(decision)) => {
                 if let Some(puzzle) = self.current_reviewable_puzzle().cloned() {
                     self.project_tab.set_puzzle_review(&puzzle, decision);
                 }
                 Task::none()
-            } (_, Message::ClearPuzzleReview) => {
+            }
+            (_, Message::ClearPuzzleReview) => {
                 if let Some(puzzle) = self.current_reviewable_puzzle().cloned() {
                     self.project_tab.clear_puzzle_review(&puzzle);
                 }
                 Task::none()
-            } (_, Message::ScreenshotCreated(screenshot)) => {
+            }
+            (_, Message::ScreenshotCreated(screenshot)) => {
                 Task::perform(screenshot_save_dialog(screenshot), Message::SaveScreenshot)
-            } (_, Message::SaveScreenshot(img_and_path)) => {
+            }
+            (_, Message::SaveScreenshot(img_and_path)) => {
                 match img_and_path {
                     Some((screenshot, path)) => match screenshot_crop_rectangle(
                         self.settings_tab.show_coordinates,
@@ -1072,16 +1212,15 @@ impl OfflinePuzzles {
                     {
                         Ok(()) => self.puzzle_status = lang::tr(&self.lang, "screenshot_saved"),
                         Err(error) => {
-                            self.puzzle_status = format!(
-                                "{}: {error}",
-                                lang::tr(&self.lang, "screenshot_failed")
-                            );
+                            self.puzzle_status =
+                                format!("{}: {error}", lang::tr(&self.lang, "screenshot_failed"));
                         }
                     },
                     None => self.puzzle_status = lang::tr(&self.lang, "screenshot_cancelled"),
                 }
                 Task::none()
-            } (_, Message::ExportPDF(file_path)) => {
+            }
+            (_, Message::ExportPDF(file_path)) => {
                 match file_path {
                     Some(file_path) => match export::to_pdf(
                         &self.puzzle_tab.puzzles,
@@ -1097,35 +1236,43 @@ impl OfflinePuzzles {
                             );
                         }
                     },
-                    None => self.puzzle_status = lang::tr(&self.lang, "normal_pdf_export_cancelled"),
+                    None => {
+                        self.puzzle_status = lang::tr(&self.lang, "normal_pdf_export_cancelled")
+                    }
                 }
                 Task::none()
-            } (_, Message::ExportPGN(file_path)) => {
+            }
+            (_, Message::ExportPGN(file_path)) => {
                 match file_path {
-                    Some(file_path) => match export::to_pgn(&self.puzzle_tab.puzzles, &self.lang, file_path) {
-                        Ok(()) => self.puzzle_status = lang::tr(&self.lang, "normal_pgn_exported"),
-                        Err(error) => {
-                            self.puzzle_status = format!(
-                                "{}: {error}",
-                                lang::tr(&self.lang, "normal_pgn_export_failed")
-                            );
+                    Some(file_path) => {
+                        match export::to_pgn(&self.puzzle_tab.puzzles, &self.lang, file_path) {
+                            Ok(()) => {
+                                self.puzzle_status = lang::tr(&self.lang, "normal_pgn_exported")
+                            }
+                            Err(error) => {
+                                self.puzzle_status = format!(
+                                    "{}: {error}",
+                                    lang::tr(&self.lang, "normal_pgn_export_failed")
+                                );
+                            }
                         }
-                    },
-                    None => self.puzzle_status = lang::tr(&self.lang, "normal_pgn_export_cancelled"),
+                    }
+                    None => {
+                        self.puzzle_status = lang::tr(&self.lang, "normal_pgn_export_cancelled")
+                    }
                 }
                 Task::none()
-            } (_, Message::ScreenshotFailed(error)) => {
-                self.puzzle_status = format!(
-                    "{}: {error}",
-                    lang::tr(&self.lang, "screenshot_failed")
-                );
+            }
+            (_, Message::ScreenshotFailed(error)) => {
+                self.puzzle_status =
+                    format!("{}: {error}", lang::tr(&self.lang, "screenshot_failed"));
                 Task::none()
-            } (_, Message::EventOccurred(event)) => {
+            }
+            (_, Message::EventOccurred(event)) => {
                 if let Event::Window(window::Event::CloseRequested) = event {
                     match self.engine_state {
-                        EngineStatus::TurnedOff => {
-                            self.final_exit_task(true)
-                        } _ => {
+                        EngineStatus::TurnedOff => self.final_exit_task(true),
+                        _ => {
                             if let Err(error) = self.send_engine_command(eval::EXIT_APP_COMMAND) {
                                 return self.handle_engine_failure(error, true);
                             }
@@ -1141,12 +1288,22 @@ impl OfflinePuzzles {
                 } else {
                     Task::none()
                 }
-            } (_, Message::WindowResizeStateResolved { size, maximized, generation }) => {
+            }
+            (
+                _,
+                Message::WindowResizeStateResolved {
+                    size,
+                    maximized,
+                    generation,
+                },
+            ) => {
                 self.apply_window_resize_resolution(size, maximized, generation);
                 Task::none()
-            } (_, Message::ResolveMaximizedStatusBeforeExit) => {
+            }
+            (_, Message::ResolveMaximizedStatusBeforeExit) => {
                 self.resolve_maximized_status_before_exit()
-            } (_, Message::SaveMaximizedStatusAndExit(is_maximized)) => {
+            }
+            (_, Message::SaveMaximizedStatusAndExit(is_maximized)) => {
                 self.consolidate_pending_window_resize_before_exit(is_maximized);
                 self.persist_settings_before_exit();
                 if let Some(window_id) = self.window_id {
@@ -1154,13 +1311,15 @@ impl OfflinePuzzles {
                 } else {
                     Task::none()
                 }
-            } (_, Message::EngineFileChosen(engine_path)) => {
+            }
+            (_, Message::EngineFileChosen(engine_path)) => {
                 if let Some(engine_path) = engine_path {
                     self.settings_tab.engine_path = engine_path.clone();
                     self.engine.engine_path = engine_path;
                 }
                 Task::none()
-            } (_, Message::StartEngine) => {
+            }
+            (_, Message::StartEngine) => {
                 match self.engine_state {
                     EngineStatus::TurnedOff => {
                         if self.engine.engine_path.is_empty() {
@@ -1168,10 +1327,12 @@ impl OfflinePuzzles {
                         } else if !Path::new(&self.engine.engine_path).exists() {
                             self.record_engine_failure("engine executable does not exist");
                         } else {
-                            self.engine.position = san_correct_ep(self.analysis.current_position().to_string());
+                            self.engine.position =
+                                san_correct_ep(self.analysis.current_position().to_string());
                             self.engine_state = EngineStatus::Started;
                         }
-                    } _ => {
+                    }
+                    _ => {
                         if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
                             return self.handle_engine_failure(error, false);
                         }
@@ -1179,21 +1340,28 @@ impl OfflinePuzzles {
                     }
                 }
                 Task::none()
-            } (_, Message::EngineStopped(exit)) => {
+            }
+            (_, Message::EngineStopped(exit)) => {
                 self.clear_engine_state();
                 self.final_exit_task(exit)
-            } (_, Message::EngineFailed { reason, exit_requested }) => {
-                self.handle_engine_failure(reason, exit_requested)
-            } (_, Message::EngineReady(sender)) => {
+            }
+            (
+                _,
+                Message::EngineFailed {
+                    reason,
+                    exit_requested,
+                },
+            ) => self.handle_engine_failure(reason, exit_requested),
+            (_, Message::EngineReady(sender)) => {
                 if self.engine_state != EngineStatus::TurnedOff {
                     self.engine_sender = Some(sender);
                 }
                 Task::none()
-            } (_, Message::UpdateEval(eval)) => {
+            }
+            (_, Message::UpdateEval(eval)) => {
                 match self.engine_state {
-                    EngineStatus::TurnedOff => {
-                        Task::none()
-                    } _ => {
+                    EngineStatus::TurnedOff => Task::none(),
+                    _ => {
                         let (eval, best_move) = eval;
                         if let Some(eval_str) = eval {
                             if eval_str.contains("Mate") {
@@ -1201,13 +1369,17 @@ impl OfflinePuzzles {
                                 let distance_to_mate_num = tokens[2].parse::<i32>().unwrap();
                                 match distance_to_mate_num {
                                     1.. => {
-                                        self.engine_eval = lang::tr(&self.lang, "mate_in") + &distance_to_mate_num.to_string();
-                                    } 0 => {
+                                        self.engine_eval = lang::tr(&self.lang, "mate_in")
+                                            + &distance_to_mate_num.to_string();
+                                    }
+                                    0 => {
                                         self.engine_eval = lang::tr(&self.lang, "mate");
                                         self.engine_move = String::from("");
                                         return Task::none();
-                                    } _ => {
-                                        self.engine_eval = lang::tr(&self.lang, "mate_in") + &(-distance_to_mate_num).to_string();
+                                    }
+                                    _ => {
+                                        self.engine_eval = lang::tr(&self.lang, "mate_in")
+                                            + &(-distance_to_mate_num).to_string();
                                     }
                                 };
                             } else if self.analysis.side_to_move() == Color::White {
@@ -1220,13 +1392,19 @@ impl OfflinePuzzles {
                             }
                         }
                         if let Some(best_move) = best_move
-                            && let Some(best_move) = config::coord_to_san(&self.analysis.current_position(), best_move, &self.lang) {
-                                self.engine_move = best_move;
+                            && let Some(best_move) = config::coord_to_san(
+                                &self.analysis.current_position(),
+                                best_move,
+                                &self.lang,
+                            )
+                        {
+                            self.engine_move = best_move;
                         }
                         Task::none()
                     }
                 }
-            } (_, Message::StartDBDownload) => {
+            }
+            (_, Message::StartDBDownload) => {
                 if self.settings_tab.is_using_sqlite_puzzles() {
                     let _ = self.settings_tab.update(SettingsMessage::UseCsvPuzzles);
                     if self.settings_tab.is_using_sqlite_puzzles() {
@@ -1236,21 +1414,23 @@ impl OfflinePuzzles {
                 self.downloading_db = true;
                 self.download_progress.clear();
                 Task::none()
-            } (_, Message::DBDownloadFinished) => {
+            }
+            (_, Message::DBDownloadFinished) => {
                 self.downloading_db = false;
                 self.has_db = true;
                 Task::none()
-            } (_, Message::DBDownloadFailed(error)) => {
+            }
+            (_, Message::DBDownloadFailed(error)) => {
                 self.downloading_db = false;
-                self.download_progress = format!(
-                    "{}: {error}",
-                    lang::tr(&self.lang, "db_download_failed")
-                );
+                self.download_progress =
+                    format!("{}: {error}", lang::tr(&self.lang, "db_download_failed"));
                 Task::none()
-            } (_, Message::DownloadProgress(progress)) => {
+            }
+            (_, Message::DownloadProgress(progress)) => {
                 self.download_progress = progress;
                 Task::none()
-            } (_, Message::FavoritePuzzle) => {
+            }
+            (_, Message::FavoritePuzzle) => {
                 let Some(puzzle) = self.current_reviewable_puzzle().cloned() else {
                     return Task::none();
                 };
@@ -1261,22 +1441,26 @@ impl OfflinePuzzles {
                 let puzzle_id = puzzle.puzzle_id.clone();
                 let generation = self.next_favorite_generation();
                 self.current_favorite = None;
-                Task::perform(
-                    async move { db::toggle_favorite(puzzle) },
-                    move |result| Message::FavoriteToggled {
+                Task::perform(async move { db::toggle_favorite(puzzle) }, move |result| {
+                    Message::FavoriteToggled {
                         puzzle_id,
                         generation,
                         result,
-                    },
-                )
-            } (_, Message::WindowInitialized(id)) => {
+                    }
+                })
+            }
+            (_, Message::WindowInitialized(id)) => {
                 self.window_id = id;
                 self.puzzle_tab.window_id = id;
                 iced::window::maximize(self.window_id.unwrap(), self.settings_tab.maximized)
-            } (_, Message::MinimizeUI) => {
+            }
+            (_, Message::MinimizeUI) => {
                 if self.mini_ui {
                     self.mini_ui = false;
-                    let new_size = Size::new(self.settings_tab.window_width, self.settings_tab.window_height);
+                    let new_size = Size::new(
+                        self.settings_tab.window_width,
+                        self.settings_tab.window_height,
+                    );
                     iced::window::resize(self.window_id.unwrap(), new_size)
                 } else {
                     self.mini_ui = true;
@@ -1288,8 +1472,11 @@ impl OfflinePuzzles {
                         self.settings_tab.window_height);
                     iced::window::resize(self.window_id.unwrap(), new_size)
                 }
-            } (_, Message::DropPiece(square, cursor_pos, _bounds)) => {
-                if self.puzzle_tab.game_status == GameStatus::Playing || self.game_mode == config::GameMode::Analysis {
+            }
+            (_, Message::DropPiece(square, cursor_pos, _bounds)) => {
+                if self.puzzle_tab.game_status == GameStatus::Playing
+                    || self.game_mode == config::GameMode::Analysis
+                {
                     iced_drop::zones_on_point(
                         move |zones| Message::HandleDropZones(square, zones),
                         cursor_pos,
@@ -1299,7 +1486,8 @@ impl OfflinePuzzles {
                 } else {
                     Task::none()
                 }
-            } (_, Message::HandleDropZones(from, zones)) => {
+            }
+            (_, Message::HandleDropZones(from, zones)) => {
                 if !zones.is_empty() {
                     let id: &GenericId = &zones[0].0.clone();
                     if let Some(to) = self.square_ids.get(id) {
@@ -1319,24 +1507,25 @@ impl OfflinePuzzles {
                 if self.downloading_db {
                     Subscription::batch(vec![
                         download_lichess_db(),
-                        event::listen().map(Message::EventOccurred)
+                        event::listen().map(Message::EventOccurred),
                     ])
                 } else {
                     event::listen().map(Message::EventOccurred)
                 }
-            } _ => {
-                Subscription::batch(vec![
-                    Engine::run_engine(self.engine.clone()),
-                    event::listen().map(Message::EventOccurred)
-                ])
             }
+            _ => Subscription::batch(vec![
+                Engine::run_engine(self.engine.clone()),
+                event::listen().map(Message::EventOccurred),
+            ]),
         }
     }
 
     fn view(&self) -> Element<'_, Message, Theme, iced::Renderer> {
         if self.has_db {
-            let has_previous = !self.puzzle_tab.puzzles.is_empty() && self.puzzle_tab.current_puzzle > 0;
-            let has_more_puzzles = !self.puzzle_tab.puzzles.is_empty() && self.puzzle_tab.current_puzzle < self.puzzle_tab.puzzles.len() - 1;
+            let has_previous =
+                !self.puzzle_tab.puzzles.is_empty() && self.puzzle_tab.current_puzzle > 0;
+            let has_more_puzzles = !self.puzzle_tab.puzzles.is_empty()
+                && self.puzzle_tab.current_puzzle < self.puzzle_tab.puzzles.len() - 1;
             let is_fav = self.current_reviewable_puzzle().and(self.current_favorite);
             let puzzle_review = self
                 .current_reviewable_puzzle()
@@ -1368,7 +1557,6 @@ impl OfflinePuzzles {
                     &self.active_tab,
                     &self.engine_eval,
                     &self.engine_move,
-
                     self.engine_state != EngineStatus::TurnedOff,
                     self.search_tab.tab_label(),
                     self.settings_tab.tab_label(),
@@ -1383,43 +1571,47 @@ impl OfflinePuzzles {
                     self.mini_ui,
                     &self.board_btn_ids,
                     &self.piece_imgs,
-                )});
-            Container::new(resp)
-                .padding(1)
-                .into()
+                )
+            });
+            Container::new(resp).padding(1).into()
         } else {
             let mut col = Column::new()
-                .push(
-                    container(
-                        Text::new(lang::tr(&self.lang, "db_not_found"))
+                .push(container(
+                    Text::new(lang::tr(&self.lang, "db_not_found"))
                         .size(30)
                         .width(Length::Fill)
-                        .align_x(alignment::Horizontal::Center))
-                    )
+                        .align_x(alignment::Horizontal::Center),
+                ))
                 .push(
                     Text::new(lang::tr(&self.lang, "do_you_wanna_download"))
-                    .width(Length::Fill)
-                    .align_x(alignment::Horizontal::Center))
+                        .width(Length::Fill)
+                        .align_x(alignment::Horizontal::Center),
+                )
                 .push(
                     Text::new(lang::tr(&self.lang, "download_size_info"))
-                    .width(Length::Fill)
-                    .align_x(alignment::Horizontal::Center));
+                        .width(Length::Fill)
+                        .align_x(alignment::Horizontal::Center),
+                );
             if self.downloading_db {
                 col = col
                     .push(
-                        container(button(Text::new(lang::tr(&self.lang, "downloading")))).width(Length::Fill).center_x(Length::Fill).padding(20)
+                        container(button(Text::new(lang::tr(&self.lang, "downloading"))))
+                            .width(Length::Fill)
+                            .center_x(Length::Fill)
+                            .padding(20),
                     )
-                    .push(Text::new(&self.download_progress)
-                        .size(20)
-                        .width(Length::Fill)
-                        .align_x(alignment::Horizontal::Center)
+                    .push(
+                        Text::new(&self.download_progress)
+                            .size(20)
+                            .width(Length::Fill)
+                            .align_x(alignment::Horizontal::Center),
                     );
             } else {
                 col = col
                     .push(
                         container(
                             button(Text::new(lang::tr(&self.lang, "download_btn")))
-                                .on_press(Message::StartDBDownload)
+                                .on_press(Message::StartDBDownload),
                         )
                         .width(Length::Fill)
                         .center_x(Length::Fill)
@@ -1430,7 +1622,7 @@ impl OfflinePuzzles {
                             button(Text::new(lang::tr(&self.lang, "select_puzzle_sqlite_db")))
                                 .on_press(Message::Settings(
                                     SettingsMessage::SelectPuzzleSqlitePressed,
-                                ))
+                                )),
                         )
                         .width(Length::Fill)
                         .center_x(Length::Fill)
@@ -1449,9 +1641,7 @@ impl OfflinePuzzles {
                     );
                 }
             };
-            center(col)
-                .padding(1)
-                .into()
+            center(col).padding(1).into()
         }
     }
 
@@ -1491,11 +1681,11 @@ mod tests {
         assert!(!play_audio_if_available(None, AudioCue::OnePiece));
         assert!(!play_audio_if_available(None, AudioCue::TwoPieces));
     }
-    use chess_material_studio::models::Puzzle as PersistentPuzzle;
-    use chess_material_studio::project::{create_chapter, create_project, set_puzzle_decision};
     use crate::lang::PickListWrapper;
     use crate::openings::{Openings, Variation};
     use crate::search_tab::{OpeningSide, SearchBase, TacticalThemes};
+    use chess_material_studio::models::Puzzle as PersistentPuzzle;
+    use chess_material_studio::project::{create_chapter, create_project, set_puzzle_decision};
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1567,7 +1757,8 @@ mod tests {
                 .join("target")
                 .join("cms_h9_screenshot_tests")
                 .join(format!("{label}-{}-{sequence}", std::process::id()));
-            std::fs::create_dir_all(&directory).expect("screenshot test directory should be created");
+            std::fs::create_dir_all(&directory)
+                .expect("screenshot test directory should be created");
             Self {
                 path: directory.join("screenshot.jpg"),
                 directory,
@@ -1688,9 +1879,9 @@ mod tests {
         let original_width = app.settings_tab.window_width;
         let original_height = app.settings_tab.window_height;
 
-        let _ = app.update(Message::EventOccurred(Event::Window(window::Event::Resized(
-            Size::new(1200.0, 800.0),
-        ))));
+        let _ = app.update(Message::EventOccurred(Event::Window(
+            window::Event::Resized(Size::new(1200.0, 800.0)),
+        )));
 
         assert_eq!(app.window_resize_generation, 1);
         assert!(app.pending_window_resize.is_none());
@@ -1704,11 +1895,7 @@ mod tests {
         let generation = app.remember_pending_window_resize(Size::new(1200.0, 800.0));
         app.mini_ui = true;
 
-        assert!(app.apply_window_resize_resolution(
-            Size::new(1200.0, 800.0),
-            false,
-            generation,
-        ));
+        assert!(app.apply_window_resize_resolution(Size::new(1200.0, 800.0), false, generation,));
         assert_eq!(app.settings_tab.window_width, 1200.0);
         assert_eq!(app.settings_tab.window_height, 800.0);
     }
@@ -1742,11 +1929,7 @@ mod tests {
         let generation = app.remember_pending_window_resize(Size::new(1250.0, 820.0));
 
         app.consolidate_pending_window_resize_before_exit(false);
-        assert!(!app.apply_window_resize_resolution(
-            Size::new(1250.0, 820.0),
-            false,
-            generation,
-        ));
+        assert!(!app.apply_window_resize_resolution(Size::new(1250.0, 820.0), false, generation,));
         app.persist_settings_before_exit();
 
         let restored = config::load_config_from_path(&settings_file.path);
@@ -1789,9 +1972,15 @@ mod tests {
         app.settings_tab
             .record_window_resize(Size::new(1900.0, 1000.0), true);
 
-        let _ = app.update(Message::Search(SearchMesssage::SliderMinRatingChanged(1500)));
-        let _ = app.update(Message::Search(SearchMesssage::SliderMaxRatingChanged(2500)));
-        let _ = app.update(Message::Search(SearchMesssage::SliderMinPopularityChanged(33)));
+        let _ = app.update(Message::Search(SearchMesssage::SliderMinRatingChanged(
+            1500,
+        )));
+        let _ = app.update(Message::Search(SearchMesssage::SliderMaxRatingChanged(
+            2500,
+        )));
+        let _ = app.update(Message::Search(SearchMesssage::SliderMinPopularityChanged(
+            33,
+        )));
         let _ = app.update(Message::Search(SearchMesssage::SelectTheme(
             PickListWrapper::new_theme(app.lang, TacticalThemes::Fork),
         )));
@@ -1878,7 +2067,10 @@ mod tests {
 
         assert!(!app.downloading_db);
         assert!(!app.has_db);
-        assert!(app.download_progress.contains(&lang::tr(&app.lang, "db_download_failed")));
+        assert!(
+            app.download_progress
+                .contains(&lang::tr(&app.lang, "db_download_failed"))
+        );
         assert!(app.download_progress.contains("network unavailable"));
     }
 
@@ -1937,14 +2129,31 @@ mod tests {
         puzzle_id: &str,
         decision: ProjectPuzzleDecision,
     ) {
-        assert_eq!(app.current_reviewable_puzzle().unwrap().puzzle_id, puzzle_id);
+        assert_eq!(
+            app.current_reviewable_puzzle().unwrap().puzzle_id,
+            puzzle_id
+        );
         assert_eq!(app.project_tab.cached_review_puzzle_id(), Some(puzzle_id));
-        assert_eq!(app.project_tab.review_view().unwrap().decision, Some(decision));
+        assert_eq!(
+            app.project_tab.review_view().unwrap().decision,
+            Some(decision)
+        );
     }
 
     #[derive(Debug, PartialEq, Eq)]
     struct NormalExportState {
-        puzzle_batch: Vec<(String, String, String, i32, i32, i32, i32, String, String, String)>,
+        puzzle_batch: Vec<(
+            String,
+            String,
+            String,
+            i32,
+            i32,
+            i32,
+            i32,
+            String,
+            String,
+            String,
+        )>,
         current_puzzle: usize,
         current_puzzle_move: usize,
         current_puzzle_side: Color,
@@ -1964,11 +2173,25 @@ mod tests {
 
     fn normal_export_state(app: &OfflinePuzzles) -> NormalExportState {
         NormalExportState {
-            puzzle_batch: app.puzzle_tab.puzzles.iter().map(|puzzle| (
-                puzzle.puzzle_id.clone(), puzzle.fen.clone(), puzzle.moves.clone(), puzzle.rating,
-                puzzle.rating_deviation, puzzle.popularity, puzzle.nb_plays, puzzle.themes.clone(),
-                puzzle.game_url.clone(), puzzle.opening.clone(),
-            )).collect(),
+            puzzle_batch: app
+                .puzzle_tab
+                .puzzles
+                .iter()
+                .map(|puzzle| {
+                    (
+                        puzzle.puzzle_id.clone(),
+                        puzzle.fen.clone(),
+                        puzzle.moves.clone(),
+                        puzzle.rating,
+                        puzzle.rating_deviation,
+                        puzzle.popularity,
+                        puzzle.nb_plays,
+                        puzzle.themes.clone(),
+                        puzzle.game_url.clone(),
+                        puzzle.opening.clone(),
+                    )
+                })
+                .collect(),
             current_puzzle: app.puzzle_tab.current_puzzle,
             current_puzzle_move: app.puzzle_tab.current_puzzle_move,
             current_puzzle_side: app.puzzle_tab.current_puzzle_side,
@@ -1983,7 +2206,10 @@ mod tests {
             favorite_generation: app.favorite_generation,
             review_puzzle_id: app.project_tab.cached_review_puzzle_id().map(str::to_owned),
             review_view: app.project_tab.review_view(),
-            reviewed_puzzle_ids: app.project_tab.reviewed_puzzle_ids_for_active_chapter().unwrap(),
+            reviewed_puzzle_ids: app
+                .project_tab
+                .reviewed_puzzle_ids_for_active_chapter()
+                .unwrap(),
         }
     }
 
@@ -1998,31 +2224,48 @@ mod tests {
             "{route}: puzzle batch changed"
         );
         assert_eq!(
-            app.puzzle_tab.current_puzzle,
-            expected.current_puzzle,
+            app.puzzle_tab.current_puzzle, expected.current_puzzle,
             "{route}: current puzzle changed"
         );
-        assert_eq!(app.puzzle_tab.current_puzzle_move, expected.current_puzzle_move, "{route}: current puzzle move changed");
-        assert_eq!(app.puzzle_tab.current_puzzle_side, expected.current_puzzle_side, "{route}: current puzzle side changed");
-        assert_eq!(app.puzzle_tab.current_puzzle_fen, expected.current_puzzle_fen, "{route}: current puzzle FEN changed");
-        assert_eq!(app.puzzle_number_ui, expected.puzzle_number_ui, "{route}: puzzle number changed");
+        assert_eq!(
+            app.puzzle_tab.current_puzzle_move, expected.current_puzzle_move,
+            "{route}: current puzzle move changed"
+        );
+        assert_eq!(
+            app.puzzle_tab.current_puzzle_side, expected.current_puzzle_side,
+            "{route}: current puzzle side changed"
+        );
+        assert_eq!(
+            app.puzzle_tab.current_puzzle_fen, expected.current_puzzle_fen,
+            "{route}: current puzzle FEN changed"
+        );
+        assert_eq!(
+            app.puzzle_number_ui, expected.puzzle_number_ui,
+            "{route}: puzzle number changed"
+        );
         assert_eq!(app.board, expected.board, "{route}: board changed");
         assert_eq!(
-            app.puzzle_tab.game_status,
-            expected.game_status,
+            app.puzzle_tab.game_status, expected.game_status,
             "{route}: game status changed"
         );
-        assert_eq!(app.game_mode, expected.game_mode, "{route}: game mode changed");
-        assert_eq!(app.last_move_from, expected.last_move_from, "{route}: last-move source changed");
-        assert_eq!(app.last_move_to, expected.last_move_to, "{route}: last-move destination changed");
         assert_eq!(
-            app.current_favorite,
-            expected.current_favorite,
+            app.game_mode, expected.game_mode,
+            "{route}: game mode changed"
+        );
+        assert_eq!(
+            app.last_move_from, expected.last_move_from,
+            "{route}: last-move source changed"
+        );
+        assert_eq!(
+            app.last_move_to, expected.last_move_to,
+            "{route}: last-move destination changed"
+        );
+        assert_eq!(
+            app.current_favorite, expected.current_favorite,
             "{route}: favorite state changed"
         );
         assert_eq!(
-            app.favorite_generation,
-            expected.favorite_generation,
+            app.favorite_generation, expected.favorite_generation,
             "{route}: favorite generation changed"
         );
         assert_eq!(
@@ -2036,7 +2279,9 @@ mod tests {
             "{route}: review view changed"
         );
         assert_eq!(
-            app.project_tab.reviewed_puzzle_ids_for_active_chapter().unwrap(),
+            app.project_tab
+                .reviewed_puzzle_ids_for_active_chapter()
+                .unwrap(),
             expected.reviewed_puzzle_ids,
             "{route}: active project or chapter changed"
         );
@@ -2055,7 +2300,8 @@ mod tests {
             chapter.id,
             &persistent_puzzle(&puzzles[1]),
             ProjectPuzzleDecision::Selected,
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut app = OfflinePuzzles::new(false);
         let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
@@ -2157,18 +2403,38 @@ mod tests {
             navigation_puzzle("cms-023h-third"),
         ];
         for puzzle in &puzzles {
-            set_puzzle_decision(&project.path, chapter.id, &persistent_puzzle(puzzle), ProjectPuzzleDecision::Selected).unwrap();
+            set_puzzle_decision(
+                &project.path,
+                chapter.id,
+                &persistent_puzzle(puzzle),
+                ProjectPuzzleDecision::Selected,
+            )
+            .unwrap();
         }
         let mut app = OfflinePuzzles::new(false);
-        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(project.path.clone()))));
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
 
         let _ = app.update(Message::LoadProjectPuzzles(puzzles.clone()));
 
-        assert_eq!(app.puzzle_tab.puzzles.iter().map(|puzzle| puzzle.puzzle_id.as_str()).collect::<Vec<_>>(), vec!["cms-023h-first", "cms-023h-second", "cms-023h-third"]);
+        assert_eq!(
+            app.puzzle_tab
+                .puzzles
+                .iter()
+                .map(|puzzle| puzzle.puzzle_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cms-023h-first", "cms-023h-second", "cms-023h-third"]
+        );
         assert_eq!(app.puzzle_tab.current_puzzle, 0);
         assert_eq!(app.puzzle_number_ui, "1");
         assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
-        assert_eq!(app.board, Board::from_str(&puzzles[0].fen).unwrap().make_move_new(ChessMove::new(Square::A1, Square::A2, None)));
+        assert_eq!(
+            app.board,
+            Board::from_str(&puzzles[0].fen)
+                .unwrap()
+                .make_move_new(ChessMove::new(Square::A1, Square::A2, None))
+        );
         assert_current_review(&app, "cms-023h-first", ProjectPuzzleDecision::Selected);
 
         let _ = app.update(Message::ShowNextPuzzle);
@@ -2202,12 +2468,23 @@ mod tests {
         let project = TempProjectDb::new("project-load-mutation");
         create_project(&project.path, "Proyecto").unwrap();
         let chapter = create_chapter(&project.path, "Capítulo", None).unwrap();
-        let puzzles = vec![navigation_puzzle("cms-023h-mutation-first"), navigation_puzzle("cms-023h-mutation-second")];
+        let puzzles = vec![
+            navigation_puzzle("cms-023h-mutation-first"),
+            navigation_puzzle("cms-023h-mutation-second"),
+        ];
         for puzzle in &puzzles {
-            set_puzzle_decision(&project.path, chapter.id, &persistent_puzzle(puzzle), ProjectPuzzleDecision::Selected).unwrap();
+            set_puzzle_decision(
+                &project.path,
+                chapter.id,
+                &persistent_puzzle(puzzle),
+                ProjectPuzzleDecision::Selected,
+            )
+            .unwrap();
         }
         let mut app = OfflinePuzzles::new(false);
-        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(project.path.clone()))));
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
         let _ = app.update(Message::LoadProjectPuzzles(puzzles.clone()));
 
         let _ = app.update(Message::SetPuzzleReview(ProjectPuzzleDecision::Discarded));
@@ -2215,7 +2492,11 @@ mod tests {
         assert_eq!(app.puzzle_tab.puzzles.len(), puzzles.len());
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, puzzles[0].puzzle_id);
         assert_eq!(app.puzzle_tab.puzzles[1].puzzle_id, puzzles[1].puzzle_id);
-        assert_current_review(&app, "cms-023h-mutation-first", ProjectPuzzleDecision::Discarded);
+        assert_current_review(
+            &app,
+            "cms-023h-mutation-first",
+            ProjectPuzzleDecision::Discarded,
+        );
 
         let _ = app.update(Message::ClearPuzzleReview);
 
@@ -2248,7 +2529,10 @@ mod tests {
         assert_ne!(app.search_generation, stale_generation);
         assert_eq!(app.puzzle_tab.puzzles.len(), 1);
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, loaded.puzzle_id);
-        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "review_error")));
+        assert!(
+            app.puzzle_status
+                .contains(&lang::tr(&app.lang, "review_error"))
+        );
 
         let status_after_failed_preparation = app.puzzle_status.clone();
         let _ = app.update(Message::LoadPuzzle {
@@ -2258,7 +2542,9 @@ mod tests {
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, loaded.puzzle_id);
         assert_eq!(app.puzzle_status, status_after_failed_preparation);
 
-        let _ = app.update(Message::Search(SearchMesssage::SelectBase(SearchBase::Favorites)));
+        let _ = app.update(Message::Search(SearchMesssage::SelectBase(
+            SearchBase::Favorites,
+        )));
         let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
         assert!(app.search_tab.show_searching_msg);
         assert_eq!(app.puzzle_tab.puzzles.len(), 1);
@@ -2288,8 +2574,12 @@ mod tests {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("cms_normal_export_main_tests");
-        std::fs::create_dir_all(&directory).expect("normal export test directory should be created");
-        directory.join(format!("normal-export-{}-{sequence}.{extension}", std::process::id()))
+        std::fs::create_dir_all(&directory)
+            .expect("normal export test directory should be created");
+        directory.join(format!(
+            "normal-export-{}-{sequence}.{extension}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -2304,36 +2594,58 @@ mod tests {
         );
 
         let _ = app.update(Message::ExportPGN(None));
-        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "normal_pgn_export_cancelled"));
+        assert_eq!(
+            app.puzzle_status,
+            lang::tr(&app.lang, "normal_pgn_export_cancelled")
+        );
         assert_normal_export_state_preserved(&app, &original_state, "PGN cancellation");
 
         let pgn_path = normal_export_test_path("pgn");
         let _ = app.update(Message::ExportPGN(Some(pgn_path.display().to_string())));
-        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "normal_pgn_exported"));
+        assert_eq!(
+            app.puzzle_status,
+            lang::tr(&app.lang, "normal_pgn_exported")
+        );
         assert!(pgn_path.is_file());
         assert_normal_export_state_preserved(&app, &original_state, "PGN success");
         let _ = std::fs::remove_file(&pgn_path);
 
         let pgn_missing_parent = normal_export_test_path("missing").join("output.pgn");
-        let _ = app.update(Message::ExportPGN(Some(pgn_missing_parent.display().to_string())));
-        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "normal_pgn_export_failed")));
+        let _ = app.update(Message::ExportPGN(Some(
+            pgn_missing_parent.display().to_string(),
+        )));
+        assert!(
+            app.puzzle_status
+                .contains(&lang::tr(&app.lang, "normal_pgn_export_failed"))
+        );
         assert!(app.puzzle_status.contains("Error writing PGN file"));
         assert_normal_export_state_preserved(&app, &original_state, "PGN error");
 
         let _ = app.update(Message::ExportPDF(None));
-        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "normal_pdf_export_cancelled"));
+        assert_eq!(
+            app.puzzle_status,
+            lang::tr(&app.lang, "normal_pdf_export_cancelled")
+        );
         assert_normal_export_state_preserved(&app, &original_state, "PDF cancellation");
 
         let pdf_path = normal_export_test_path("pdf");
         let _ = app.update(Message::ExportPDF(Some(pdf_path.display().to_string())));
-        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "normal_pdf_exported"));
+        assert_eq!(
+            app.puzzle_status,
+            lang::tr(&app.lang, "normal_pdf_exported")
+        );
         assert!(pdf_path.is_file());
         assert_normal_export_state_preserved(&app, &original_state, "PDF success");
         let _ = std::fs::remove_file(&pdf_path);
 
         let pdf_missing_parent = normal_export_test_path("missing").join("output.pdf");
-        let _ = app.update(Message::ExportPDF(Some(pdf_missing_parent.display().to_string())));
-        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "normal_pdf_export_failed")));
+        let _ = app.update(Message::ExportPDF(Some(
+            pdf_missing_parent.display().to_string(),
+        )));
+        assert!(
+            app.puzzle_status
+                .contains(&lang::tr(&app.lang, "normal_pdf_export_failed"))
+        );
         assert!(app.puzzle_status.contains("Error writing PDF file"));
         assert_normal_export_state_preserved(&app, &original_state, "PDF error");
     }
@@ -2344,7 +2656,12 @@ mod tests {
 
         save_screenshot_to_path(
             &screenshot(20, 20),
-            Rectangle::<u32> { x: 0, y: 0, width: 10, height: 10 },
+            Rectangle::<u32> {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
             &output.path,
         )
         .expect("valid screenshot should save");
@@ -2356,11 +2673,19 @@ mod tests {
     #[test]
     fn screenshot_helper_propagates_write_failure() {
         let output = TempScreenshotFile::new("write-failure");
-        let missing_parent_path = output.directory.join("missing-parent").join("screenshot.jpg");
+        let missing_parent_path = output
+            .directory
+            .join("missing-parent")
+            .join("screenshot.jpg");
 
         let error = save_screenshot_to_path(
             &screenshot(20, 20),
-            Rectangle::<u32> { x: 0, y: 0, width: 10, height: 10 },
+            Rectangle::<u32> {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
             &missing_parent_path,
         )
         .expect_err("a missing destination parent must fail");
@@ -2374,7 +2699,12 @@ mod tests {
 
         let error = save_screenshot_to_path(
             &screenshot(10, 10),
-            Rectangle::<u32> { x: 0, y: 0, width: 11, height: 10 },
+            Rectangle::<u32> {
+                x: 0,
+                y: 0,
+                width: 11,
+                height: 10,
+            },
             &output.path,
         )
         .expect_err("an out-of-bounds crop must fail");
@@ -2409,10 +2739,16 @@ mod tests {
         let output = TempScreenshotFile::new("status-success");
 
         let _ = app.update(Message::SaveScreenshot(None));
-        assert_eq!(app.puzzle_status, lang::tr(&app.lang, "screenshot_cancelled"));
+        assert_eq!(
+            app.puzzle_status,
+            lang::tr(&app.lang, "screenshot_cancelled")
+        );
         assert_normal_export_state_preserved(&app, &original_state, "screenshot cancellation");
 
-        let _ = app.update(Message::SaveScreenshot(Some((screenshot(100, 100), output.path.clone()))));
+        let _ = app.update(Message::SaveScreenshot(Some((
+            screenshot(100, 100),
+            output.path.clone(),
+        ))));
         assert_eq!(app.puzzle_status, lang::tr(&app.lang, "screenshot_saved"));
         assert!(output.path.is_file());
         assert_normal_export_state_preserved(&app, &original_state, "screenshot success");
@@ -2421,13 +2757,24 @@ mod tests {
             screenshot(1, 1),
             output.directory.join("crop-failure.jpg"),
         ))));
-        assert!(app.puzzle_status.starts_with(&lang::tr(&app.lang, "screenshot_failed")));
+        assert!(
+            app.puzzle_status
+                .starts_with(&lang::tr(&app.lang, "screenshot_failed"))
+        );
         assert!(app.puzzle_status.contains("failed to crop screenshot"));
         assert_normal_export_state_preserved(&app, &original_state, "screenshot failure");
 
-        let _ = app.update(Message::ScreenshotFailed("screenshot window is not initialized".into()));
-        assert!(app.puzzle_status.starts_with(&lang::tr(&app.lang, "screenshot_failed")));
-        assert!(app.puzzle_status.contains("screenshot window is not initialized"));
+        let _ = app.update(Message::ScreenshotFailed(
+            "screenshot window is not initialized".into(),
+        ));
+        assert!(
+            app.puzzle_status
+                .starts_with(&lang::tr(&app.lang, "screenshot_failed"))
+        );
+        assert!(
+            app.puzzle_status
+                .contains("screenshot window is not initialized")
+        );
         assert_normal_export_state_preserved(&app, &original_state, "missing screenshot window");
     }
 
@@ -2467,7 +2814,10 @@ mod tests {
         assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "loaded-favorite");
         assert_eq!(app.board, board);
         assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
-        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "my_favories")));
+        assert!(
+            app.puzzle_status
+                .contains(&lang::tr(&app.lang, "my_favories"))
+        );
         assert!(app.puzzle_status.contains("controlled search failure"));
     }
 
@@ -2514,10 +2864,7 @@ mod tests {
 
         let _ = app.update(Message::LoadPuzzle {
             generation: app.search_generation,
-            result: Ok(vec![
-                navigation_puzzle("valid-normal-search"),
-                invalid,
-            ]),
+            result: Ok(vec![navigation_puzzle("valid-normal-search"), invalid]),
         });
 
         assert!(!app.search_tab.show_searching_msg);
@@ -2679,7 +3026,10 @@ mod tests {
             result: Ok(vec![navigation_puzzle("stale-lichess-search")]),
         });
 
-        assert_eq!(app.puzzle_tab.puzzles[0].puzzle_id, "newer-favorites-search");
+        assert_eq!(
+            app.puzzle_tab.puzzles[0].puzzle_id,
+            "newer-favorites-search"
+        );
     }
 
     #[test]
@@ -2734,7 +3084,10 @@ mod tests {
         });
 
         assert_eq!(app.current_favorite, None);
-        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "my_favories")));
+        assert!(
+            app.puzzle_status
+                .contains(&lang::tr(&app.lang, "my_favories"))
+        );
         assert!(app.puzzle_status.contains("controlled status failure"));
     }
 
@@ -2791,7 +3144,10 @@ mod tests {
         });
 
         assert_eq!(app.current_favorite, None);
-        assert!(app.puzzle_status.contains(&lang::tr(&app.lang, "my_favories")));
+        assert!(
+            app.puzzle_status
+                .contains(&lang::tr(&app.lang, "my_favories"))
+        );
         assert!(app.puzzle_status.contains("controlled toggle failure"));
     }
 
@@ -2917,7 +3273,10 @@ mod tests {
 
         let _ = app.update(Message::RedoPuzzle);
 
-        assert_eq!(app.current_reviewable_puzzle().unwrap().puzzle_id, puzzle_id_before_redo);
+        assert_eq!(
+            app.current_reviewable_puzzle().unwrap().puzzle_id,
+            puzzle_id_before_redo
+        );
         assert_eq!(app.current_favorite, Some(true));
         assert_eq!(app.favorite_generation, generation_before_redo);
     }
@@ -2936,11 +3295,17 @@ mod tests {
 
         let _ = app.update(Message::HandleDropZones(
             Square::A1,
-            vec![(GenericId::new(config::BTN_IDS[Square::A2.to_index()]), Rectangle::default())],
+            vec![(
+                GenericId::new(config::BTN_IDS[Square::A2.to_index()]),
+                Rectangle::default(),
+            )],
         ));
 
         assert_eq!(app.puzzle_tab.current_puzzle, 1);
-        assert_eq!(app.current_reviewable_puzzle().unwrap().puzzle_id, "drag-second");
+        assert_eq!(
+            app.current_reviewable_puzzle().unwrap().puzzle_id,
+            "drag-second"
+        );
         assert_eq!(app.current_favorite, None);
         assert_eq!(app.favorite_generation, 42);
     }
@@ -2959,7 +3324,10 @@ mod tests {
 
         let _ = app.update(Message::HandleDropZones(
             Square::A1,
-            vec![(GenericId::new(config::BTN_IDS[Square::B1.to_index()]), Rectangle::default())],
+            vec![(
+                GenericId::new(config::BTN_IDS[Square::B1.to_index()]),
+                Rectangle::default(),
+            )],
         ));
 
         assert_eq!(app.puzzle_tab.current_puzzle, 0);
@@ -3035,7 +3403,10 @@ fn screenshot_rgba_image(screenshot: Screenshot) -> Result<RgbaImage, String> {
 }
 
 pub async fn screenshot_save_dialog(img: Screenshot) -> Option<(Screenshot, PathBuf)> {
-    let file_path = AsyncFileDialog::new().add_filter("jpg", &["jpg", "jpeg"]).save_file().await;
+    let file_path = AsyncFileDialog::new()
+        .add_filter("jpg", &["jpg", "jpeg"])
+        .save_file()
+        .await;
     file_path.map(|file_path| (img, file_path.path().to_path_buf()))
 }
 
@@ -3081,7 +3452,6 @@ fn gen_view<'a>(
     board_ids: &[GenericId],
     imgs: &[Handle],
 ) -> Element<'a, Message, Theme, iced::Renderer> {
-
     let mut board_col = Column::new().spacing(0).align_x(Alignment::Center);
     let mut board_row = Row::new().spacing(0).align_y(Alignment::Center);
 
@@ -3104,30 +3474,27 @@ fn gen_view<'a>(
     };
     for rank in ranks {
         for file in &files {
-            let pos = Square::make_square(Rank::from_index(rank as usize), File::from_index(*file as usize));
+            let pos = Square::make_square(
+                Rank::from_index(rank as usize),
+                File::from_index(*file as usize),
+            );
 
-            let (piece, color) =
-                match game_mode {
-                    config::GameMode::Analysis => {
-                        (analysis.piece_on(pos),
-                        analysis.color_on(pos))
-                    } config::GameMode::Puzzle => {
-                        (board.piece_on(pos),
-                        board.color_on(pos))
-                    }
-                };
+            let (piece, color) = match game_mode {
+                config::GameMode::Analysis => (analysis.piece_on(pos), analysis.color_on(pos)),
+                config::GameMode::Puzzle => (board.piece_on(pos), board.color_on(pos)),
+            };
 
             let light_square = (rank + file) % 2 != 0;
 
             let selected =
                 if game_mode == config::GameMode::Puzzle && game_status == GameStatus::Playing {
-                    from_square == Some(pos)    ||
-                    last_move_from == Some(pos) ||
-                    last_move_to == Some(pos)   ||
-                    hint_square == Some(pos)
+                    from_square == Some(pos)
+                        || last_move_from == Some(pos)
+                        || last_move_to == Some(pos)
+                        || hint_square == Some(pos)
                 } else {
                     from_square == Some(pos)
-            };
+                };
             let square_style;
             let container_style;
 
@@ -3217,12 +3584,11 @@ fn gen_view<'a>(
 
         if show_coordinates {
             board_row = board_row.push(
-                Container::new(
-                    Text::new((rank + 1).to_string()).size(15)
-                ).align_y(iced::alignment::Vertical::Bottom)
-                .align_x(iced::alignment::Horizontal::Right)
-                .padding(3)
-                .height(board_height)
+                Container::new(Text::new((rank + 1).to_string()).size(15))
+                    .align_y(iced::alignment::Vertical::Bottom)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .padding(3)
+                    .height(board_height),
             );
         }
         board_col = board_col.push(board_row);
@@ -3256,9 +3622,24 @@ fn gen_view<'a>(
 
     let game_mode_row = row![
         Text::new(lang::tr(lang, "mode")),
-        Radio::new(lang::tr(lang, "mode_puzzle"), config::GameMode::Puzzle, Some(game_mode), Message::SelectMode).style(styles::radio_style),
-        Radio::new(lang::tr(lang, "mode_analysis"), config::GameMode::Analysis, Some(game_mode), Message::SelectMode).style(styles::radio_style)
-    ].spacing(10).padding(10).align_y(Alignment::Center);
+        Radio::new(
+            lang::tr(lang, "mode_puzzle"),
+            config::GameMode::Puzzle,
+            Some(game_mode),
+            Message::SelectMode
+        )
+        .style(styles::radio_style),
+        Radio::new(
+            lang::tr(lang, "mode_analysis"),
+            config::GameMode::Analysis,
+            Some(game_mode),
+            Message::SelectMode
+        )
+        .style(styles::radio_style)
+    ]
+    .spacing(10)
+    .padding(10)
+    .align_y(Alignment::Center);
 
     let fav_label = match is_fav {
         Some(true) => lang::tr(lang, "unfav"),
@@ -3276,25 +3657,48 @@ fn gen_view<'a>(
     let mut navigation_row = Row::new().padding(3).spacing(10);
     if game_mode == config::GameMode::Analysis {
         if analysis_history_len > current_puzzle_move {
-            navigation_row = navigation_row.push(Button::new(Text::new(lang::tr(lang, "takeback"))).on_press(Message::GoBackMove).style(btn_style_simple));
+            navigation_row = navigation_row.push(
+                Button::new(Text::new(lang::tr(lang, "takeback")))
+                    .on_press(Message::GoBackMove)
+                    .style(btn_style_simple),
+            );
         } else {
-            navigation_row = navigation_row.push(Button::new(Text::new(lang::tr(lang, "takeback"))).style(btn_style_simple));
+            navigation_row = navigation_row
+                .push(Button::new(Text::new(lang::tr(lang, "takeback"))).style(btn_style_simple));
         }
         if engine_started {
-            navigation_row = navigation_row.push(Button::new(Text::new(lang::tr(lang, "stop_engine"))).on_press(Message::StartEngine).style(btn_style_simple));
+            navigation_row = navigation_row.push(
+                Button::new(Text::new(lang::tr(lang, "stop_engine")))
+                    .on_press(Message::StartEngine)
+                    .style(btn_style_simple),
+            );
         } else {
-            navigation_row = navigation_row.push(Button::new(Text::new(lang::tr(lang, "start_engine"))).on_press(Message::StartEngine).style(btn_style_simple));
+            navigation_row = navigation_row.push(
+                Button::new(Text::new(lang::tr(lang, "start_engine")))
+                    .on_press(Message::StartEngine)
+                    .style(btn_style_simple),
+            );
         }
     } else {
         if has_previous {
-            navigation_row = navigation_row.push(Button::new(Text::new(lang::tr(lang, "previous"))).on_press(Message::ShowPreviousPuzzle).style(btn_style_simple))
+            navigation_row = navigation_row.push(
+                Button::new(Text::new(lang::tr(lang, "previous")))
+                    .on_press(Message::ShowPreviousPuzzle)
+                    .style(btn_style_simple),
+            )
         } else {
-            navigation_row = navigation_row.push(Button::new(Text::new(lang::tr(lang, "previous"))).style(btn_style_simple));
+            navigation_row = navigation_row
+                .push(Button::new(Text::new(lang::tr(lang, "previous"))).style(btn_style_simple));
         }
         if has_more_puzzles {
-            navigation_row = navigation_row.push(Button::new(Text::new(lang::tr(lang, "next"))).on_press(Message::ShowNextPuzzle).style(btn_style_simple))
+            navigation_row = navigation_row.push(
+                Button::new(Text::new(lang::tr(lang, "next")))
+                    .on_press(Message::ShowNextPuzzle)
+                    .style(btn_style_simple),
+            )
         } else {
-            navigation_row = navigation_row.push(Button::new(Text::new(lang::tr(lang, "next"))).style(btn_style_simple));
+            navigation_row = navigation_row
+                .push(Button::new(Text::new(lang::tr(lang, "next"))).style(btn_style_simple));
         }
         if game_status == GameStatus::NoPuzzles {
             navigation_row = navigation_row
@@ -3303,24 +3707,43 @@ fn gen_view<'a>(
                 .push(Button::new(Text::new(lang::tr(lang, "hint"))).style(btn_style_simple));
         } else if game_status == GameStatus::PuzzleEnded {
             navigation_row = navigation_row
-                .push(Button::new(Text::new(lang::tr(lang, "redo"))).on_press(Message::RedoPuzzle).style(btn_style_simple))
+                .push(
+                    Button::new(Text::new(lang::tr(lang, "redo")))
+                        .on_press(Message::RedoPuzzle)
+                        .style(btn_style_simple),
+                )
                 .push(favorite_button)
                 .push(Button::new(Text::new(lang::tr(lang, "hint"))).style(btn_style_simple));
         } else {
             navigation_row = navigation_row
-                .push(Button::new(Text::new(lang::tr(lang, "redo"))).on_press(Message::RedoPuzzle).style(btn_style_simple))
+                .push(
+                    Button::new(Text::new(lang::tr(lang, "redo")))
+                        .on_press(Message::RedoPuzzle)
+                        .style(btn_style_simple),
+                )
                 .push(favorite_button)
-                .push(Button::new(Text::new(lang::tr(lang, "hint"))).on_press(Message::ShowHint).style(btn_style_simple));
+                .push(
+                    Button::new(Text::new(lang::tr(lang, "hint")))
+                        .on_press(Message::ShowHint)
+                        .style(btn_style_simple),
+                );
         }
     }
 
     let (input_index, btn_go) = if game_status == GameStatus::Playing {
-        (text_input(puzzle_number_ui, puzzle_number_ui).
-            on_input(Message::PuzzleInputIndexChange).width(Length::Fixed(150.)),
-        button(text(lang::tr(lang, "go"))).on_press(Message::JumpToPuzzle).style(btn_style_simple))
+        (
+            text_input(puzzle_number_ui, puzzle_number_ui)
+                .on_input(Message::PuzzleInputIndexChange)
+                .width(Length::Fixed(150.)),
+            button(text(lang::tr(lang, "go")))
+                .on_press(Message::JumpToPuzzle)
+                .style(btn_style_simple),
+        )
     } else {
-        (text_input(puzzle_number_ui, puzzle_number_ui).width(Length::Fixed(150.)),
-        button(text(lang::tr(lang, "go"))).style(btn_style_simple))
+        (
+            text_input(puzzle_number_ui, puzzle_number_ui).width(Length::Fixed(150.)),
+            button(text(lang::tr(lang, "go"))).style(btn_style_simple),
+        )
     };
 
     let pagination_row = row![
@@ -3328,9 +3751,15 @@ fn gen_view<'a>(
         input_index,
         text(lang::tr(lang, "of") + &total_puzzles.to_string()),
         btn_go
-    ].spacing(10).align_y(Alignment::Center);
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
 
-    board_col = board_col.push(Text::new(puzzle_status)).push(game_mode_row).push(navigation_row).push(pagination_row);
+    board_col = board_col
+        .push(Text::new(puzzle_status))
+        .push(game_mode_row)
+        .push(navigation_row)
+        .push(pagination_row);
     if let Some(review) = puzzle_review {
         let review_status = if review.decision_loaded {
             match review.decision {
@@ -3341,23 +3770,41 @@ fn gen_view<'a>(
         } else {
             lang::tr(lang, "review_unavailable")
         };
-        let mut select_button = Button::new(Text::new(lang::tr(lang, "select_puzzle"))).style(btn_style_simple);
-        let mut discard_button = Button::new(Text::new(lang::tr(lang, "discard_puzzle"))).style(btn_style_simple);
-        let mut clear_button = Button::new(Text::new(lang::tr(lang, "clear_review"))).style(btn_style_simple);
+        let mut select_button =
+            Button::new(Text::new(lang::tr(lang, "select_puzzle"))).style(btn_style_simple);
+        let mut discard_button =
+            Button::new(Text::new(lang::tr(lang, "discard_puzzle"))).style(btn_style_simple);
+        let mut clear_button =
+            Button::new(Text::new(lang::tr(lang, "clear_review"))).style(btn_style_simple);
         if review.decision_loaded && review.decision != Some(ProjectPuzzleDecision::Selected) {
-            select_button = select_button.on_press(Message::SetPuzzleReview(ProjectPuzzleDecision::Selected));
+            select_button =
+                select_button.on_press(Message::SetPuzzleReview(ProjectPuzzleDecision::Selected));
         }
         if review.decision_loaded && review.decision != Some(ProjectPuzzleDecision::Discarded) {
-            discard_button = discard_button.on_press(Message::SetPuzzleReview(ProjectPuzzleDecision::Discarded));
+            discard_button =
+                discard_button.on_press(Message::SetPuzzleReview(ProjectPuzzleDecision::Discarded));
         }
         if review.decision_loaded && review.decision.is_some() {
             clear_button = clear_button.on_press(Message::ClearPuzzleReview);
         }
         board_col = board_col.push(
-            Column::new().spacing(5)
-                .push(Text::new(format!("{}: {}   {}: {}", lang::tr(lang, "active_chapter"), review.chapter_name, lang::tr(lang, "review_status"), review_status)))
-                .push(Row::new().spacing(10).push(select_button).push(discard_button).push(clear_button))
-                .push(Text::new(review.status))
+            Column::new()
+                .spacing(5)
+                .push(Text::new(format!(
+                    "{}: {}   {}: {}",
+                    lang::tr(lang, "active_chapter"),
+                    review.chapter_name,
+                    lang::tr(lang, "review_status"),
+                    review_status
+                )))
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .push(select_button)
+                        .push(discard_button)
+                        .push(clear_button),
+                )
+                .push(Text::new(review.status)),
         );
     }
     if !engine_eval.is_empty() {
@@ -3365,24 +3812,36 @@ fn gen_view<'a>(
             row![
                 Text::new(lang::tr(lang, "eval") + engine_eval),
                 Text::new(lang::tr(lang, "best_move") + engine_move)
-            ].padding(5).spacing(15)
+            ]
+            .padding(5)
+            .spacing(15),
         );
     }
-    if  mini_ui {
-        let button_mini = Button::new(Text::new(">")).on_press(Message::MinimizeUI).style(btn_style_simple);
-        row![board_col,button_mini].spacing(5).align_y(Alignment::Start).into()
+    if mini_ui {
+        let button_mini = Button::new(Text::new(">"))
+            .on_press(Message::MinimizeUI)
+            .style(btn_style_simple);
+        row![board_col, button_mini]
+            .spacing(5)
+            .align_y(Alignment::Start)
+            .into()
     } else {
-        let button_mini = Button::new(Text::new("<")).on_press(Message::MinimizeUI).style(btn_style_simple);
+        let button_mini = Button::new(Text::new("<"))
+            .on_press(Message::MinimizeUI)
+            .style(btn_style_simple);
         let tabs = Tabs::new(Message::TabSelected)
-                .push(TabId::Search, search_tab_label, search_tab)
-                .push(TabId::Settings, settings_tab_label, settings_tab)
-                .push(TabId::CurrentPuzzle ,puzzle_tab_label, puzzle_tab)
-                .push(TabId::Project, project_tab_label, project_tab)
-                .tab_bar_position(iced_aw::TabBarPosition::Top)
-                .tab_bar_style(styles::tab_style)
-                .set_active_tab(active_tab);
+            .push(TabId::Search, search_tab_label, search_tab)
+            .push(TabId::Settings, settings_tab_label, settings_tab)
+            .push(TabId::CurrentPuzzle, puzzle_tab_label, puzzle_tab)
+            .push(TabId::Project, project_tab_label, project_tab)
+            .tab_bar_position(iced_aw::TabBarPosition::Top)
+            .tab_bar_style(styles::tab_style)
+            .set_active_tab(active_tab);
 
-        row![board_col,button_mini,tabs].spacing(5).align_y(Alignment::Start).into()
+        row![board_col, button_mini, tabs]
+            .spacing(5)
+            .align_y(Alignment::Start)
+            .into()
     }
 }
 
@@ -3413,19 +3872,23 @@ trait Tab {
 
 fn main() -> iced::Result {
     let window_settings = iced::window::Settings {
-            size: Size {
-                width: config::SETTINGS.window_width, //(config::SETTINGS.square_size * 8) as u32 + 450,
-                height: config::SETTINGS.window_height,//(config::SETTINGS.square_size * 8) as u32 + 120,
-            },
-            resizable: true,
-            exit_on_close_request: false,
-            ..iced::window::Settings::default()
-        };
+        size: Size {
+            width: config::SETTINGS.window_width, //(config::SETTINGS.square_size * 8) as u32 + 450,
+            height: config::SETTINGS.window_height, //(config::SETTINGS.square_size * 8) as u32 + 120,
+        },
+        resizable: true,
+        exit_on_close_request: false,
+        ..iced::window::Settings::default()
+    };
 
-    iced::application(OfflinePuzzles::init, OfflinePuzzles::update, OfflinePuzzles::view)
-        .theme(OfflinePuzzles::theme)
-        .subscription(OfflinePuzzles::subscription)
-        .window(window_settings)
-        .title("Chess Material Studio")
-        .run()
+    iced::application(
+        OfflinePuzzles::init,
+        OfflinePuzzles::update,
+        OfflinePuzzles::view,
+    )
+    .theme(OfflinePuzzles::theme)
+    .subscription(OfflinePuzzles::subscription)
+    .window(window_settings)
+    .title("Chess Material Studio")
+    .run()
 }

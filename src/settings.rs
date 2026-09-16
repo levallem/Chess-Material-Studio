@@ -1,12 +1,14 @@
-use iced::widget::{Button, Container, Checkbox, column, Column, Text, TextInput, row, PickList, Scrollable};
-use iced::{alignment, Alignment, Element, Length, Task, Theme};
+use iced::widget::{
+    Button, Checkbox, Column, Container, PickList, Scrollable, Text, TextInput, column, row,
+};
+use iced::{Alignment, Element, Length, Task, Theme, alignment};
 
 use iced_aw::TabLabel;
 
 use rfd::AsyncFileDialog;
 
 use crate::styles::btn_style_simple;
-use crate::{Message, Tab, config, styles, lang, lang::PickListWrapper};
+use crate::{Message, Tab, config, lang, lang::PickListWrapper, styles};
 
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
@@ -26,7 +28,7 @@ pub enum SettingsMessage {
     SelectPuzzleSqlitePressed,
     PuzzleSqliteFileChosen(Option<std::path::PathBuf>),
     UseCsvPuzzles,
-    ChangePressed
+    ChangePressed,
 }
 
 fn with_puzzle_sqlite_location(
@@ -110,7 +112,19 @@ impl SettingsTab {
         match message {
             SettingsMessage::SelectPieceTheme(value) => {
                 self.piece_theme = value;
-                Task::perform(SettingsTab::send_changes(self.play_sound, self.auto_load_next, self.flip_board, self.show_coordinates, self.piece_theme, self.board_theme, self.engine_path.clone(), self.lang.lang), Message::ChangeSettings)
+                Task::perform(
+                    SettingsTab::send_changes(
+                        self.play_sound,
+                        self.auto_load_next,
+                        self.flip_board,
+                        self.show_coordinates,
+                        self.piece_theme,
+                        self.board_theme,
+                        self.engine_path.clone(),
+                        self.lang.lang,
+                    ),
+                    Message::ChangeSettings,
+                )
             }
             SettingsMessage::SelectBoardTheme(value) => {
                 self.board_theme = value;
@@ -151,7 +165,19 @@ impl SettingsTab {
             }
             SettingsMessage::ChangeEnginePath(value) => {
                 self.engine_path = value;
-                Task::perform(SettingsTab::send_changes(self.play_sound, self.auto_load_next, self.flip_board, self.show_coordinates, self.piece_theme, self.board_theme, self.engine_path.clone(), self.lang.lang), Message::ChangeSettings)
+                Task::perform(
+                    SettingsTab::send_changes(
+                        self.play_sound,
+                        self.auto_load_next,
+                        self.flip_board,
+                        self.show_coordinates,
+                        self.piece_theme,
+                        self.board_theme,
+                        self.engine_path.clone(),
+                        self.lang.lang,
+                    ),
+                    Message::ChangeSettings,
+                )
             }
             SettingsMessage::SearchEnginePressed => {
                 Task::perform(Self::open_engine_exe(), Message::EngineFileChosen)
@@ -179,10 +205,7 @@ impl SettingsTab {
                 Task::none()
             }
             SettingsMessage::PuzzleSqliteFileChosen(None) => {
-                match puzzle_sqlite_config_for_file_choice(
-                    config::load_config(),
-                    None,
-                ) {
+                match puzzle_sqlite_config_for_file_choice(config::load_config(), None) {
                     Ok(None) => Task::none(),
                     Ok(Some(_)) => {
                         unreachable!("a cancelled SQLite choice must not produce a configuration")
@@ -205,15 +228,51 @@ impl SettingsTab {
             }
             SettingsMessage::CheckPlaySound(value) => {
                 self.play_sound = value;
-                Task::perform(SettingsTab::send_changes(self.play_sound, self.auto_load_next, self.flip_board, self.show_coordinates, self.piece_theme, self.board_theme, self.engine_path.clone(), self.lang.lang), Message::ChangeSettings)
+                Task::perform(
+                    SettingsTab::send_changes(
+                        self.play_sound,
+                        self.auto_load_next,
+                        self.flip_board,
+                        self.show_coordinates,
+                        self.piece_theme,
+                        self.board_theme,
+                        self.engine_path.clone(),
+                        self.lang.lang,
+                    ),
+                    Message::ChangeSettings,
+                )
             }
             SettingsMessage::CheckAutoLoad(value) => {
                 self.auto_load_next = value;
-                Task::perform(SettingsTab::send_changes(self.play_sound, self.auto_load_next, self.flip_board, self.show_coordinates, self.piece_theme, self.board_theme, self.engine_path.clone(), self.lang.lang), Message::ChangeSettings)
+                Task::perform(
+                    SettingsTab::send_changes(
+                        self.play_sound,
+                        self.auto_load_next,
+                        self.flip_board,
+                        self.show_coordinates,
+                        self.piece_theme,
+                        self.board_theme,
+                        self.engine_path.clone(),
+                        self.lang.lang,
+                    ),
+                    Message::ChangeSettings,
+                )
             }
             SettingsMessage::CheckFlipBoard(value) => {
                 self.flip_board = value;
-                Task::perform(SettingsTab::send_changes(self.play_sound, self.auto_load_next, self.flip_board, self.show_coordinates, self.piece_theme, self.board_theme, self.engine_path.clone(), self.lang.lang), Message::ChangeSettings)
+                Task::perform(
+                    SettingsTab::send_changes(
+                        self.play_sound,
+                        self.auto_load_next,
+                        self.flip_board,
+                        self.show_coordinates,
+                        self.piece_theme,
+                        self.board_theme,
+                        self.engine_path.clone(),
+                        self.lang.lang,
+                    ),
+                    Message::ChangeSettings,
+                )
             }
             SettingsMessage::CheckShowCoords(value) => {
                 self.show_coordinates = value;
@@ -226,7 +285,7 @@ impl SettingsTab {
                     self.export_pgs = String::from("0");
                 }
                 Task::none()
-            },
+            }
             SettingsMessage::ChangePressed => {
                 let config = self.current_config();
                 match config::persist_config(&config) {
@@ -385,7 +444,16 @@ impl SettingsTab {
         config
     }
 
-    pub async fn send_changes(play_sound: bool, auto_load: bool, flip: bool, coords: bool, pieces: styles::PieceTheme, theme: styles::BoardTheme, engine: String, lang: lang::Language) -> Option<config::OfflinePuzzlesConfig> {
+    pub async fn send_changes(
+        play_sound: bool,
+        auto_load: bool,
+        flip: bool,
+        coords: bool,
+        pieces: styles::PieceTheme,
+        theme: styles::BoardTheme,
+        engine: String,
+        lang: lang::Language,
+    ) -> Option<config::OfflinePuzzlesConfig> {
         Some(Self::change_payload(
             config::load_config(),
             play_sound,
@@ -515,7 +583,8 @@ mod tests {
         };
         let mut settings_tab = settings_tab_from_config(config.clone());
 
-        let _task = settings_tab.update(SettingsMessage::SelectBoardTheme(styles::BoardTheme::Green));
+        let _task =
+            settings_tab.update(SettingsMessage::SelectBoardTheme(styles::BoardTheme::Green));
         let (play_sound, auto_load, flip, coords, pieces, theme, engine, lang) =
             settings_tab.settings_change_values();
         let payload = SettingsTab::change_payload(
@@ -524,7 +593,10 @@ mod tests {
         settings_tab.saved_configs = payload;
 
         assert_eq!(settings_tab.board_theme, styles::BoardTheme::Green);
-        assert_eq!(settings_tab.saved_configs.board_theme, settings_tab.board_theme);
+        assert_eq!(
+            settings_tab.saved_configs.board_theme,
+            settings_tab.board_theme
+        );
     }
 
     #[test]
@@ -546,7 +618,10 @@ mod tests {
         settings_tab.saved_configs = payload;
 
         assert_eq!(settings_tab.board_theme, styles::BoardTheme::Purple);
-        assert_eq!(settings_tab.saved_configs.board_theme, settings_tab.board_theme);
+        assert_eq!(
+            settings_tab.saved_configs.board_theme,
+            settings_tab.board_theme
+        );
     }
 
     #[test]
@@ -560,7 +635,8 @@ mod tests {
         settings_tab.piece_theme = styles::PieceTheme::Alpha;
         settings_tab.board_theme = styles::BoardTheme::Green;
         settings_tab.interface_theme = styles::InterfaceTheme::Dark;
-        settings_tab.lang = PickListWrapper::new_lang(lang::Language::Spanish, lang::Language::Spanish);
+        settings_tab.lang =
+            PickListWrapper::new_lang(lang::Language::Spanish, lang::Language::Spanish);
         settings_tab.export_pgs = "75".into();
         settings_tab.search_results_limit_value = "250".into();
         settings_tab.play_sound = false;
@@ -598,9 +674,15 @@ mod tests {
                 family: crate::openings::Openings::Sicilian,
             }
         );
-        assert_eq!(merged.last_opening_side, Some(crate::search_tab::OpeningSide::Black));
+        assert_eq!(
+            merged.last_opening_side,
+            Some(crate::search_tab::OpeningSide::Black)
+        );
         assert_eq!(merged.engine_limit, "nodes 99");
-        assert_eq!(merged.puzzle_sqlite_location.as_deref(), Some("fresh-puzzles.sqlite"));
+        assert_eq!(
+            merged.puzzle_sqlite_location.as_deref(),
+            Some("fresh-puzzles.sqlite")
+        );
         assert_eq!(merged.engine_path.as_deref(), Some("new-engine.exe"));
         assert_eq!(merged.window_width, 1234.0);
         assert_eq!(merged.window_height, 567.0);
@@ -775,70 +857,112 @@ impl Tab for SettingsTab {
                     &styles::PieceTheme::ALL[..],
                     Some(self.piece_theme),
                     SettingsMessage::SelectPieceTheme
-                ).style(styles::pick_list_style).menu_style(styles::menu_style)
-            ].spacing(5).align_y(Alignment::Center),
+                )
+                .style(styles::pick_list_style)
+                .menu_style(styles::menu_style)
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "board_theme")),
                 PickList::new(
                     &styles::BoardTheme::ALL[..],
                     Some(self.board_theme),
                     SettingsMessage::SelectBoardTheme
-                ).style(styles::pick_list_style).menu_style(styles::menu_style)
-            ].spacing(5).align_y(Alignment::Center),
+                )
+                .style(styles::pick_list_style)
+                .menu_style(styles::menu_style)
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "interface_appearance")),
                 PickList::new(
                     &styles::InterfaceTheme::ALL[..],
                     Some(self.interface_theme),
                     SettingsMessage::SelectInterfaceTheme
-                ).style(styles::pick_list_style).menu_style(styles::menu_style)
-            ].spacing(5).align_y(Alignment::Center),
+                )
+                .style(styles::pick_list_style)
+                .menu_style(styles::menu_style)
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "language")),
                 PickList::new(
                     PickListWrapper::get_langs(self.lang.lang),
                     Some(self.lang.clone()),
                     SettingsMessage::SelectLanguage
-                ).style(styles::pick_list_style).menu_style(styles::menu_style)
-            ].spacing(5).align_y(Alignment::Center),
+                )
+                .style(styles::pick_list_style)
+                .menu_style(styles::menu_style)
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "play_sound")),
-                Checkbox::new(self.play_sound).on_toggle(SettingsMessage::CheckPlaySound).size(20).style(styles::checkbox_style),
-            ].spacing(5).align_y(Alignment::Center),
+                Checkbox::new(self.play_sound)
+                    .on_toggle(SettingsMessage::CheckPlaySound)
+                    .size(20)
+                    .style(styles::checkbox_style),
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "auto_load")),
-                Checkbox::new(self.auto_load_next).on_toggle(SettingsMessage::CheckAutoLoad).size(20).style(styles::checkbox_style),
-            ].spacing(5).align_y(Alignment::Center),
+                Checkbox::new(self.auto_load_next)
+                    .on_toggle(SettingsMessage::CheckAutoLoad)
+                    .size(20)
+                    .style(styles::checkbox_style),
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "flip_board")),
-                Checkbox::new(self.flip_board).on_toggle(SettingsMessage::CheckFlipBoard).size(20).style(styles::checkbox_style),
-            ].spacing(5).align_y(Alignment::Center),
+                Checkbox::new(self.flip_board)
+                    .on_toggle(SettingsMessage::CheckFlipBoard)
+                    .size(20)
+                    .style(styles::checkbox_style),
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "show_coords")),
-                Checkbox::new(self.show_coordinates).on_toggle(SettingsMessage::CheckShowCoords).size(20).style(styles::checkbox_style),
-            ].spacing(5).align_y(Alignment::Center),
+                Checkbox::new(self.show_coordinates)
+                    .on_toggle(SettingsMessage::CheckShowCoords)
+                    .size(20)
+                    .style(styles::checkbox_style),
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "pdf_number_of_pages")),
-                TextInput::new(
-                    &self.export_pgs,
-                    &self.export_pgs,
-                ).on_input(SettingsMessage::ChangePDFExportPgs).width(60),
-            ].spacing(5).align_y(Alignment::Center),
+                TextInput::new(&self.export_pgs, &self.export_pgs,)
+                    .on_input(SettingsMessage::ChangePDFExportPgs)
+                    .width(60),
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             row![
                 Text::new(lang::tr(&self.lang.lang, "get_first_puzzles1")),
                 TextInput::new(
                     &self.search_results_limit_value,
                     &self.search_results_limit_value,
-                ).on_input(SettingsMessage::ChangeSearchResultLimit).width(80),
+                )
+                .on_input(SettingsMessage::ChangeSearchResultLimit)
+                .width(80),
                 Text::new(lang::tr(&self.lang.lang, "get_first_puzzles2"))
-            ].spacing(5).align_y(Alignment::Center),
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
             Text::new(lang::tr(&self.lang.lang, "engine_path")),
             row![
-                TextInput::new(
-                    &self.engine_path,
-                    &self.engine_path,
-                ).on_input(SettingsMessage::ChangeEnginePath).width(200),
-                Button::new(Text::new(lang::tr(&self.lang.lang, "select"))).on_press(SettingsMessage::SearchEnginePressed).style(btn_style_simple),
+                TextInput::new(&self.engine_path, &self.engine_path,)
+                    .on_input(SettingsMessage::ChangeEnginePath)
+                    .width(200),
+                Button::new(Text::new(lang::tr(&self.lang.lang, "select")))
+                    .on_press(SettingsMessage::SearchEnginePressed)
+                    .style(btn_style_simple),
             ],
             Text::new(lang::tr(&self.lang.lang, "puzzle_sqlite_db")),
             row![
@@ -849,15 +973,25 @@ impl Tab for SettingsTab {
                     .on_press(SettingsMessage::UseCsvPuzzles)
                     .style(btn_style_simple),
             ],
-            Button::new(Text::new(lang::tr(&self.lang.lang, "save"))).padding(5).on_press(SettingsMessage::ChangePressed).style(btn_style_simple),
+            Button::new(Text::new(lang::tr(&self.lang.lang, "save")))
+                .padding(5)
+                .on_press(SettingsMessage::ChangePressed)
+                .style(btn_style_simple),
             Text::new(&self.settings_status).align_y(alignment::Vertical::Bottom),
-
-        ].spacing(10).align_x(Alignment::Center);
-        let content: Element<SettingsMessage, Theme, iced::Renderer> = Container::new(
-            Scrollable::new(
-                Column::new().padding([0, 30]).spacing(10).push(col_settings)
-            )
-        ).align_x(alignment::Horizontal::Center).height(Length::Fill).width(Length::Fill).into();
+        ]
+        .spacing(10)
+        .align_x(Alignment::Center);
+        let content: Element<SettingsMessage, Theme, iced::Renderer> =
+            Container::new(Scrollable::new(
+                Column::new()
+                    .padding([0, 30])
+                    .spacing(10)
+                    .push(col_settings),
+            ))
+            .align_x(alignment::Horizontal::Center)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .into();
 
         content.map(Message::Settings)
     }

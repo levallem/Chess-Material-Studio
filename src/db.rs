@@ -122,7 +122,9 @@ fn is_favorite_with_connection(conn: &mut SqliteConnection, id: &str) -> Result<
     match favs.filter(puzzle_id.eq(id)).first::<Puzzle>(conn) {
         Ok(_) => Ok(true),
         Err(diesel::result::Error::NotFound) => Ok(false),
-        Err(error) => Err(format!("cannot determine whether favorite {id} exists: {error}")),
+        Err(error) => Err(format!(
+            "cannot determine whether favorite {id} exists: {error}"
+        )),
     }
 }
 
@@ -178,7 +180,11 @@ mod tests {
             .join("target")
             .join("cms_test_tmp");
         std::fs::create_dir_all(&directory).expect("test directory should be created");
-        directory.join(format!("favorites_{label}_{}_{}.sqlite", std::process::id(), sequence))
+        directory.join(format!(
+            "favorites_{label}_{}_{}.sqlite",
+            std::process::id(),
+            sequence
+        ))
     }
 
     fn setup_test_db() -> SqliteConnection {
@@ -245,7 +251,10 @@ mod tests {
         let path = temp_db_path("new");
         let mut conn = establish_connection_at(path.to_str().expect("test path should be UTF-8"))
             .expect("new controlled database should migrate");
-        let count: i64 = favs::table.count().get_result(&mut conn).expect("count favorites");
+        let count: i64 = favs::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count favorites");
         assert_eq!(count, 0);
         drop(conn);
         let _ = std::fs::remove_file(path);
@@ -264,8 +273,9 @@ mod tests {
     #[test]
     fn establish_connection_propagates_migration_failure() {
         let path = temp_db_path("migration_failure");
-        let mut conn = SqliteConnection::establish(path.to_str().expect("test path should be UTF-8"))
-            .expect("controlled database should open");
+        let mut conn =
+            SqliteConnection::establish(path.to_str().expect("test path should be UTF-8"))
+                .expect("controlled database should open");
         diesel::sql_query("CREATE TABLE favs (puzzle_id TEXT PRIMARY KEY)")
             .execute(&mut conn)
             .expect("incompatible table should be created");
@@ -282,7 +292,11 @@ mod tests {
     #[test]
     fn get_favorites_distinguishes_empty_and_populated_results() {
         let mut conn = setup_test_db();
-        assert!(all_favorites(&mut conn).expect("empty query should succeed").is_empty());
+        assert!(
+            all_favorites(&mut conn)
+                .expect("empty query should succeed")
+                .is_empty()
+        );
 
         toggle_favorite_with_connection(&mut conn, test_puzzle("favorite-one"))
             .expect("insert should succeed");
@@ -306,11 +320,15 @@ mod tests {
     #[test]
     fn is_favorite_distinguishes_absent_and_existing_puzzles() {
         let mut conn = setup_test_db();
-        assert!(!is_favorite_with_connection(&mut conn, "absent").expect("absence should not fail"));
+        assert!(
+            !is_favorite_with_connection(&mut conn, "absent").expect("absence should not fail")
+        );
 
         toggle_favorite_with_connection(&mut conn, test_puzzle("present"))
             .expect("insert should succeed");
-        assert!(is_favorite_with_connection(&mut conn, "present").expect("presence should not fail"));
+        assert!(
+            is_favorite_with_connection(&mut conn, "present").expect("presence should not fail")
+        );
     }
 
     #[test]
@@ -318,9 +336,16 @@ mod tests {
         let mut conn = setup_test_db();
         let puzzle = test_puzzle("toggle");
 
-        assert!(toggle_favorite_with_connection(&mut conn, puzzle.clone()).expect("insert should succeed"));
-        assert!(!toggle_favorite_with_connection(&mut conn, puzzle).expect("delete should succeed"));
-        assert!(!is_favorite_with_connection(&mut conn, "toggle").expect("absence should not fail"));
+        assert!(
+            toggle_favorite_with_connection(&mut conn, puzzle.clone())
+                .expect("insert should succeed")
+        );
+        assert!(
+            !toggle_favorite_with_connection(&mut conn, puzzle).expect("delete should succeed")
+        );
+        assert!(
+            !is_favorite_with_connection(&mut conn, "toggle").expect("absence should not fail")
+        );
     }
 
     #[test]
@@ -334,7 +359,11 @@ mod tests {
 
         let result = toggle_favorite_with_connection(&mut conn, test_puzzle("insert_failure"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("cannot save favorite insert_failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("cannot save favorite insert_failure")
+        );
     }
 
     #[test]
@@ -350,6 +379,10 @@ mod tests {
 
         let result = toggle_favorite_with_connection(&mut conn, puzzle);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("cannot remove favorite delete_failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("cannot remove favorite delete_failure")
+        );
     }
 }

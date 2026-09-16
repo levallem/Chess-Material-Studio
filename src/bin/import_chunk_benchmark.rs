@@ -12,18 +12,11 @@ use diesel::sqlite::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 
 use chess_material_studio::puzzle_import::{
-    import_puzzles_from_reader_chunked_limited, puzzle_source_key_from_file, MIGRATIONS,
+    MIGRATIONS, import_puzzles_from_reader_chunked_limited, puzzle_source_key_from_file,
 };
 use chess_material_studio::schema;
 
-const CHUNK_SIZES: &[usize] = &[
-    1_000,
-    5_000,
-    10_000,
-    25_000,
-    50_000,
-    100_000,
-];
+const CHUNK_SIZES: &[usize] = &[1_000, 5_000, 10_000, 25_000, 50_000, 100_000];
 
 const MAX_ROWS: usize = 1_000_000;
 
@@ -70,7 +63,9 @@ fn parse_args_from(args: &[String]) -> Result<ParseOutcome, String> {
             "--rows" => {
                 i += 1;
                 let val = args.get(i).ok_or("--rows requires a value")?;
-                let n: usize = val.parse().map_err(|_| format!("invalid --rows: {}", val))?;
+                let n: usize = val
+                    .parse()
+                    .map_err(|_| format!("invalid --rows: {}", val))?;
                 rows = Some(n);
             }
             other => {
@@ -220,8 +215,8 @@ fn run() -> Result<(), String> {
     // ── Fingerprint (once) ──────────────────────────────────────────
 
     let fp_start = std::time::Instant::now();
-    let source_key = puzzle_source_key_from_file(&args.csv)
-        .map_err(|e| format!("fingerprint failed: {}", e))?;
+    let source_key =
+        puzzle_source_key_from_file(&args.csv).map_err(|e| format!("fingerprint failed: {}", e))?;
     let fingerprint_ms = fp_start.elapsed().as_millis();
 
     let csv_size = std::fs::metadata(&args.csv)
@@ -231,8 +226,7 @@ fn run() -> Result<(), String> {
     // ── Scratch directory ───────────────────────────────────────────
 
     let scratch = scratch_dir()?;
-    std::fs::create_dir_all(&scratch)
-        .map_err(|e| format!("cannot create scratch dir: {}", e))?;
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("cannot create scratch dir: {}", e))?;
 
     eprintln!("CMS-010 Chunk Benchmark");
     eprintln!();
@@ -346,8 +340,12 @@ fn run() -> Result<(), String> {
 
         eprintln!(
             "  chunk={:>7}  txns={:>5}  import={:>8}ms  rows/s={:>10.0}  e2e={:>8}ms  db={:>12} bytes",
-            chunk_size, transaction_count, import_ms, import_rows_per_second,
-            estimated_e2e_ms, db_size_bytes
+            chunk_size,
+            transaction_count,
+            import_ms,
+            import_rows_per_second,
+            estimated_e2e_ms,
+            db_size_bytes
         );
     }
 
@@ -364,8 +362,7 @@ fn run() -> Result<(), String> {
 
     // ── Recommendation ──────────────────────────────────────────────
 
-    let recommended = choose_recommended(&results)
-        .ok_or("no results to recommend from")?;
+    let recommended = choose_recommended(&results).ok_or("no results to recommend from")?;
 
     let fastest = results
         .iter()
@@ -398,8 +395,7 @@ fn run() -> Result<(), String> {
     println!();
     println!(
         "{:>7} {:>5} {:>10} {:>10} {:>10} {:>14} {:>12} {:>16}",
-        "chunk", "txns", "import_ms", "rows/s", "e2e_ms",
-        "e2e_rows/s", "db_bytes", "proj_6m_s"
+        "chunk", "txns", "import_ms", "rows/s", "e2e_ms", "e2e_rows/s", "db_bytes", "proj_6m_s"
     );
     for r in &results {
         println!(
@@ -430,8 +426,14 @@ fn run() -> Result<(), String> {
     println!("difference_from_fastest:    {:.1}%", diff_pct);
     println!("reason:                     smallest chunk within 5% of fastest");
     println!();
-    println!("projected_6m_import_seconds:    {:.1}", recommended.projected_6m_import_seconds);
-    println!("projected_6m_e2e_seconds:       {:.1}", recommended.projected_6m_e2e_seconds);
+    println!(
+        "projected_6m_import_seconds:    {:.1}",
+        recommended.projected_6m_import_seconds
+    );
+    println!(
+        "projected_6m_e2e_seconds:       {:.1}",
+        recommended.projected_6m_e2e_seconds
+    );
     println!("warning: linear estimate only — not a measured 6M import");
 
     // ── Source integrity output ──────────────────────────────────────
@@ -448,7 +450,12 @@ fn run() -> Result<(), String> {
     let sqlite_files: Vec<_> = std::fs::read_dir(&scratch)
         .map_err(|e| format!("cannot read scratch dir: {}", e))?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|ext| ext == "sqlite").unwrap_or(false))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "sqlite")
+                .unwrap_or(false)
+        })
         .collect();
     let total_size: u64 = sqlite_files
         .iter()
@@ -530,7 +537,12 @@ mod tests {
     // 5. rows=0
     #[test]
     fn test_parse_rows_zero() {
-        let args = vec!["--csv".into(), "data.csv".into(), "--rows".into(), "0".into()];
+        let args = vec![
+            "--csv".into(),
+            "data.csv".into(),
+            "--rows".into(),
+            "0".into(),
+        ];
         assert!(parse_args_from(&args).is_err());
     }
 
@@ -743,7 +755,12 @@ mod tests {
     // 14. rows=1 (minimum valid)
     #[test]
     fn test_parse_rows_minimum() {
-        let args = vec!["--csv".into(), "data.csv".into(), "--rows".into(), "1".into()];
+        let args = vec![
+            "--csv".into(),
+            "data.csv".into(),
+            "--rows".into(),
+            "1".into(),
+        ];
         match parse_args_from(&args).unwrap() {
             ParseOutcome::Run(parsed) => assert_eq!(parsed.rows, 1),
             ParseOutcome::Help => panic!("expected Run"),

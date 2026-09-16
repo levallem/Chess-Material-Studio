@@ -1,9 +1,9 @@
 use crate::models::Puzzle;
+use diesel::Connection;
 use diesel::prelude::*;
 use diesel::sql_types::{Integer, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
-use diesel::Connection;
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -1267,10 +1267,20 @@ mod tests {
         let discarded = puzzle("discarded");
         let other_chapter = puzzle("other-chapter");
 
-        set_puzzle_decision(project.path(), first.id, &selected, ProjectPuzzleDecision::Selected)
-            .unwrap();
-        set_puzzle_decision(project.path(), first.id, &discarded, ProjectPuzzleDecision::Discarded)
-            .unwrap();
+        set_puzzle_decision(
+            project.path(),
+            first.id,
+            &selected,
+            ProjectPuzzleDecision::Selected,
+        )
+        .unwrap();
+        set_puzzle_decision(
+            project.path(),
+            first.id,
+            &discarded,
+            ProjectPuzzleDecision::Discarded,
+        )
+        .unwrap();
         set_puzzle_decision(
             project.path(),
             second.id,
@@ -1286,7 +1296,10 @@ mod tests {
 
         let reviewed = list_reviewed_puzzle_ids_for_chapter(project.path(), first.id).unwrap();
 
-        assert_eq!(reviewed, HashSet::from([selected.puzzle_id.clone(), discarded.puzzle_id]));
+        assert_eq!(
+            reviewed,
+            HashSet::from([selected.puzzle_id.clone(), discarded.puzzle_id])
+        );
         assert!(!reviewed.contains(&other_chapter.puzzle_id));
         let after = list_chapter_puzzle_reviews(project.path(), first.id)
             .unwrap()
@@ -1297,9 +1310,11 @@ mod tests {
         assert!(list_reviewed_puzzle_ids_for_chapter(project.path(), 999).is_err());
 
         clear_puzzle_decision(project.path(), first.id, &selected.puzzle_id).unwrap();
-        assert!(!list_reviewed_puzzle_ids_for_chapter(project.path(), first.id)
-            .unwrap()
-            .contains(&selected.puzzle_id));
+        assert!(
+            !list_reviewed_puzzle_ids_for_chapter(project.path(), first.id)
+                .unwrap()
+                .contains(&selected.puzzle_id)
+        );
     }
 
     #[test]

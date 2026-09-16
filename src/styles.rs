@@ -308,7 +308,10 @@ pub fn btn_style_simple(theme: &iced::Theme, status: button::Status) -> button::
     }
 }
 
-pub fn btn_style_light_square(theme: &iced::Theme, _status: iced::widget::button::Status) -> button::Style {
+pub fn btn_style_light_square(
+    theme: &iced::Theme,
+    _status: iced::widget::button::Status,
+) -> button::Style {
     let palette = theme.palette();
     button::Style {
         background: Some(iced::Background::Color(palette.primary)),
@@ -317,7 +320,10 @@ pub fn btn_style_light_square(theme: &iced::Theme, _status: iced::widget::button
     }
 }
 
-pub fn btn_style_dark_square(theme: &iced::Theme, _status: iced::widget::button::Status) -> button::Style {
+pub fn btn_style_dark_square(
+    theme: &iced::Theme,
+    _status: iced::widget::button::Status,
+) -> button::Style {
     let palette = theme.palette();
     button::Style {
         background: Some(iced::Background::Color(palette.success)),
@@ -580,7 +586,10 @@ mod tab_style_tests {
     }
 }
 
-pub fn pick_list_style(theme: &iced::Theme, status: iced::widget::pick_list::Status) -> pick_list::Style {
+pub fn pick_list_style(
+    theme: &iced::Theme,
+    status: iced::widget::pick_list::Status,
+) -> pick_list::Style {
     let palette = theme.extended_palette();
 
     let (bg, text) = match status {

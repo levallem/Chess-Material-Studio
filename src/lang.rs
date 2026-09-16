@@ -1,74 +1,110 @@
 use fluent_bundle::FluentResource;
 use fluent_bundle::bundle::FluentBundle;
-use unic_langid::langid;
 use std::io::Read;
 use std::sync::LazyLock;
+use unic_langid::langid;
 
 use crate::config::TRANSLATIONS_DIRECTORY;
 
-static BUNDLE_ENUS: LazyLock<FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>> = LazyLock::new(|| {
+static BUNDLE_ENUS: LazyLock<
+    FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>,
+> = LazyLock::new(|| {
     let file = std::fs::File::open(TRANSLATIONS_DIRECTORY.to_owned() + "en-US/ocp.ftl").unwrap();
     let mut reader = std::io::BufReader::new(file);
     let mut source = String::new();
-    reader.read_to_string(&mut source).expect("Failed to read en-US translation file");
+    reader
+        .read_to_string(&mut source)
+        .expect("Failed to read en-US translation file");
     let res = FluentResource::try_new(source).expect("Could not parse the FTL file.");
     let mut bundle = FluentBundle::new_concurrent(vec![langid!("en-US")]);
-    bundle.add_resource(res).expect("Failed to add FTL resources to the bundle.");
+    bundle
+        .add_resource(res)
+        .expect("Failed to add FTL resources to the bundle.");
     bundle
 });
 
-static BUNDLE_PTBR: LazyLock<FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>> = LazyLock::new(|| {
+static BUNDLE_PTBR: LazyLock<
+    FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>,
+> = LazyLock::new(|| {
     let file = std::fs::File::open(TRANSLATIONS_DIRECTORY.to_owned() + "pt-BR/ocp.ftl").unwrap();
     let mut reader = std::io::BufReader::new(file);
     let mut source = String::new();
-    reader.read_to_string(&mut source).expect("Failed to read pt-BR translation file");
+    reader
+        .read_to_string(&mut source)
+        .expect("Failed to read pt-BR translation file");
     let res = FluentResource::try_new(source).expect("Could not parse the FTL file.");
     let mut bundle = FluentBundle::new_concurrent(vec![langid!("pt-BR")]);
-    bundle.add_resource(res).expect("Failed to add FTL resources to the bundle.");
+    bundle
+        .add_resource(res)
+        .expect("Failed to add FTL resources to the bundle.");
     bundle
 });
 
-static BUNDLE_ES: LazyLock<FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>> = LazyLock::new(|| {
+static BUNDLE_ES: LazyLock<
+    FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>,
+> = LazyLock::new(|| {
     let file = std::fs::File::open(TRANSLATIONS_DIRECTORY.to_owned() + "es/ocp.ftl").unwrap();
     let mut reader = std::io::BufReader::new(file);
     let mut source = String::new();
-    reader.read_to_string(&mut source).expect("Failed to read ES translation file");
+    reader
+        .read_to_string(&mut source)
+        .expect("Failed to read ES translation file");
     let res = FluentResource::try_new(source).expect("Could not parse the FTL file.");
     let mut bundle = FluentBundle::new_concurrent(vec![langid!("es")]);
-    bundle.add_resource(res).expect("Failed to add FTL resources to the bundle.");
+    bundle
+        .add_resource(res)
+        .expect("Failed to add FTL resources to the bundle.");
     bundle
 });
 
-static BUNDLE_FR: LazyLock<FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>> = LazyLock::new(|| {
+static BUNDLE_FR: LazyLock<
+    FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>,
+> = LazyLock::new(|| {
     let file = std::fs::File::open(TRANSLATIONS_DIRECTORY.to_owned() + "fr/ocp.ftl").unwrap();
     let mut reader = std::io::BufReader::new(file);
     let mut source = String::new();
-    reader.read_to_string(&mut source).expect("Failed to read FR translation file");
+    reader
+        .read_to_string(&mut source)
+        .expect("Failed to read FR translation file");
     let res = FluentResource::try_new(source).expect("Could not parse the FTL file.");
     let mut bundle = FluentBundle::new_concurrent(vec![langid!("fr")]);
-    bundle.add_resource(res).expect("Failed to add FTL resources to the bundle.");
+    bundle
+        .add_resource(res)
+        .expect("Failed to add FTL resources to the bundle.");
     bundle
 });
 
-static BUNDLE_CN: LazyLock<FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>> = LazyLock::new(|| {
+static BUNDLE_CN: LazyLock<
+    FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>,
+> = LazyLock::new(|| {
     let file = std::fs::File::open(TRANSLATIONS_DIRECTORY.to_owned() + "cn/ocp.ftl").unwrap();
     let mut reader = std::io::BufReader::new(file);
     let mut source = String::new();
-    reader.read_to_string(&mut source).expect("Failed to read CN translation file");
+    reader
+        .read_to_string(&mut source)
+        .expect("Failed to read CN translation file");
     let res = FluentResource::try_new(source).expect("Could not parse the FTL file.");
     let mut bundle = FluentBundle::new_concurrent(vec![langid!("cn")]);
-    bundle.add_resource(res).expect("Failed to add FTL resources to the bundle.");
+    bundle
+        .add_resource(res)
+        .expect("Failed to add FTL resources to the bundle.");
     bundle
 });
 
-static BUNDLE_NL: LazyLock<FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>> = LazyLock::new(|| {
+static BUNDLE_NL: LazyLock<
+    FluentBundle<FluentResource, intl_memoizer::concurrent::IntlLangMemoizer>,
+> = LazyLock::new(|| {
     let file = std::fs::File::open(TRANSLATIONS_DIRECTORY.to_owned() + "nl/ocp.ftl").unwrap();
     let mut reader = std::io::BufReader::new(file);
     let mut source = String::new();
-    reader.read_to_string(&mut source).expect("Failed to read NL translation file");
+    reader
+        .read_to_string(&mut source)
+        .expect("Failed to read NL translation file");
     let res = FluentResource::try_new(source).expect("Could not parse the FTL file.");
     let mut bundle = FluentBundle::new_concurrent(vec![langid!("nl")]);
-    bundle.add_resource(res).expect("Failed to add FTL resources to the bundle.");
+    bundle
+        .add_resource(res)
+        .expect("Failed to add FTL resources to the bundle.");
     bundle
 });
 
@@ -81,20 +117,34 @@ pub fn tr(lang: &Language, key: &str) -> String {
         Language::Chinese => &BUNDLE_CN,
         Language::Dutch => &BUNDLE_NL,
     };
-    let msg = bundle.get_message(key).unwrap_or_else(|| panic!("{}", ("Missing translation key ".to_owned() + key)));
+    let msg = bundle
+        .get_message(key)
+        .unwrap_or_else(|| panic!("{}", ("Missing translation key ".to_owned() + key)));
     let mut errors = vec![];
     let pattern = msg.value().expect("Missing Value.");
-    bundle.format_pattern(pattern, None, &mut errors).to_string()
+    bundle
+        .format_pattern(pattern, None, &mut errors)
+        .to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum Language {
-    English, Portuguese, Spanish, French, Chinese, Dutch
+    English,
+    Portuguese,
+    Spanish,
+    French,
+    Chinese,
+    Dutch,
 }
 
 impl Language {
     pub const ALL: [Language; 6] = [
-        Language::English, Language::Portuguese, Language::Spanish, Language::French, Language::Chinese, Language::Dutch
+        Language::English,
+        Language::Portuguese,
+        Language::Spanish,
+        Language::French,
+        Language::Chinese,
+        Language::Dutch,
     ];
 }
 
@@ -139,9 +189,7 @@ impl PickListWrapper<Language> {
     pub fn get_langs(lang: Language) -> Vec<PickListWrapper<Language>> {
         let mut themes_wrapper = Vec::new();
         for item in Language::ALL {
-            themes_wrapper.push(
-                PickListWrapper::<Language> { lang, item }
-            );
+            themes_wrapper.push(PickListWrapper::<Language> { lang, item });
         }
         themes_wrapper
     }

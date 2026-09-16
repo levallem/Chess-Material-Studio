@@ -117,8 +117,8 @@ pub fn search_puzzles(
     if filters.limit == 0 {
         return Err("limit must be greater than 0".into());
     }
-    let limit = i64::try_from(filters.limit)
-        .map_err(|_| "limit overflow converting to i64".to_string())?;
+    let limit =
+        i64::try_from(filters.limit).map_err(|_| "limit overflow converting to i64".to_string())?;
 
     if filters.side != SearchSide::Any && filters.opening_tag.is_none() {
         return Err("side filter requires an opening filter".into());
@@ -484,7 +484,11 @@ mod tests {
         let results = search_puzzles(&mut conn, &filters).unwrap();
         let mut got = ids(&results);
         got.sort();
-        assert_eq!(got, vec!["A"], "only lowercase 'black' should match (case-sensitive)");
+        assert_eq!(
+            got,
+            vec!["A"],
+            "only lowercase 'black' should match (case-sensitive)"
+        );
     }
 
     // CMS-013: side Black excludes only lowercase "black"
@@ -503,7 +507,11 @@ mod tests {
         let results = search_puzzles(&mut conn, &filters).unwrap();
         let mut got = ids(&results);
         got.sort();
-        assert_eq!(got, vec!["B", "C"], "Black side excludes only lowercase 'black'");
+        assert_eq!(
+            got,
+            vec!["B", "C"],
+            "Black side excludes only lowercase 'black'"
+        );
     }
 
     static TEMP_DB_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

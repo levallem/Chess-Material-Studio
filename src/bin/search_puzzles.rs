@@ -9,7 +9,7 @@ use std::time::Instant;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 
-use chess_material_studio::puzzle_search::{search_puzzles, PuzzleSearchFilters, SearchSide};
+use chess_material_studio::puzzle_search::{PuzzleSearchFilters, SearchSide, search_puzzles};
 use chess_material_studio::schema;
 
 const MAX_RESULT_LIMIT: usize = 10_000;
@@ -36,7 +36,9 @@ enum ParseOutcome {
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  search_puzzles --db <PATH> --min-rating <N> --max-rating <N> --min-popularity <N> --limit <N> [OPTIONS]");
+    eprintln!(
+        "  search_puzzles --db <PATH> --min-rating <N> --max-rating <N> --min-popularity <N> --limit <N> [OPTIONS]"
+    );
     eprintln!();
     eprintln!("Required arguments:");
     eprintln!("  --db <PATH>              Path to SQLite database file");
@@ -82,17 +84,26 @@ fn parse_args_from(args: &[String]) -> Result<ParseOutcome, String> {
             "--min-rating" => {
                 i += 1;
                 let val = args.get(i).ok_or("--min-rating requires a value")?;
-                min_rating = Some(val.parse().map_err(|_| format!("invalid --min-rating: {}", val))?);
+                min_rating = Some(
+                    val.parse()
+                        .map_err(|_| format!("invalid --min-rating: {}", val))?,
+                );
             }
             "--max-rating" => {
                 i += 1;
                 let val = args.get(i).ok_or("--max-rating requires a value")?;
-                max_rating = Some(val.parse().map_err(|_| format!("invalid --max-rating: {}", val))?);
+                max_rating = Some(
+                    val.parse()
+                        .map_err(|_| format!("invalid --max-rating: {}", val))?,
+                );
             }
             "--min-popularity" => {
                 i += 1;
                 let val = args.get(i).ok_or("--min-popularity requires a value")?;
-                min_popularity = Some(val.parse().map_err(|_| format!("invalid --min-popularity: {}", val))?);
+                min_popularity = Some(
+                    val.parse()
+                        .map_err(|_| format!("invalid --min-popularity: {}", val))?,
+                );
             }
             "--theme" => {
                 i += 1;
@@ -109,12 +120,18 @@ fn parse_args_from(args: &[String]) -> Result<ParseOutcome, String> {
             "--limit" => {
                 i += 1;
                 let val = args.get(i).ok_or("--limit requires a value")?;
-                limit = Some(val.parse().map_err(|_| format!("invalid --limit: {}", val))?);
+                limit = Some(
+                    val.parse()
+                        .map_err(|_| format!("invalid --limit: {}", val))?,
+                );
             }
             "--repeat" => {
                 i += 1;
                 let val = args.get(i).ok_or("--repeat requires a value")?;
-                repeat = Some(val.parse().map_err(|_| format!("invalid --repeat: {}", val))?);
+                repeat = Some(
+                    val.parse()
+                        .map_err(|_| format!("invalid --repeat: {}", val))?,
+                );
             }
             other => {
                 return Err(format!("unknown argument: {}", other));
@@ -133,14 +150,22 @@ fn parse_args_from(args: &[String]) -> Result<ParseOutcome, String> {
         return Err("limit must be greater than 0".into());
     }
     if limit > MAX_RESULT_LIMIT {
-        return Err(format!("limit must be <= {} (got {})", MAX_RESULT_LIMIT, limit));
+        return Err(format!(
+            "limit must be <= {} (got {})",
+            MAX_RESULT_LIMIT, limit
+        ));
     }
 
     let side = match side_str.as_deref() {
         None | Some("any") => SearchSide::Any,
         Some("white") => SearchSide::White,
         Some("black") => SearchSide::Black,
-        Some(other) => return Err(format!("invalid --side: {} (expected any, white, or black)", other)),
+        Some(other) => {
+            return Err(format!(
+                "invalid --side: {} (expected any, white, or black)",
+                other
+            ));
+        }
     };
 
     let repeat = repeat.unwrap_or(1);
@@ -194,10 +219,11 @@ fn run() -> Result<(), String> {
 
     // ── DB integrity before ──────────────────────────────────────────
 
-    let db_metadata_before = std::fs::metadata(&args.db)
-        .map_err(|e| format!("cannot stat DB: {}", e))?;
+    let db_metadata_before =
+        std::fs::metadata(&args.db).map_err(|e| format!("cannot stat DB: {}", e))?;
     let db_size_before = db_metadata_before.len();
-    let db_mtime_before = db_metadata_before.modified()
+    let db_mtime_before = db_metadata_before
+        .modified()
         .map_err(|e| format!("cannot read mtime: {}", e))?;
 
     // ── Open DB (read-only intent) ──────────────────────────────────
@@ -270,10 +296,11 @@ fn run() -> Result<(), String> {
 
     // ── DB integrity after ───────────────────────────────────────────
 
-    let db_metadata_after = std::fs::metadata(&args.db)
-        .map_err(|e| format!("cannot stat DB after: {}", e))?;
+    let db_metadata_after =
+        std::fs::metadata(&args.db).map_err(|e| format!("cannot stat DB after: {}", e))?;
     let db_size_after = db_metadata_after.len();
-    let db_mtime_after = db_metadata_after.modified()
+    let db_mtime_after = db_metadata_after
+        .modified()
         .map_err(|e| format!("cannot read mtime after: {}", e))?;
 
     let size_unchanged = db_size_before == db_size_after;
@@ -297,8 +324,14 @@ fn run() -> Result<(), String> {
     println!();
     println!("db_size_bytes_before: {}", db_size_before);
     println!("db_size_bytes_after: {}", db_size_after);
-    println!("db_size_unchanged: {}", if size_unchanged { "YES" } else { "NO" });
-    println!("db_modified_unchanged: {}", if mtime_unchanged { "YES" } else { "NO" });
+    println!(
+        "db_size_unchanged: {}",
+        if size_unchanged { "YES" } else { "NO" }
+    );
+    println!(
+        "db_modified_unchanged: {}",
+        if mtime_unchanged { "YES" } else { "NO" }
+    );
 
     if !size_unchanged {
         eprintln!("ERROR: DB size changed during read-only benchmark!");
@@ -329,11 +362,16 @@ mod tests {
     #[test]
     fn test_parse_minimal_args() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
         ];
         match parse_args_from(&args).unwrap() {
             ParseOutcome::Run(parsed) => {
@@ -355,15 +393,24 @@ mod tests {
     #[test]
     fn test_parse_all_filters() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "1500".into(),
-            "--max-rating".into(), "2000".into(),
-            "--min-popularity".into(), "50".into(),
-            "--theme".into(), "fork".into(),
-            "--opening".into(), "Italian_Game".into(),
-            "--side".into(), "white".into(),
-            "--limit".into(), "50".into(),
-            "--repeat".into(), "5".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "1500".into(),
+            "--max-rating".into(),
+            "2000".into(),
+            "--min-popularity".into(),
+            "50".into(),
+            "--theme".into(),
+            "fork".into(),
+            "--opening".into(),
+            "Italian_Game".into(),
+            "--side".into(),
+            "white".into(),
+            "--limit".into(),
+            "50".into(),
+            "--repeat".into(),
+            "5".into(),
         ];
         match parse_args_from(&args).unwrap() {
             ParseOutcome::Run(parsed) => {
@@ -380,10 +427,14 @@ mod tests {
     #[test]
     fn test_parse_missing_db() {
         let args = vec![
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -392,10 +443,14 @@ mod tests {
     #[test]
     fn test_parse_missing_min_rating() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -404,10 +459,14 @@ mod tests {
     #[test]
     fn test_parse_missing_max_rating() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -416,10 +475,14 @@ mod tests {
     #[test]
     fn test_parse_missing_popularity() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--limit".into(), "100".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--limit".into(),
+            "100".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -428,10 +491,14 @@ mod tests {
     #[test]
     fn test_parse_missing_limit() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -440,12 +507,18 @@ mod tests {
     #[test]
     fn test_parse_side_any() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
-            "--side".into(), "any".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
+            "--side".into(),
+            "any".into(),
         ];
         match parse_args_from(&args).unwrap() {
             ParseOutcome::Run(parsed) => assert_eq!(parsed.side, SearchSide::Any),
@@ -457,12 +530,18 @@ mod tests {
     #[test]
     fn test_parse_side_white() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
-            "--side".into(), "white".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
+            "--side".into(),
+            "white".into(),
         ];
         match parse_args_from(&args).unwrap() {
             ParseOutcome::Run(parsed) => assert_eq!(parsed.side, SearchSide::White),
@@ -474,12 +553,18 @@ mod tests {
     #[test]
     fn test_parse_side_black() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
-            "--side".into(), "black".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
+            "--side".into(),
+            "black".into(),
         ];
         match parse_args_from(&args).unwrap() {
             ParseOutcome::Run(parsed) => assert_eq!(parsed.side, SearchSide::Black),
@@ -491,12 +576,18 @@ mod tests {
     #[test]
     fn test_parse_side_invalid() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
-            "--side".into(), "invalid".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
+            "--side".into(),
+            "invalid".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -505,11 +596,16 @@ mod tests {
     #[test]
     fn test_parse_limit_zero() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "0".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "0".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -518,11 +614,16 @@ mod tests {
     #[test]
     fn test_parse_limit_over_max() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "10001".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "10001".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -531,12 +632,18 @@ mod tests {
     #[test]
     fn test_parse_repeat_zero() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
-            "--repeat".into(), "0".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
+            "--repeat".into(),
+            "0".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -545,12 +652,18 @@ mod tests {
     #[test]
     fn test_parse_repeat_over_max() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
-            "--repeat".into(), "21".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
+            "--repeat".into(),
+            "21".into(),
         ];
         assert!(parse_args_from(&args).is_err());
     }
@@ -559,11 +672,16 @@ mod tests {
     #[test]
     fn test_parse_unknown_argument() {
         let args = vec![
-            "--db".into(), "test.sqlite".into(),
-            "--min-rating".into(), "0".into(),
-            "--max-rating".into(), "4000".into(),
-            "--min-popularity".into(), "-100".into(),
-            "--limit".into(), "100".into(),
+            "--db".into(),
+            "test.sqlite".into(),
+            "--min-rating".into(),
+            "0".into(),
+            "--max-rating".into(),
+            "4000".into(),
+            "--min-popularity".into(),
+            "-100".into(),
+            "--limit".into(),
+            "100".into(),
             "--bogus".into(),
         ];
         assert!(parse_args_from(&args).is_err());

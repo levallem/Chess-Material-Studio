@@ -16,10 +16,10 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
-#[path = "../schema.rs"]
-mod schema;
 #[path = "../models.rs"]
 mod models;
+#[path = "../schema.rs"]
+mod schema;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -71,11 +71,7 @@ fn new_puzzle(row: &CsvRow) -> models::NewPuzzle<'_> {
     }
 }
 
-fn import_rows(
-    conn: &mut SqliteConnection,
-    path: &Path,
-    limit: u64,
-) -> Result<usize, BoxError> {
+fn import_rows(conn: &mut SqliteConnection, path: &Path, limit: u64) -> Result<usize, BoxError> {
     let file = File::open(path)?;
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
@@ -122,9 +118,7 @@ fn open_fresh_benchmark_db(path: &Path) -> Result<SqliteConnection, BoxError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let mut conn = SqliteConnection::establish(
-        path.to_str().ok_or("invalid db path")?,
-    )?;
+    let mut conn = SqliteConnection::establish(path.to_str().ok_or("invalid db path")?)?;
     conn.run_pending_migrations(MIGRATIONS)?;
     Ok(conn)
 }
@@ -172,14 +166,18 @@ fn run_phase(csv: &Path, strategy: &str, limit: u64) -> Result<(), BoxError> {
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  import_benchmark <csv>                          runs the full matrix (1000/10000 x both strategies)");
+    eprintln!(
+        "  import_benchmark <csv>                          runs the full matrix (1000/10000 x both strategies)"
+    );
     eprintln!("  import_benchmark <csv> <limit> <strategy>       runs a single phase");
     eprintln!("    <limit>    e.g. 1000 or 10000");
     eprintln!("    <strategy> 'no-transaction' | 'transaction'");
 }
 
 fn parse_arg<T: std::str::FromStr>(value: &str, label: &str) -> Result<T, BoxError> {
-    value.parse::<T>().map_err(|_| format!("invalid {}: {}", label, value).into())
+    value
+        .parse::<T>()
+        .map_err(|_| format!("invalid {}: {}", label, value).into())
 }
 
 fn main() -> Result<(), BoxError> {
@@ -215,7 +213,11 @@ fn main() -> Result<(), BoxError> {
     let limit: u64 = parse_arg(&args[1], "limit")?;
     let strategy = &args[2];
     if strategy != "no-transaction" && strategy != "transaction" {
-        return Err(format!("unknown strategy: {} (expected 'no-transaction' or 'transaction')", strategy).into());
+        return Err(format!(
+            "unknown strategy: {} (expected 'no-transaction' or 'transaction')",
+            strategy
+        )
+        .into());
     }
 
     eprintln!("CSV source: {}", csv.display());

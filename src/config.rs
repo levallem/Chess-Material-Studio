@@ -1,4 +1,10 @@
-use crate::{styles, search_tab::TacticalThemes, search_tab::OpeningSide, lang, openings::{Openings, Variation}};
+use crate::{
+    lang,
+    openings::{Openings, Variation},
+    search_tab::OpeningSide,
+    search_tab::TacticalThemes,
+    styles,
+};
 use chess::{Board, ChessMove, Piece, Square};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,9 +13,7 @@ use std::sync::LazyLock;
 
 pub use crate::models::Puzzle;
 
-pub static SETTINGS: LazyLock<OfflinePuzzlesConfig> = LazyLock::new(|| {
-    load_config()
-});
+pub static SETTINGS: LazyLock<OfflinePuzzlesConfig> = LazyLock::new(|| load_config());
 
 pub const MAX_RATING: i32 = 3600;
 pub const PDF_TEXT_FONT_BYTES: &[u8] = include_bytes!("../font/NotoSans-Regular.ttf");
@@ -27,13 +31,10 @@ pub const DATABASE_URL: &str = "ocp.db";
 
 // Iced widget IDs need to be static
 pub static BTN_IDS: [&str; 64] = [
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
-    "20", "21", "22", "23", "24", "25", "26", "27", "28", "29",
-    "30", "31", "32", "33", "34", "35", "36", "37", "38", "39",
-    "40", "41", "42", "43", "44", "45", "46", "47", "48", "49",
-    "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
-    "60", "61", "62", "63",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
+    "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32",
+    "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48",
+    "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,9 +124,10 @@ pub fn load_config_from_path(path: &Path) -> OfflinePuzzlesConfig {
             let config_json = deserialize_config(reader);
             match config_json {
                 Ok(cfg) => config = cfg,
-                Err(_) => config = OfflinePuzzlesConfig::default()
+                Err(_) => config = OfflinePuzzlesConfig::default(),
             }
-        } Err(_) => config = OfflinePuzzlesConfig::default()
+        }
+        Err(_) => config = OfflinePuzzlesConfig::default(),
     }
     config
 }
@@ -208,9 +210,9 @@ pub fn coord_to_san(board: &Board, coords: String, lang: &lang::Language) -> Opt
         } else {
             let mut san_str = String::new();
             let mut san_localized = String::new();
-            let is_en_passant = piece == Piece::Pawn &&
-                board.piece_on(dest_square).is_none() &&
-                dest_square.get_file() != orig_square.get_file();
+            let is_en_passant = piece == Piece::Pawn
+                && board.piece_on(dest_square).is_none()
+                && dest_square.get_file() != orig_square.get_file();
             let is_capture = board.piece_on(dest_square).is_some();
             match piece {
                 Piece::Pawn => {
@@ -219,19 +221,24 @@ pub fn coord_to_san(board: &Board, coords: String, lang: &lang::Language) -> Opt
                     // to know if it needs disambiguation or not)
                     san_str.push_str(&coords[0..1]);
                     san_localized.push_str(&coords[0..1]);
-                } Piece::Bishop => {
+                }
+                Piece::Bishop => {
                     san_str.push('B');
                     san_localized.push_str(&lang::tr(lang, "bishop"));
-                } Piece::Knight => {
+                }
+                Piece::Knight => {
                     san_str.push('N');
                     san_localized.push_str(&lang::tr(lang, "knight"));
-                } Piece::Rook => {
+                }
+                Piece::Rook => {
                     san_str.push('R');
                     san_localized.push_str(&lang::tr(lang, "rook"));
-                } Piece::Queen => {
+                }
+                Piece::Queen => {
                     san_str.push('Q');
                     san_localized.push_str(&lang::tr(lang, "queen"));
-                } Piece::King =>  {
+                }
+                Piece::King => {
                     san_str.push('K');
                     san_localized.push_str(&lang::tr(lang, "king"));
                 }
@@ -253,7 +260,12 @@ pub fn coord_to_san(board: &Board, coords: String, lang: &lang::Language) -> Opt
                         san_localized.push_str(&(String::from("x") + &coords[2..]));
                     } else {
                         san_str.push_str(&(String::from("x") + &coords[2..] + &promotion_piece));
-                        san_localized.push_str(&(String::from("x") + &coords[2..] + "=" + &piece_localized(lang, &promotion_piece)));
+                        san_localized.push_str(
+                            &(String::from("x")
+                                + &coords[2..]
+                                + "="
+                                + &piece_localized(lang, &promotion_piece)),
+                        );
                     }
                 } else {
                     //the simple notation can only fail because of ambiguity, so we try to specify
@@ -272,7 +284,8 @@ pub fn coord_to_san(board: &Board, coords: String, lang: &lang::Language) -> Opt
                     san_localized = String::from(&coords[2..]);
                 } else {
                     san_str = san_str + &coords[2..] + &promotion_piece;
-                    san_localized = String::from(&coords[2..]) + "=" + &piece_localized(lang, &promotion_piece);
+                    san_localized =
+                        String::from(&coords[2..]) + "=" + &piece_localized(lang, &promotion_piece);
                 }
             } else {
                 let move_with_regular_notation = san_str.clone() + &coords[2..];
@@ -345,7 +358,10 @@ mod tests {
         let puzzles = read_fixture_puzzles();
         let puzzle = &puzzles[2];
         assert_eq!(puzzle.puzzle_id, "00010");
-        assert_eq!(puzzle.fen, "r1bqkb1r/pppppppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3");
+        assert_eq!(
+            puzzle.fen,
+            "r1bqkb1r/pppppppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3"
+        );
         assert_eq!(puzzle.moves, "f3g5 e7e6 g5f7");
         assert_eq!(puzzle.rating, 1700);
         assert_eq!(puzzle.rating_deviation, 80);
@@ -382,7 +398,10 @@ mod tests {
     fn test_empty_opening_tags() {
         let puzzles = read_fixture_puzzles();
         let p = &puzzles[1];
-        assert_eq!(p.opening, "", "empty OpeningTags should deserialize to empty string");
+        assert_eq!(
+            p.opening, "",
+            "empty OpeningTags should deserialize to empty string"
+        );
     }
 
     #[test]
@@ -628,11 +647,10 @@ mod tests {
         let original = b"{\"engine_limit\":\"original\"}";
         std::fs::write(&path, original).expect("existing configuration should be seeded");
 
-        let result = persist_config_to_path_with_renamer(
-            &OfflinePuzzlesConfig::default(),
-            &path,
-            |_, _| Err(std::io::Error::other("injected rename failure")),
-        );
+        let result =
+            persist_config_to_path_with_renamer(&OfflinePuzzlesConfig::default(), &path, |_, _| {
+                Err(std::io::Error::other("injected rename failure"))
+            });
 
         assert_eq!(result, Err("error_saving"));
         assert_eq!(std::fs::read(&path).unwrap(), original);
@@ -684,7 +702,10 @@ mod tests {
             puzzle_db_location: csv_path.to_str().unwrap().to_string(),
             ..OfflinePuzzlesConfig::default()
         };
-        assert!(!puzzle_source_exists(&cfg), "SQLite missing should NOT fall back to CSV");
+        assert!(
+            !puzzle_source_exists(&cfg),
+            "SQLite missing should NOT fall back to CSV"
+        );
         let _ = std::fs::remove_file(&csv_path);
     }
 }

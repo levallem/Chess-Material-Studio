@@ -4,9 +4,7 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 
-use chess_material_studio::puzzle_import::{
-    self, MIGRATIONS, PuzzleFileImportResult,
-};
+use chess_material_studio::puzzle_import::{self, MIGRATIONS, PuzzleFileImportResult};
 
 const DEFAULT_CHUNK_SIZE: usize = 50_000;
 const MAX_CHUNK_SIZE: usize = 100_000;
@@ -35,7 +33,9 @@ enum ParseOutcome {
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  import_puzzles --csv <PATH> --db <PATH> (--max-rows <N> | --full [--confirm-full-import]) [--chunk-size <N>] [--resume]");
+    eprintln!(
+        "  import_puzzles --csv <PATH> --db <PATH> (--max-rows <N> | --full [--confirm-full-import]) [--chunk-size <N>] [--resume]"
+    );
     eprintln!();
     eprintln!("Arguments:");
     eprintln!("  --csv <PATH>                 Path to the Lichess CSV file (required)");
@@ -43,7 +43,9 @@ fn print_usage() {
     eprintln!("  --max-rows <N>               Limited mode: max total rows (1..=100000)");
     eprintln!("  --full                       Full mode: import all rows until EOF");
     eprintln!("  --confirm-full-import        Required with --full to confirm full import");
-    eprintln!("  --chunk-size <N>             Rows per transaction chunk (optional, default: 50000)");
+    eprintln!(
+        "  --chunk-size <N>             Rows per transaction chunk (optional, default: 50000)"
+    );
     eprintln!("  --resume                     Resume an existing import (required if DB exists)");
 }
 
@@ -78,7 +80,9 @@ fn parse_args_from(args: &[String]) -> Result<ParseOutcome, String> {
             "--max-rows" => {
                 i += 1;
                 let val = args.get(i).ok_or("--max-rows requires a value")?;
-                let n: usize = val.parse().map_err(|_| format!("invalid --max-rows: {}", val))?;
+                let n: usize = val
+                    .parse()
+                    .map_err(|_| format!("invalid --max-rows: {}", val))?;
                 max_rows = Some(n);
             }
             "--full" => {
@@ -90,7 +94,9 @@ fn parse_args_from(args: &[String]) -> Result<ParseOutcome, String> {
             "--chunk-size" => {
                 i += 1;
                 let val = args.get(i).ok_or("--chunk-size requires a value")?;
-                let n: usize = val.parse().map_err(|_| format!("invalid --chunk-size: {}", val))?;
+                let n: usize = val
+                    .parse()
+                    .map_err(|_| format!("invalid --chunk-size: {}", val))?;
                 chunk_size = Some(n);
             }
             "--resume" => {
@@ -144,10 +150,7 @@ fn parse_args_from(args: &[String]) -> Result<ParseOutcome, String> {
         return Err("chunk_size must be greater than 0".into());
     }
     if chunk_size > MAX_CHUNK_SIZE {
-        return Err(format!(
-            "chunk_size cannot exceed {}",
-            MAX_CHUNK_SIZE
-        ));
+        return Err(format!("chunk_size cannot exceed {}", MAX_CHUNK_SIZE));
     }
 
     Ok(ParseOutcome::Run(Args {
@@ -175,8 +178,8 @@ fn is_ocp_db(path: &Path) -> Result<bool, String> {
     let project_ocp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ocp.db");
     let protected = normalize_path(&project_ocp)
         .map_err(|e| format!("cannot normalize protected database: {}", e))?;
-    let target = normalize_path(path)
-        .map_err(|e| format!("cannot normalize {}: {}", path.display(), e))?;
+    let target =
+        normalize_path(path).map_err(|e| format!("cannot normalize {}: {}", path.display(), e))?;
 
     Ok(target == protected)
 }
@@ -211,17 +214,15 @@ fn normalize_path(path: &Path) -> Result<PathBuf, String> {
                 if result.try_exists().map_err(|e| {
                     format!("cannot inspect path component {}: {}", result.display(), e)
                 })? {
-                    result = std::fs::canonicalize(&result).map_err(|e| {
-                        format!("cannot canonicalize {}: {}", result.display(), e)
-                    })?;
+                    result = std::fs::canonicalize(&result)
+                        .map_err(|e| format!("cannot canonicalize {}: {}", result.display(), e))?;
                 }
             }
         }
     }
 
     if result.as_os_str().is_empty() {
-        std::fs::canonicalize(".")
-            .map_err(|e| format!("cannot canonicalize current dir: {}", e))
+        std::fs::canonicalize(".").map_err(|e| format!("cannot canonicalize current dir: {}", e))
     } else {
         Ok(result)
     }
@@ -237,21 +238,21 @@ fn is_path_within_full_import_dir_from_root(
     let project_root_canon = normalize_path(project_root)
         .map_err(|e| format!("cannot normalize project root: {}", e))?;
     let target_dir = project_root.join("target");
-    let target_canon = normalize_path(&target_dir)
-        .map_err(|e| format!("cannot normalize target dir: {}", e))?;
+    let target_canon =
+        normalize_path(&target_dir).map_err(|e| format!("cannot normalize target dir: {}", e))?;
     if !target_canon.starts_with(&project_root_canon) {
         return Ok(false);
     }
 
     let allowed_dir = target_dir.join("cms_full_import");
-    let allowed_canon = normalize_path(&allowed_dir)
-        .map_err(|e| format!("cannot normalize allowed dir: {}", e))?;
+    let allowed_canon =
+        normalize_path(&allowed_dir).map_err(|e| format!("cannot normalize allowed dir: {}", e))?;
     if !allowed_canon.starts_with(&target_canon) {
         return Ok(false);
     }
 
-    let target_canon = normalize_path(path)
-        .map_err(|e| format!("cannot normalize {}: {}", path.display(), e))?;
+    let target_canon =
+        normalize_path(path).map_err(|e| format!("cannot normalize {}: {}", path.display(), e))?;
 
     Ok(target_canon.starts_with(&allowed_canon))
 }
@@ -274,9 +275,7 @@ fn validate_args(args: &Args) -> Result<(), String> {
     // Full mode: DB must be within target/cms_full_import/
     if args.mode == ImportMode::Full {
         if !is_path_within_full_import_dir(&args.db)? {
-            return Err(
-                "Full import DB must be within target/cms_full_import/ directory".into(),
-            );
+            return Err("Full import DB must be within target/cms_full_import/ directory".into());
         }
     }
 
@@ -361,7 +360,10 @@ fn validate_resume_source(
 
     let count = checkpoint_count(conn)?;
     if count == 0 {
-        return Err(format!("Cannot resume {}: no checkpoint found", import_kind));
+        return Err(format!(
+            "Cannot resume {}: no checkpoint found",
+            import_kind
+        ));
     }
     if count > 1 {
         return Err(format!(
@@ -544,7 +546,8 @@ fn main() {
                     if result.inserted_rows as i64 != final_checkpoint - starting_checkpoint {
                         eprintln!(
                             "Invariant violation: inserted_rows ({}) != final_checkpoint - starting_checkpoint ({})",
-                            result.inserted_rows, final_checkpoint - starting_checkpoint
+                            result.inserted_rows,
+                            final_checkpoint - starting_checkpoint
                         );
                         std::process::exit(1);
                     }
@@ -912,8 +915,8 @@ mod tests {
             .join(format!("cms_normalize_missing_{}", std::process::id()));
         assert!(!missing_dir.exists(), "test directory must not exist");
 
-        let normalized = normalize_path(&missing_dir.join("sub").join("..").join("test.sqlite"))
-            .unwrap();
+        let normalized =
+            normalize_path(&missing_dir.join("sub").join("..").join("test.sqlite")).unwrap();
         let expected = normalize_path(&missing_dir.join("test.sqlite")).unwrap();
 
         assert_eq!(normalized, expected);
@@ -946,11 +949,13 @@ mod tests {
         std::fs::create_dir_all(&external_dir).unwrap();
         symlink(&external_dir, &allowed_dir).unwrap();
 
-        assert!(!is_path_within_full_import_dir_from_root(
-            &allowed_dir.join("external.sqlite"),
-            &project_root,
-        )
-        .unwrap());
+        assert!(
+            !is_path_within_full_import_dir_from_root(
+                &allowed_dir.join("external.sqlite"),
+                &project_root,
+            )
+            .unwrap()
+        );
     }
 
     #[cfg(unix)]
@@ -967,11 +972,13 @@ mod tests {
         std::fs::create_dir_all(&external_dir).unwrap();
         symlink(&external_dir, allowed_dir.join("outside")).unwrap();
 
-        assert!(!is_path_within_full_import_dir_from_root(
-            &allowed_dir.join("outside").join("external.sqlite"),
-            &project_root,
-        )
-        .unwrap());
+        assert!(
+            !is_path_within_full_import_dir_from_root(
+                &allowed_dir.join("outside").join("external.sqlite"),
+                &project_root,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1174,10 +1181,8 @@ mod tests {
         // Manually insert a checkpoint with wrong key
         diesel::insert_into(chess_material_studio::schema::puzzle_import_progress::table)
             .values((
-                chess_material_studio::schema::puzzle_import_progress::dsl::source_key
-                    .eq(fake_key),
-                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows
-                    .eq(4i64),
+                chess_material_studio::schema::puzzle_import_progress::dsl::source_key.eq(fake_key),
+                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows.eq(4i64),
             ))
             .execute(&mut conn)
             .expect("insert fake checkpoint");
@@ -1208,8 +1213,7 @@ mod tests {
             .values((
                 chess_material_studio::schema::puzzle_import_progress::dsl::source_key
                     .eq("key-alpha"),
-                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows
-                    .eq(2i64),
+                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows.eq(2i64),
             ))
             .execute(&mut conn)
             .expect("insert alpha");
@@ -1218,14 +1222,16 @@ mod tests {
             .values((
                 chess_material_studio::schema::puzzle_import_progress::dsl::source_key
                     .eq("key-beta"),
-                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows
-                    .eq(3i64),
+                chess_material_studio::schema::puzzle_import_progress::dsl::completed_rows.eq(3i64),
             ))
             .execute(&mut conn)
             .expect("insert beta");
 
         let err = validate_resume_source(&mut conn, &csv_path, &ImportMode::Full).unwrap_err();
-        assert_eq!(err, "Cannot resume full import: multiple source checkpoints found");
+        assert_eq!(
+            err,
+            "Cannot resume full import: multiple source checkpoints found"
+        );
 
         std::fs::remove_file(&csv_path).ok();
     }
@@ -1241,13 +1247,14 @@ mod tests {
         let source_a_result =
             puzzle_import::import_puzzles_from_file_chunked_limited(&mut conn, &csv_a_path, 1, 2)
                 .expect("seed limited import");
-        let source_b_key = puzzle_import::puzzle_source_key_from_file(&csv_b_path)
-            .expect("compute source B key");
+        let source_b_key =
+            puzzle_import::puzzle_source_key_from_file(&csv_b_path).expect("compute source B key");
         assert_ne!(source_a_result.source_key, source_b_key);
         let rows_before = row_count(&mut conn).expect("count rows before preflight");
         let checkpoint_a_before = checkpoint_value(&mut conn, &source_a_result.source_key)
             .expect("read source A checkpoint before preflight");
-        let checkpoints_before = checkpoint_count(&mut conn).expect("count checkpoints before preflight");
+        let checkpoints_before =
+            checkpoint_count(&mut conn).expect("count checkpoints before preflight");
         let source_b_rows_before: i64 = chess_material_studio::schema::puzzles::table
             .filter(chess_material_studio::schema::puzzles::dsl::puzzle_id.eq("99999"))
             .count()
@@ -1255,12 +1262,9 @@ mod tests {
             .expect("count source B-exclusive rows before preflight");
         assert_eq!(source_b_rows_before, 0);
 
-        let err = validate_resume_source(
-            &mut conn,
-            &csv_b_path,
-            &ImportMode::Limited { max_rows: 2 },
-        )
-        .unwrap_err();
+        let err =
+            validate_resume_source(&mut conn, &csv_b_path, &ImportMode::Limited { max_rows: 2 })
+                .unwrap_err();
         assert!(err.contains("does not match checkpoint"), "error: {}", err);
 
         assert_eq!(
@@ -1308,12 +1312,9 @@ mod tests {
                 .expect("initial limited import");
         assert_eq!(initial.inserted_rows, 2);
 
-        let source_key = validate_resume_source(
-            &mut conn,
-            &csv_path,
-            &ImportMode::Limited { max_rows: 4 },
-        )
-        .expect("same source preflight");
+        let source_key =
+            validate_resume_source(&mut conn, &csv_path, &ImportMode::Limited { max_rows: 4 })
+                .expect("same source preflight");
         assert_eq!(source_key, initial.source_key);
 
         let resumed =
@@ -1358,7 +1359,10 @@ mod tests {
         let result2 = puzzle_import::import_puzzles_from_file_chunked(&mut conn, &csv_path, 2)
             .expect("second import");
         assert_eq!(result2.inserted_rows, 0, "second run should insert 0");
-        assert_eq!(result.source_key, result2.source_key, "source_key must match");
+        assert_eq!(
+            result.source_key, result2.source_key,
+            "source_key must match"
+        );
 
         let final_rows2 = row_count(&mut conn).expect("count");
         assert_eq!(final_rows2, 4, "rows unchanged");
