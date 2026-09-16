@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest an improvement to Chess Material Studio.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the need and the desired outcome. Do not include private or local data.
+  - type: textarea
+    id: problem_or_need
+    attributes:
+      label: Problem or need
+      description: What problem or workflow would this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: desired_behavior
+    attributes:
+      label: Desired behavior
+      description: Describe the outcome you would expect.
+    validations:
+      required: true
+  - type: textarea
+    id: usage_context
+    attributes:
+      label: Usage context
+      description: For example, training, class preparation, editorial work, search or import, or export.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives_considered
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: textarea
+    id: additional_information
+    attributes:
+      label: Additional information
+      description: Do not include private or local data.
+    validations:
+      required: false

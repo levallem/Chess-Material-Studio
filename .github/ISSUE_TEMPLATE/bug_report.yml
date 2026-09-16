@@ -1,0 +1,86 @@
+name: Bug report
+description: Report a reproducible problem in Chess Material Studio.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please include only information that is safe to share publicly.
+  - type: input
+    id: version_or_commit
+    attributes:
+      label: Version or commit
+      description: Enter the application version, a source commit SHA, or `unknown`.
+      placeholder: "2.5.2, abc1234, or unknown"
+    validations:
+      required: true
+  - type: input
+    id: operating_system
+    attributes:
+      label: Operating system
+      description: For example, Windows, macOS, Linux, or another system.
+      placeholder: "Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reproducible sequence.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed_behavior
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: puzzle_source
+    attributes:
+      label: Puzzle source
+      description: Select a source when it is relevant to the problem.
+      options:
+        - Lichess CSV
+        - SQLite puzzle corpus
+        - Favorites
+        - Project-selected material
+        - Not applicable / unknown
+    validations:
+      required: false
+  - type: checkboxes
+    id: affected_context
+    attributes:
+      label: Optional context
+      description: Select any relevant components.
+      options:
+        - label: Project .cms.sqlite file
+        - label: External UCI engine
+        - label: PDF, PGN, or JPEG export
+        - label: Puzzle importer
+    validations:
+      required: false
+  - type: textarea
+    id: logs_or_additional_information
+    attributes:
+      label: Logs or additional information
+      description: Paste only relevant excerpts. Remove private information and do not upload personal databases or complete Lichess puzzle corpora.
+    validations:
+      required: false
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I checked that this issue does not contain private data or large local database files.
+          required: true
