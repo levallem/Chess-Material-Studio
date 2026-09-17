@@ -8,6 +8,10 @@ Chess Material Studio does not currently publish a formal security-support matri
 
 Do not open a public Issue for an undisclosed security vulnerability. Use GitHub Private Vulnerability Reporting through the repository's [Security Advisories](https://github.com/levallem/Chess-Material-Studio/security/advisories) page and select **Report a vulnerability**.
 
+## Dependency security status
+
+Known dependency advisories and maintenance warnings that are currently accepted or awaiting upstream changes are tracked in [DEPENDENCY_SECURITY.md](DEPENDENCY_SECURITY.md).
+
 ## Information to include
 
 Provide a concise summary, reproducible steps, expected impact, the affected version or commit if known, and the operating system when relevant. Include only the minimum files or log excerpts needed to investigate. A proposed mitigation or fix is welcome when available.
