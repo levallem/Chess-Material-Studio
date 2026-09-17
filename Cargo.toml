@@ -32,7 +32,7 @@ intl-memoizer = "0.5.3"
 unic-langid = { version = "0.9.6", features = ["macros"] }
 diesel = { version = "2.3.12", features = ["sqlite"] }
 diesel_migrations = "2.3.2"
-lopdf = { git="https://github.com/J-F-Liu/lopdf.git", rev="ed42c15d297c8bf55240502222d7273cffb41392", features = ["font_embedding"] }
+lopdf = { version = "0.45.0", features = ["font_embedding"] }
 ttf-parser = "0.25.1"
 unicode-normalization = "0.1.25"
 
