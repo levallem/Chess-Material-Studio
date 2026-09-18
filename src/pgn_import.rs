@@ -79,18 +79,18 @@ pub fn parse_pgn(input: &str) -> Result<Vec<ImportedGame>, String> {
                 }
 
                 if is_result(token) {
-                    if let Some(builder) = current.as_mut() {
-                        if builder.has_content {
-                            builder.saw_result = true;
-                        }
+                    if let Some(builder) = current.as_mut()
+                        && builder.has_content
+                    {
+                        builder.saw_result = true;
                     }
                     continue;
                 }
 
-                if current.as_ref().is_some_and(|builder| builder.saw_result) {
-                    if let Some(completed_game) = current.take() {
-                        finish_game(completed_game, games.len() + 1, &mut games)?;
-                    }
+                if current.as_ref().is_some_and(|builder| builder.saw_result)
+                    && let Some(completed_game) = current.take()
+                {
+                    finish_game(completed_game, games.len() + 1, &mut games)?;
                 }
 
                 let builder = current.get_or_insert_with(GameBuilder::default);
