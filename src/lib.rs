@@ -2,6 +2,7 @@
 extern crate diesel;
 
 pub mod models;
+pub mod pgn_import;
 pub mod project;
 pub mod puzzle_import;
 pub mod puzzle_search;
