@@ -146,3 +146,4 @@ The source code is distributed under the [MIT License](LICENSE), preserving the 
 Third-party assets are not covered by the source-code MIT license. The bundled assets are the **Cburnett** SVG chess pieces, **Noto Sans**, and **Noto Sans Symbols 2**. Move sounds are synthesized at runtime, so no third-party audio files are shipped. The full Lichess puzzle database is supported as an optional download but is not included.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for authorship, versions, hashes, and license details.
+<!-- R2-06A-V temporary docs-only CI validation -->
