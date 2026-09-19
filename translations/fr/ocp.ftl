@@ -500,3 +500,17 @@ Kings_Gambit_Declined_Classical_Variation = Classical Variation
 Grunfeld_Defense_Exchange_Variation = Exchange Variation
 Grunfeld_Defense_Three_Knights_Variation = Three Knights Variation
 
+pgn_review = Revue PGN
+open_pgn = Ouvrir un PGN
+pgn_source = Source
+pgn_game = Partie
+pgn_ply = Demi-coup
+event = Événement
+date = Date
+result = Résultat
+no_pgn_loaded = Aucun PGN chargé.
+pgn_load_error = Impossible de charger le PGN
+pgn_previous_game = Partie précédente
+pgn_next_game = Partie suivante
+pgn_previous_ply = Demi-coup précédent
+pgn_next_ply = Demi-coup suivant

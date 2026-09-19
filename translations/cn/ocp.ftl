@@ -501,3 +501,17 @@ Kings_Gambit_Declined_Classical_Variation = 古典变例
 
 Grunfeld_Defense_Exchange_Variation = 交换变例
 Grunfeld_Defense_Three_Knights_Variation = 三马变例
+pgn_review = PGN 复盘
+open_pgn = 打开 PGN
+pgn_source = 来源
+pgn_game = 对局
+pgn_ply = 半回合
+event = 赛事
+date = 日期
+result = 结果
+no_pgn_loaded = 尚未加载 PGN。
+pgn_load_error = 无法加载 PGN
+pgn_previous_game = 上一局
+pgn_next_game = 下一局
+pgn_previous_ply = 上一半回合
+pgn_next_ply = 下一半回合
