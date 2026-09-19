@@ -465,6 +465,29 @@ impl OfflinePuzzles {
         }
     }
 
+    fn board_for_presentation(&self) -> Board {
+        if self.active_tab == TabId::Pgn {
+            return self.pgn_tab.current_board().copied().unwrap_or_default();
+        }
+
+        match self.game_mode {
+            config::GameMode::Analysis => self.analysis.current_position(),
+            config::GameMode::Puzzle => self.board,
+        }
+    }
+
+    fn central_board_is_interactive(&self) -> bool {
+        self.active_tab != TabId::Pgn
+    }
+
+    fn board_orientation_side(&self) -> Color {
+        if self.active_tab == TabId::Pgn {
+            Color::White
+        } else {
+            self.puzzle_tab.current_puzzle_side
+        }
+    }
+
     fn verify_and_make_move(&mut self, from: Square, to: Square) -> bool {
         let mut current_puzzle_changed = false;
         let side = match self.game_mode {
@@ -888,6 +911,17 @@ impl OfflinePuzzles {
     }
 
     fn update(&mut self, message: self::Message) -> Task<Message> {
+        if self.active_tab == TabId::Pgn
+            && matches!(
+                &message,
+                Message::SelectSquare(_)
+                    | Message::DropPiece(_, _, _)
+                    | Message::HandleDropZones(_, _)
+            )
+        {
+            return Task::none();
+        }
+
         match (self.from_square, message) {
             (None, Message::SelectSquare(pos)) => {
                 let side = match self.game_mode {
@@ -1531,6 +1565,9 @@ impl OfflinePuzzles {
 
     fn view(&self) -> Element<'_, Message, Theme, iced::Renderer> {
         if self.has_db {
+            let presentation_board = self.board_for_presentation();
+            let board_orientation_side = self.board_orientation_side();
+            let board_interactive = self.central_board_is_interactive();
             let has_previous =
                 !self.puzzle_tab.puzzles.is_empty() && self.puzzle_tab.current_puzzle > 0;
             let has_more_puzzles = !self.puzzle_tab.puzzles.is_empty()
@@ -1542,11 +1579,11 @@ impl OfflinePuzzles {
             let resp = responsive(move |size| {
                 gen_view(
                     self.game_mode,
-                    self.puzzle_tab.current_puzzle_side,
+                    board_orientation_side,
                     self.settings_tab.flip_board,
                     self.settings_tab.show_coordinates,
-                    &self.board,
-                    &self.analysis.current_position(),
+                    &presentation_board,
+                    board_interactive,
                     self.from_square,
                     self.last_move_from,
                     self.last_move_to,
@@ -2122,6 +2159,158 @@ mod tests {
             game_url: "https://lichess.org/game".into(),
             opening: String::new(),
         }
+    }
+
+    fn load_pgn_for_presentation(app: &mut OfflinePuzzles, pgn: &str) {
+        let _ = app.update(Message::Pgn(PgnMessage::FileRead {
+            generation: 0,
+            path: PathBuf::from("presentation.pgn"),
+            content: Ok(pgn.to_string()),
+        }));
+    }
+
+    #[test]
+    fn pgn_presentation_uses_the_session_board_and_ply_navigation() {
+        let mut app = OfflinePuzzles::new(false);
+        app.active_tab = TabId::Pgn;
+        app.puzzle_tab.current_puzzle_side = Color::Black;
+
+        assert_eq!(app.board_for_presentation(), Board::default());
+        assert!(!app.central_board_is_interactive());
+        assert_eq!(app.board_orientation_side(), Color::White);
+
+        load_pgn_for_presentation(&mut app, "1. e4 e5 1-0");
+        let initial_board = *app.pgn_tab.current_board().unwrap();
+        assert_eq!(app.board_for_presentation(), initial_board);
+
+        let _ = app.update(Message::Pgn(PgnMessage::NextPly));
+        let after_next_ply = *app.pgn_tab.current_board().unwrap();
+        assert_ne!(after_next_ply, initial_board);
+        assert_eq!(app.board_for_presentation(), after_next_ply);
+
+        let _ = app.update(Message::Pgn(PgnMessage::PreviousPly));
+        assert_eq!(app.board_for_presentation(), initial_board);
+    }
+
+    #[test]
+    fn pgn_game_navigation_uses_the_selected_games_initial_fen() {
+        let mut app = OfflinePuzzles::new(false);
+        app.active_tab = TabId::Pgn;
+        let initial_fen = "8/8/8/8/8/8/8/K6k w - - 0 1";
+        load_pgn_for_presentation(
+            &mut app,
+            &format!("1. e4 e5 1-0\n\n[SetUp \"1\"]\n[FEN \"{initial_fen}\"]\n\n1. Kb1 1-0"),
+        );
+
+        let _ = app.update(Message::Pgn(PgnMessage::NextPly));
+        let _ = app.update(Message::Pgn(PgnMessage::NextGame));
+
+        assert_eq!(
+            app.board_for_presentation(),
+            Board::from_str(initial_fen).unwrap()
+        );
+    }
+
+    #[test]
+    fn leaving_pgn_restores_the_unchanged_analysis_presentation() {
+        let mut app = OfflinePuzzles::new(false);
+        let analysis_board = Board::from_str("8/8/8/8/8/8/8/K6k w - - 0 1").unwrap();
+        app.game_mode = config::GameMode::Analysis;
+        app.analysis = Game::new_with_board(analysis_board);
+        app.active_tab = TabId::Pgn;
+        load_pgn_for_presentation(&mut app, "1. e4 1-0");
+
+        assert_ne!(app.board_for_presentation(), analysis_board);
+        let _ = app.update(Message::TabSelected(TabId::CurrentPuzzle));
+
+        assert_eq!(app.board_for_presentation(), analysis_board);
+        assert!(app.central_board_is_interactive());
+    }
+
+    #[test]
+    fn leaving_pgn_restores_the_unchanged_puzzle_presentation() {
+        let mut app = app_with_current_puzzle("pgn-return-puzzle");
+        let expected_board = app.board;
+        let expected_puzzle = app.puzzle_tab.current_puzzle;
+        let expected_puzzle_move = app.puzzle_tab.current_puzzle_move;
+        let expected_puzzle_side = app.puzzle_tab.current_puzzle_side;
+        let expected_status = app.puzzle_tab.game_status;
+
+        assert_ne!(expected_board, Board::default());
+        let _ = app.update(Message::TabSelected(TabId::Pgn));
+        load_pgn_for_presentation(&mut app, "1. e4 1-0");
+        assert_eq!(
+            app.board_for_presentation(),
+            *app.pgn_tab.current_board().unwrap()
+        );
+        assert_ne!(app.board_for_presentation(), expected_board);
+
+        let _ = app.update(Message::TabSelected(TabId::CurrentPuzzle));
+
+        assert_eq!(app.board_for_presentation(), expected_board);
+        assert_eq!(app.board, expected_board);
+        assert_eq!(app.puzzle_tab.current_puzzle, expected_puzzle);
+        assert_eq!(app.puzzle_tab.current_puzzle_move, expected_puzzle_move);
+        assert_eq!(app.puzzle_tab.current_puzzle_side, expected_puzzle_side);
+        assert_eq!(app.puzzle_tab.game_status, expected_status);
+    }
+
+    #[test]
+    fn pgn_navigation_preserves_puzzle_analysis_favorite_and_review_state() {
+        let (mut app, _project) = app_with_normal_export_review_context();
+        app.game_mode = config::GameMode::Analysis;
+        app.analysis =
+            Game::new_with_board(Board::from_str("8/8/8/8/8/8/8/K6k w - - 0 1").unwrap());
+        app.analysis_history = vec![app.analysis.current_position()];
+        let (engine_sender, mut engine_commands) = mpsc::channel(1);
+        app.engine_state = EngineStatus::Started;
+        app.engine_sender = Some(engine_sender);
+        app.engine_eval = "0.42".into();
+        app.engine_move = "e4".into();
+        app.active_tab = TabId::Pgn;
+        load_pgn_for_presentation(&mut app, "1. e4 e5 1-0\n\n1. d4 d5 0-1");
+        let expected = normal_export_state(&app);
+        let expected_analysis = app.analysis.current_position();
+        let expected_analysis_history = app.analysis_history.clone();
+
+        let _ = app.update(Message::Pgn(PgnMessage::NextPly));
+        let _ = app.update(Message::Pgn(PgnMessage::NextGame));
+
+        assert_normal_export_state_preserved(&app, &expected, "PGN navigation");
+        assert_eq!(app.analysis.current_position(), expected_analysis);
+        assert_eq!(app.analysis_history, expected_analysis_history);
+        assert!(matches!(app.engine_state, EngineStatus::Started));
+        assert_eq!(app.engine_eval, "0.42");
+        assert_eq!(app.engine_move, "e4");
+        assert!(engine_commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn pgn_board_click_and_drag_messages_are_inert() {
+        let mut app = OfflinePuzzles::new(false);
+        app.active_tab = TabId::Pgn;
+        app.game_mode = config::GameMode::Analysis;
+        app.from_square = Some(Square::E2);
+        let expected_analysis = app.analysis.current_position();
+        let expected_history = app.analysis_history.clone();
+
+        let _ = app.update(Message::SelectSquare(Square::E4));
+        let _ = app.update(Message::DropPiece(
+            Square::E2,
+            iced::Point::ORIGIN,
+            Rectangle::default(),
+        ));
+        let _ = app.update(Message::HandleDropZones(
+            Square::E2,
+            vec![(
+                GenericId::new(config::BTN_IDS[Square::E4.to_index()]),
+                Rectangle::default(),
+            )],
+        ));
+
+        assert_eq!(app.analysis.current_position(), expected_analysis);
+        assert_eq!(app.analysis_history, expected_history);
+        assert_eq!(app.from_square, Some(Square::E2));
     }
 
     fn persistent_puzzle(puzzle: &config::Puzzle) -> PersistentPuzzle {
@@ -3437,7 +3626,7 @@ fn gen_view<'a>(
     flip_board: bool,
     show_coordinates: bool,
     board: &Board,
-    analysis: &Board,
+    board_interactive: bool,
     from_square: Option<Square>,
     last_move_from: Option<Square>,
     last_move_to: Option<Square>,
@@ -3477,13 +3666,17 @@ fn gen_view<'a>(
 ) -> Element<'a, Message, Theme, iced::Renderer> {
     let mut board_col = Column::new().spacing(0).align_x(Alignment::Center);
     let mut board_row = Row::new().spacing(0).align_y(Alignment::Center);
+    let is_pgn = *active_tab == TabId::Pgn;
 
     let is_white = (current_puzzle_side == Color::White) ^ flip_board;
 
-    let board_controls_height = 135.
-        + if show_coordinates { 10. } else { 0. }
-        + if engine_eval.is_empty() { 0. } else { 30. }
-        + if puzzle_review.is_some() { 55. } else { 0. };
+    let board_controls_height = if is_pgn {
+        if show_coordinates { 10. } else { 0. }
+    } else {
+        135. + if show_coordinates { 10. } else { 0. }
+            + if engine_eval.is_empty() { 0. } else { 30. }
+            + if puzzle_review.is_some() { 55. } else { 0. }
+    };
     let board_height = (size.height - board_controls_height) / 8.;
 
     let (ranks, files) = if is_white {
@@ -3504,22 +3697,21 @@ fn gen_view<'a>(
                 File::from_index(*file as usize),
             );
 
-            let (piece, color) = match game_mode {
-                config::GameMode::Analysis => (analysis.piece_on(pos), analysis.color_on(pos)),
-                config::GameMode::Puzzle => (board.piece_on(pos), board.color_on(pos)),
-            };
+            let (piece, color) = (board.piece_on(pos), board.color_on(pos));
 
             let light_square = (rank + file) % 2 != 0;
 
-            let selected =
-                if game_mode == config::GameMode::Puzzle && game_status == GameStatus::Playing {
-                    from_square == Some(pos)
-                        || last_move_from == Some(pos)
-                        || last_move_to == Some(pos)
-                        || hint_square == Some(pos)
-                } else {
-                    from_square == Some(pos)
-                };
+            let selected = if board_interactive
+                && game_mode == config::GameMode::Puzzle
+                && game_status == GameStatus::Playing
+            {
+                from_square == Some(pos)
+                    || last_move_from == Some(pos)
+                    || last_move_to == Some(pos)
+                    || hint_square == Some(pos)
+            } else {
+                board_interactive && from_square == Some(pos)
+            };
             let square_style;
             let container_style;
 
@@ -3578,32 +3770,40 @@ fn gen_view<'a>(
                     }
                 };
 
-                board_row = board_row.push(
-                    container(
-                        iced_drop::droppable(
-                            Svg::new(imgs[piece_index].clone())
-                                .width(board_height)
-                                .height(board_height),
-                        )
+                let piece = Svg::new(imgs[piece_index].clone())
+                    .width(board_height)
+                    .height(board_height);
+                let piece: Element<'a, Message, Theme, iced::Renderer> = if board_interactive {
+                    iced_drop::droppable(piece)
                         .drag_hide(true)
                         .drag_center(true)
                         .on_drop(move |point, rect| Message::DropPiece(pos, point, rect))
-                        .on_click(Message::SelectSquare(pos)),
-                    )
-                    .style(container_style)
-                    .id(board_ids[pos.to_index()].clone()),
+                        .on_click(Message::SelectSquare(pos))
+                        .into()
+                } else {
+                    piece.into()
+                };
+                board_row = board_row.push(
+                    container(piece)
+                        .style(container_style)
+                        .id(board_ids[pos.to_index()].clone()),
                 );
             } else {
-                board_row = board_row.push(
-                    container(
-                        Button::new(Text::new(""))
-                            .width(board_height)
-                            .height(board_height)
-                            .on_press(Message::SelectSquare(pos))
-                            .style(square_style),
-                    )
-                    .id(board_ids[pos.to_index()].clone()),
-                );
+                let square: Element<'a, Message, Theme, iced::Renderer> = if board_interactive {
+                    Button::new(Text::new(""))
+                        .width(board_height)
+                        .height(board_height)
+                        .on_press(Message::SelectSquare(pos))
+                        .style(square_style)
+                        .into()
+                } else {
+                    Container::new(Text::new(""))
+                        .width(board_height)
+                        .height(board_height)
+                        .style(container_style)
+                        .into()
+                };
+                board_row = board_row.push(container(square).id(board_ids[pos.to_index()].clone()));
             }
         }
 
@@ -3780,12 +3980,14 @@ fn gen_view<'a>(
     .spacing(10)
     .align_y(Alignment::Center);
 
-    board_col = board_col
-        .push(Text::new(puzzle_status))
-        .push(game_mode_row)
-        .push(navigation_row)
-        .push(pagination_row);
-    if let Some(review) = puzzle_review {
+    if !is_pgn {
+        board_col = board_col
+            .push(Text::new(puzzle_status))
+            .push(game_mode_row)
+            .push(navigation_row)
+            .push(pagination_row);
+    }
+    if !is_pgn && let Some(review) = puzzle_review {
         let review_status = if review.decision_loaded {
             match review.decision {
                 Some(ProjectPuzzleDecision::Selected) => lang::tr(lang, "selected"),
@@ -3832,7 +4034,7 @@ fn gen_view<'a>(
                 .push(Text::new(review.status)),
         );
     }
-    if !engine_eval.is_empty() {
+    if !is_pgn && !engine_eval.is_empty() {
         board_col = board_col.push(
             row![
                 Text::new(lang::tr(lang, "eval") + engine_eval),

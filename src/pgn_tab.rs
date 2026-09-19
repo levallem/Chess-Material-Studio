@@ -4,6 +4,7 @@ use iced_aw::TabLabel;
 use rfd::AsyncFileDialog;
 use std::path::PathBuf;
 
+use chess::Board;
 use chess_material_studio::pgn_import::parse_pgn;
 use chess_material_studio::pgn_review::PgnReviewSession;
 
@@ -42,6 +43,10 @@ impl PgnTab {
             load_generation: 0,
             lang: config::SETTINGS.lang,
         }
+    }
+
+    pub fn current_board(&self) -> Option<&Board> {
+        self.session.as_ref().map(PgnReviewSession::current_board)
     }
 
     pub fn update(&mut self, message: PgnMessage) -> Task<Message> {
@@ -295,6 +300,12 @@ mod tests {
         assert_eq!(session.current_game_index(), 0);
         assert_eq!(session.current_ply_index(), 0);
         assert_eq!(tab.source, Some(PathBuf::from("first.pgn")));
+        assert_eq!(tab.current_board(), Some(&chess::Board::default()));
+    }
+
+    #[test]
+    fn current_board_is_none_without_a_loaded_session() {
+        assert_eq!(PgnTab::new().current_board(), None);
     }
 
     #[test]
