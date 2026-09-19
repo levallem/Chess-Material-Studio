@@ -500,3 +500,17 @@ Kings_Gambit_Declined_Classical_Variation = Classical Variation
 Grunfeld_Defense_Exchange_Variation = Exchange Variation
 Grunfeld_Defense_Three_Knights_Variation = Three Knights Variation
 
+pgn_review = Revisión PGN
+open_pgn = Abrir PGN
+pgn_source = Fuente
+pgn_game = Partida
+pgn_ply = Ply
+event = Evento
+date = Fecha
+result = Resultado
+no_pgn_loaded = No se cargó ningún PGN.
+pgn_load_error = No se pudo cargar el PGN
+pgn_previous_game = Partida anterior
+pgn_next_game = Partida siguiente
+pgn_previous_ply = Ply anterior
+pgn_next_ply = Ply siguiente

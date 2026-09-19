@@ -500,3 +500,17 @@ Kings_Gambit_Declined_Classical_Variation = Classical Variation
 Grunfeld_Defense_Exchange_Variation = Exchange Variation
 Grunfeld_Defense_Three_Knights_Variation = Three Knights Variation
 
+pgn_review = PGN-overzicht
+open_pgn = PGN openen
+pgn_source = Bron
+pgn_game = Partij
+pgn_ply = Halve zet
+event = Evenement
+date = Datum
+result = Resultaat
+no_pgn_loaded = Geen PGN geladen.
+pgn_load_error = PGN kon niet worden geladen
+pgn_previous_game = Vorige partij
+pgn_next_game = Volgende partij
+pgn_previous_ply = Vorige halve zet
+pgn_next_ply = Volgende halve zet
