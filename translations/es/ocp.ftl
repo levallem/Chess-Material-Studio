@@ -514,3 +514,6 @@ pgn_previous_game = Partida anterior
 pgn_next_game = Partida siguiente
 pgn_previous_ply = Ply anterior
 pgn_next_ply = Ply siguiente
+pgn_capture_position = Capturar posición
+pgn_clear_captured_position = Limpiar posición capturada
+pgn_captured_position = Posición capturada

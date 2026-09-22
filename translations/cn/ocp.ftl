@@ -515,3 +515,6 @@ pgn_previous_game = 上一局
 pgn_next_game = 下一局
 pgn_previous_ply = 上一半回合
 pgn_next_ply = 下一半回合
+pgn_capture_position = 捕获局面
+pgn_clear_captured_position = 清除已捕获局面
+pgn_captured_position = 已捕获局面
