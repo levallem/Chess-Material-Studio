@@ -27,8 +27,7 @@ pub struct PgnPositionSnapshot {
 }
 
 impl PgnPositionSnapshot {
-    /// Replays the complete main line and returns the board at `ply_index`.
-    pub fn reconstruct_selected_board(&self) -> Result<Board, String> {
+    fn reconstruct_game(&self) -> Result<ImportedGame, String> {
         let mut board = Board::from_str(&self.initial_fen)
             .map_err(|error| format!("snapshot initial FEN is invalid: {error:?}"))?;
         if self.ply_index > self.main_line_uci.len() {
@@ -39,7 +38,9 @@ impl PgnPositionSnapshot {
             ));
         }
 
-        let mut selected_board = (self.ply_index == 0).then_some(board);
+        let mut moves = Vec::with_capacity(self.main_line_uci.len());
+        let mut positions = Vec::with_capacity(self.main_line_uci.len() + 1);
+        positions.push(board);
         for (index, uci) in self.main_line_uci.iter().enumerate() {
             let chess_move = ChessMove::from_str(uci).map_err(|_| {
                 format!(
@@ -54,24 +55,31 @@ impl PgnPositionSnapshot {
                 ));
             }
             board = board.make_move_new(chess_move);
-            if index + 1 == self.ply_index {
-                selected_board = Some(board);
-            }
+            moves.push(chess_move);
+            positions.push(board);
         }
 
-        let selected_board = selected_board.ok_or_else(|| {
-            "snapshot ply index did not select a board after main-line replay".to_string()
-        })?;
         let selected_fen_board = Board::from_str(&self.selected_fen)
             .map_err(|error| format!("snapshot selected FEN is invalid: {error:?}"))?;
-        if selected_board != selected_fen_board {
+        if positions[self.ply_index] != selected_fen_board {
             return Err("snapshot selected FEN does not match the reconstructed board".into());
         }
-        Ok(selected_board)
+
+        Ok(ImportedGame {
+            headers: self.headers.clone(),
+            moves,
+            positions,
+        })
+    }
+
+    /// Replays the complete main line and returns the board at `ply_index`.
+    pub fn reconstruct_selected_board(&self) -> Result<Board, String> {
+        let game = self.reconstruct_game()?;
+        Ok(game.positions[self.ply_index])
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.reconstruct_selected_board().map(|_| ())
+        self.reconstruct_game().map(|_| ())
     }
 
     pub fn previous_uci(&self) -> Option<&str> {
@@ -90,6 +98,7 @@ impl PgnPositionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgnReviewSession {
     games: Vec<ImportedGame>,
+    source_game_indices: Vec<usize>,
     current_game_index: usize,
     current_ply_index: usize,
 }
@@ -118,10 +127,20 @@ impl PgnReviewSession {
         }
 
         Ok(Self {
+            source_game_indices: (0..games.len()).collect(),
             games,
             current_game_index: 0,
             current_ply_index: 0,
         })
+    }
+
+    /// Reconstructs a one-game session positioned at the snapshot's selected ply.
+    pub fn from_snapshot(snapshot: &PgnPositionSnapshot) -> Result<Self, String> {
+        let game = snapshot.reconstruct_game()?;
+        let mut session = Self::new(vec![game])?;
+        session.source_game_indices = vec![snapshot.source_game_index];
+        session.current_ply_index = snapshot.ply_index;
+        Ok(session)
     }
 
     pub fn game_count(&self) -> usize {
@@ -159,7 +178,7 @@ impl PgnReviewSession {
     pub fn capture_current_snapshot(&self) -> PgnPositionSnapshot {
         let game = self.current_game();
         PgnPositionSnapshot {
-            source_game_index: self.current_game_index(),
+            source_game_index: self.source_game_indices[self.current_game_index],
             ply_index: self.current_ply_index(),
             selected_fen: self.current_board().to_string(),
             initial_fen: game.positions[0].to_string(),
@@ -599,5 +618,141 @@ mod tests {
                 .unwrap_err()
                 .contains("selected FEN")
         );
+    }
+
+    #[test]
+    fn reconstructs_a_standard_snapshot_into_a_navigable_single_game_session() {
+        let games = parsed_games(
+            "[Event \"Demo\"]\n[Site \"Madrid\"]\n[White \"Alice\"]\n[Black \"Bob\"]\n\n1. e4 e5 2. Nf3 1-0",
+        );
+        let expected_game = games[0].clone();
+        let mut source_session =
+            PgnReviewSession::new(games).expect("parsed game must be coherent");
+        assert!(source_session.next_ply());
+        assert!(source_session.next_ply());
+        let snapshot = source_session.capture_current_snapshot();
+
+        let mut session = PgnReviewSession::from_snapshot(&snapshot)
+            .expect("valid snapshot must reconstruct a session");
+
+        assert_eq!(session.game_count(), 1);
+        assert_eq!(session.current_game_index(), 0);
+        assert_eq!(session.current_ply_index(), snapshot.ply_index);
+        assert_eq!(session.current_game().headers, snapshot.headers);
+        assert_eq!(
+            session.current_game().moves.len(),
+            snapshot.main_line_uci.len()
+        );
+        assert_eq!(
+            session.current_game().positions.len(),
+            session.current_game().moves.len() + 1
+        );
+        assert_eq!(
+            session.current_board(),
+            &expected_game.positions[snapshot.ply_index]
+        );
+
+        assert!(session.previous_ply());
+        assert!(session.previous_ply());
+        assert_eq!(session.current_ply_index(), 0);
+        assert_eq!(session.current_board(), &expected_game.positions[0]);
+        assert!(!session.previous_ply());
+
+        for expected_ply in 1..expected_game.positions.len() {
+            assert!(session.next_ply());
+            assert_eq!(session.current_ply_index(), expected_ply);
+            assert_eq!(
+                session.current_board(),
+                &expected_game.positions[expected_ply]
+            );
+        }
+        assert!(!session.next_ply());
+    }
+
+    #[test]
+    fn reconstructed_session_preserves_source_provenance_but_keeps_local_indices() {
+        let games = parsed_games("1. e4 1-0\n\n1. d4 d5 0-1");
+        let mut source_session =
+            PgnReviewSession::new(games).expect("parsed games must be coherent");
+        assert!(source_session.next_game());
+        assert!(source_session.next_ply());
+        let snapshot = source_session.capture_current_snapshot();
+        assert_eq!(snapshot.source_game_index, 1);
+
+        let mut session = PgnReviewSession::from_snapshot(&snapshot)
+            .expect("valid snapshot must reconstruct a session");
+
+        assert_eq!(session.game_count(), 1);
+        assert_eq!(session.current_game_index(), 0);
+        assert_eq!(session.capture_current_position().game_index, 0);
+        assert_eq!(
+            session.capture_current_snapshot().source_game_index,
+            snapshot.source_game_index
+        );
+
+        assert!(session.previous_ply());
+        assert_eq!(
+            session.capture_current_snapshot().source_game_index,
+            snapshot.source_game_index
+        );
+    }
+
+    #[test]
+    fn normal_sessions_capture_their_local_game_index_as_source_provenance() {
+        let games = parsed_games("1. e4 1-0\n\n1. d4 0-1");
+        let mut session = PgnReviewSession::new(games).expect("parsed games must be coherent");
+
+        assert!(session.next_game());
+        assert_eq!(session.capture_current_snapshot().source_game_index, 1);
+    }
+
+    #[test]
+    fn reconstructs_a_setup_fen_snapshot_and_navigates_from_its_selected_ply() {
+        let initial_fen = "8/8/8/8/8/8/8/K6k w - - 0 1";
+        let games = parsed_games(&format!("[SetUp \"1\"]\n[FEN \"{initial_fen}\"]\n\n1. Kb1"));
+        let expected_game = games[0].clone();
+        let mut source_session =
+            PgnReviewSession::new(games).expect("parsed game must be coherent");
+        assert!(source_session.next_ply());
+        let snapshot = source_session.capture_current_snapshot();
+
+        let mut session = PgnReviewSession::from_snapshot(&snapshot)
+            .expect("valid setup snapshot must reconstruct a session");
+
+        assert_eq!(session.current_game().headers, snapshot.headers);
+        assert_eq!(session.current_board(), &expected_game.positions[1]);
+        assert!(session.previous_ply());
+        assert_eq!(session.current_board(), &expected_game.positions[0]);
+        assert!(session.next_ply());
+        assert_eq!(session.current_board(), &expected_game.positions[1]);
+    }
+
+    #[test]
+    fn reconstructs_a_zero_move_snapshot_at_its_only_position() {
+        let games = parsed_games("[Event \"Quiet\"]\n[Result \"1/2-1/2\"]\n\n1/2-1/2");
+        let source_session = PgnReviewSession::new(games).expect("parsed game must be coherent");
+        let snapshot = source_session.capture_current_snapshot();
+
+        let mut session = PgnReviewSession::from_snapshot(&snapshot)
+            .expect("valid zero-move snapshot must reconstruct a session");
+
+        assert_eq!(session.game_count(), 1);
+        assert_eq!(session.current_ply_index(), 0);
+        assert_eq!(session.current_game().moves.len(), 0);
+        assert_eq!(session.current_game().positions.len(), 1);
+        assert!(!session.next_ply());
+        assert!(!session.previous_ply());
+    }
+
+    #[test]
+    fn rejects_invalid_snapshots_when_reconstructing_a_review_session() {
+        let snapshot = snapshot_with(
+            &Board::default().to_string(),
+            &["not-uci"],
+            0,
+            Board::default().to_string(),
+        );
+
+        assert!(PgnReviewSession::from_snapshot(&snapshot).is_err());
     }
 }
