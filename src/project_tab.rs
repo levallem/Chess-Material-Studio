@@ -10,8 +10,9 @@ use chess_material_studio::project::{
     PgnPositionSnapshotAddResult, ProjectChapter, ProjectMetadata, ProjectPuzzleDecision,
     add_pgn_position_snapshot, clear_puzzle_decision, create_chapter, create_project,
     find_selected_puzzle_chapter, get_puzzle_decision, list_chapters,
-    list_reviewed_puzzle_ids_for_chapter, list_selected_puzzles_by_chapter,
-    list_selected_puzzles_for_chapter, open_project, set_puzzle_decision,
+    list_pgn_position_snapshots_for_chapter, list_reviewed_puzzle_ids_for_chapter,
+    list_selected_puzzles_by_chapter, list_selected_puzzles_for_chapter, open_project,
+    set_puzzle_decision,
 };
 
 use crate::lang;
@@ -64,6 +65,24 @@ enum CachedSelectedPuzzles {
 struct SelectedPuzzlesCache {
     context: SelectedPuzzlesContext,
     state: CachedSelectedPuzzles,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PgnPositionsContext {
+    path: PathBuf,
+    chapter_id: i32,
+}
+
+#[derive(Debug, Clone)]
+enum CachedPgnPositions {
+    Loaded(Vec<PgnPositionSnapshot>),
+    Failed { status: String },
+}
+
+#[derive(Debug, Clone)]
+struct PgnPositionsCache {
+    context: PgnPositionsContext,
+    state: CachedPgnPositions,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +186,7 @@ pub struct ProjectTab {
     status: String,
     review_cache: Option<CachedPuzzleReview>,
     selected_puzzles_cache: Option<SelectedPuzzlesCache>,
+    pgn_positions_cache: Option<PgnPositionsCache>,
     export_selected_chapter_ids: HashSet<i32>,
 }
 
@@ -182,12 +202,13 @@ impl ProjectTab {
             status: String::new(),
             review_cache: None,
             selected_puzzles_cache: None,
+            pgn_positions_cache: None,
             export_selected_chapter_ids: HashSet::new(),
         }
     }
 
     pub fn add_pgn_snapshot_to_active_chapter(
-        &self,
+        &mut self,
         snapshot: &PgnPositionSnapshot,
     ) -> Result<PgnSnapshotAddedToChapter, String> {
         let Some(active_project) = self.active_project.as_ref() else {
@@ -204,9 +225,13 @@ impl ProjectTab {
             return Err(lang::tr(&self.lang, "no_active_chapter"));
         };
 
-        let result = add_pgn_position_snapshot(&active_project.path, chapter.id, snapshot)?;
+        let path = active_project.path.clone();
+        let chapter_id = chapter.id;
+        let chapter_name = chapter.name.clone();
+        let result = add_pgn_position_snapshot(&path, chapter_id, snapshot)?;
+        self.refresh_pgn_positions();
         Ok(PgnSnapshotAddedToChapter {
-            chapter_name: chapter.name.clone(),
+            chapter_name,
             result,
         })
     }
@@ -249,6 +274,7 @@ impl ProjectTab {
                 self.status.clear();
                 self.clear_puzzle_review_cache();
                 self.clear_selected_puzzles_cache();
+                self.clear_pgn_positions_cache();
                 Task::none()
             }
             ProjectMessage::ChapterNameChanged(value) => {
@@ -459,6 +485,7 @@ impl ProjectTab {
                 self.export_selected_chapter_ids.clear();
                 self.clear_puzzle_review_cache();
                 self.refresh_selected_puzzles();
+                self.refresh_pgn_positions();
                 self.project_name.clear();
                 self.new_project_path = None;
                 self.status.clear();
@@ -476,6 +503,7 @@ impl ProjectTab {
                 self.export_selected_chapter_ids.clear();
                 self.clear_puzzle_review_cache();
                 self.refresh_selected_puzzles();
+                self.refresh_pgn_positions();
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
                 self.status.clear();
@@ -516,6 +544,7 @@ impl ProjectTab {
                 self.reconcile_export_selected_chapter_ids();
                 self.clear_puzzle_review_cache();
                 self.refresh_selected_puzzles();
+                self.refresh_pgn_positions();
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
                 self.status.clear();
@@ -538,6 +567,7 @@ impl ProjectTab {
             self.status.clear();
             self.clear_puzzle_review_cache();
             self.refresh_selected_puzzles();
+            self.refresh_pgn_positions();
         }
     }
 
@@ -916,6 +946,60 @@ impl ProjectTab {
             path: active_project.path.clone(),
             chapter_id: active_project.active_chapter_id?,
         })
+    }
+
+    fn pgn_positions_context(&self) -> Option<PgnPositionsContext> {
+        let active_project = self.active_project.as_ref()?;
+        Some(PgnPositionsContext {
+            path: active_project.path.clone(),
+            chapter_id: active_project.active_chapter_id?,
+        })
+    }
+
+    fn refresh_pgn_positions(&mut self) {
+        let Some(context) = self.pgn_positions_context() else {
+            self.clear_pgn_positions_cache();
+            return;
+        };
+        let state = match list_pgn_position_snapshots_for_chapter(&context.path, context.chapter_id)
+        {
+            Ok(snapshots) => CachedPgnPositions::Loaded(snapshots),
+            Err(error) => CachedPgnPositions::Failed {
+                status: format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "saved_pgn_positions_error")
+                ),
+            },
+        };
+        self.pgn_positions_cache = Some(PgnPositionsCache { context, state });
+    }
+
+    fn pgn_positions(&self) -> Option<&[PgnPositionSnapshot]> {
+        let context = self.pgn_positions_context()?;
+        let cache = self.pgn_positions_cache.as_ref()?;
+        if cache.context != context {
+            return None;
+        }
+        match &cache.state {
+            CachedPgnPositions::Loaded(snapshots) => Some(snapshots),
+            CachedPgnPositions::Failed { .. } => None,
+        }
+    }
+
+    fn pgn_positions_error(&self) -> Option<&str> {
+        let context = self.pgn_positions_context()?;
+        let cache = self.pgn_positions_cache.as_ref()?;
+        if cache.context != context {
+            return None;
+        }
+        match &cache.state {
+            CachedPgnPositions::Loaded(_) => None,
+            CachedPgnPositions::Failed { status } => Some(status),
+        }
+    }
+
+    fn clear_pgn_positions_cache(&mut self) {
+        self.pgn_positions_cache = None;
     }
 
     fn refresh_selected_puzzles(&mut self) {
@@ -1403,6 +1487,9 @@ impl ProjectTab {
         if let Some(selected_puzzles) = self.selected_puzzles_content() {
             content = content.push(selected_puzzles);
         }
+        if let Some(pgn_positions) = self.pgn_positions_content() {
+            content = content.push(pgn_positions);
+        }
 
         content
             .push(Text::new(lang::tr(&self.lang, "new_chapter")))
@@ -1472,6 +1559,57 @@ impl ProjectTab {
                 self.selected_puzzles_error()
                     .map(str::to_owned)
                     .unwrap_or_else(|| lang::tr(&self.lang, "selected_puzzles_error")),
+            )),
+        )
+    }
+
+    fn pgn_positions_content(&self) -> Option<Column<'_, ProjectMessage>> {
+        self.active_chapter()?;
+        let mut content = Column::new()
+            .spacing(5)
+            .push(Text::new(lang::tr(&self.lang, "saved_pgn_positions")));
+
+        if let Some(snapshots) = self.pgn_positions() {
+            if snapshots.is_empty() {
+                return Some(
+                    content.push(Text::new(lang::tr(&self.lang, "no_saved_pgn_positions"))),
+                );
+            }
+
+            for (index, snapshot) in snapshots.iter().enumerate() {
+                let white = snapshot.headers.white.as_deref().unwrap_or("-");
+                let black = snapshot.headers.black.as_deref().unwrap_or("-");
+                let event = snapshot.headers.event.as_deref().unwrap_or("-");
+                content = content
+                    .push(Text::new(format!(
+                        "{}. {}: {white} | {}: {black}",
+                        index + 1,
+                        lang::tr(&self.lang, "white"),
+                        lang::tr(&self.lang, "black"),
+                    )))
+                    .push(Text::new(format!(
+                        "{}: {event}",
+                        lang::tr(&self.lang, "event"),
+                    )))
+                    .push(Text::new(format!(
+                        "{}: {}",
+                        lang::tr(&self.lang, "pgn_ply"),
+                        snapshot.ply_index,
+                    )))
+                    .push(Text::new(format!(
+                        "{} {}",
+                        lang::tr(&self.lang, "fen"),
+                        snapshot.selected_fen,
+                    )));
+            }
+            return Some(content);
+        }
+
+        Some(
+            content.push(Text::new(
+                self.pgn_positions_error()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| lang::tr(&self.lang, "saved_pgn_positions_error")),
             )),
         )
     }
@@ -1554,7 +1692,7 @@ mod tests {
     #[test]
     fn adding_a_pgn_snapshot_without_a_project_does_not_write() {
         let project = TempProjectDb::new("pgn-snapshot-no-project");
-        let tab = ProjectTab::new();
+        let mut tab = ProjectTab::new();
 
         let error = tab
             .add_pgn_snapshot_to_active_chapter(&sample_pgn_snapshot())
@@ -3210,6 +3348,183 @@ mod tests {
 
         for language in lang::Language::ALL {
             for key in PROJECT_KEYS {
+                assert!(!lang::tr(&language, key).is_empty(), "missing {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn opening_a_project_recovers_saved_pgn_positions_in_insertion_order() {
+        let project = TempProjectDb::new("pgn-positions-open-recovery");
+        create_project(&project.path, "Recuperación").unwrap();
+        let chapter = create_chapter(&project.path, "PGN", None).unwrap();
+        let first = sample_pgn_snapshot();
+        let mut second = sample_pgn_snapshot();
+        second.ply_index = 2;
+        second.selected_fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into();
+        add_pgn_position_snapshot(&project.path, chapter.id, &first).unwrap();
+        add_pgn_position_snapshot(&project.path, chapter.id, &second).unwrap();
+        let mut tab = ProjectTab::new();
+
+        tab.open_project_path(&project.path);
+        let _ = tab.update(ProjectMessage::CloseProject);
+        tab.open_project_path(&project.path);
+
+        assert_eq!(tab.pgn_positions().unwrap(), [first, second]);
+    }
+
+    #[test]
+    fn project_without_chapters_has_no_pgn_positions_cache() {
+        let project = TempProjectDb::new("pgn-positions-no-chapters");
+        create_project(&project.path, "Vacío").unwrap();
+        let mut tab = ProjectTab::new();
+
+        tab.open_project_path(&project.path);
+
+        assert!(tab.pgn_positions().is_none());
+    }
+
+    #[test]
+    fn creating_first_chapter_loads_an_empty_pgn_positions_cache() {
+        let project = TempProjectDb::new("pgn-positions-create-chapter");
+        create_project(&project.path, "Vacío").unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        tab.chapter_name = "PGN".into();
+
+        tab.create_chapter_from_draft();
+
+        assert!(tab.pgn_positions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn selecting_a_chapter_replaces_the_pgn_positions_cache() {
+        let project = TempProjectDb::new("pgn-positions-switch-chapter");
+        create_project(&project.path, "Capítulos").unwrap();
+        let first_chapter = create_chapter(&project.path, "A", None).unwrap();
+        let second_chapter = create_chapter(&project.path, "B", None).unwrap();
+        let first = sample_pgn_snapshot();
+        let mut second = sample_pgn_snapshot();
+        second.headers.event = Some("Second chapter".into());
+        add_pgn_position_snapshot(&project.path, first_chapter.id, &first).unwrap();
+        add_pgn_position_snapshot(&project.path, second_chapter.id, &second).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        assert_eq!(tab.pgn_positions().unwrap(), [first]);
+        tab.select_chapter(second_chapter.id);
+        assert_eq!(tab.pgn_positions().unwrap(), [second]);
+    }
+
+    #[test]
+    fn switching_projects_and_closing_clears_or_replaces_the_pgn_positions_cache() {
+        let first_project = TempProjectDb::new("pgn-positions-first-project");
+        create_project(&first_project.path, "Primero").unwrap();
+        let first_chapter = create_chapter(&first_project.path, "A", None).unwrap();
+        let first = sample_pgn_snapshot();
+        add_pgn_position_snapshot(&first_project.path, first_chapter.id, &first).unwrap();
+        let second_project = TempProjectDb::new("pgn-positions-second-project");
+        create_project(&second_project.path, "Segundo").unwrap();
+        let second_chapter = create_chapter(&second_project.path, "B", None).unwrap();
+        let mut second = sample_pgn_snapshot();
+        second.headers.event = Some("Second project".into());
+        add_pgn_position_snapshot(&second_project.path, second_chapter.id, &second).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&first_project.path);
+        assert_eq!(tab.pgn_positions().unwrap(), [first]);
+
+        tab.open_project_path(&second_project.path);
+        assert_eq!(tab.pgn_positions().unwrap(), [second]);
+        let _ = tab.update(ProjectMessage::CloseProject);
+        assert!(tab.pgn_positions().is_none());
+    }
+
+    #[test]
+    fn adding_a_pgn_snapshot_refreshes_the_cache_after_inserted() {
+        let project = TempProjectDb::new("pgn-positions-inserted");
+        create_project(&project.path, "Insertado").unwrap();
+        create_chapter(&project.path, "PGN", None).unwrap();
+        let snapshot = sample_pgn_snapshot();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        assert!(tab.pgn_positions().unwrap().is_empty());
+
+        let added = tab.add_pgn_snapshot_to_active_chapter(&snapshot).unwrap();
+
+        assert_eq!(added.result, PgnPositionSnapshotAddResult::Inserted);
+        assert_eq!(tab.pgn_positions().unwrap(), [snapshot]);
+        assert_eq!(tab.selected_count(), Some(0));
+        assert!(tab.selected_puzzles().unwrap().is_empty());
+    }
+
+    #[test]
+    fn adding_an_existing_pgn_snapshot_refreshes_without_a_visual_duplicate() {
+        let project = TempProjectDb::new("pgn-positions-already-exists");
+        create_project(&project.path, "Duplicado").unwrap();
+        create_chapter(&project.path, "PGN", None).unwrap();
+        let snapshot = sample_pgn_snapshot();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        assert_eq!(
+            tab.add_pgn_snapshot_to_active_chapter(&snapshot)
+                .unwrap()
+                .result,
+            PgnPositionSnapshotAddResult::Inserted
+        );
+
+        let added = tab.add_pgn_snapshot_to_active_chapter(&snapshot).unwrap();
+
+        assert_eq!(added.result, PgnPositionSnapshotAddResult::AlreadyExists);
+        assert_eq!(tab.pgn_positions().unwrap(), [snapshot]);
+    }
+
+    #[test]
+    fn failed_pgn_position_read_replaces_loaded_values_with_an_error() {
+        let project = TempProjectDb::new("pgn-positions-read-error");
+        create_project(&project.path, "Error").unwrap();
+        let chapter = create_chapter(&project.path, "PGN", None).unwrap();
+        let snapshot = sample_pgn_snapshot();
+        add_pgn_position_snapshot(&project.path, chapter.id, &snapshot).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        assert_eq!(tab.pgn_positions().unwrap(), [snapshot]);
+        std::fs::remove_file(&project.path).unwrap();
+
+        tab.refresh_pgn_positions();
+
+        assert!(tab.pgn_positions().is_none());
+        assert!(tab.pgn_positions_error().is_some());
+        let _ = tab.content();
+    }
+
+    #[test]
+    fn failed_project_open_preserves_the_current_pgn_positions_cache() {
+        let project = TempProjectDb::new("pgn-positions-invalid-open");
+        create_project(&project.path, "Válido").unwrap();
+        let chapter = create_chapter(&project.path, "PGN", None).unwrap();
+        let snapshot = sample_pgn_snapshot();
+        add_pgn_position_snapshot(&project.path, chapter.id, &snapshot).unwrap();
+        let invalid_path = project.directory.join("not-a-project.sqlite");
+        std::fs::write(&invalid_path, "not SQLite").unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        let before = tab.pgn_positions().unwrap().to_vec();
+
+        tab.open_project_path(&invalid_path);
+
+        assert_eq!(tab.pgn_positions().unwrap(), before);
+    }
+
+    #[test]
+    fn pgn_position_translation_keys_exist_for_every_supported_language() {
+        const PGN_POSITION_KEYS: [&str; 3] = [
+            "saved_pgn_positions",
+            "no_saved_pgn_positions",
+            "saved_pgn_positions_error",
+        ];
+
+        for language in lang::Language::ALL {
+            for key in PGN_POSITION_KEYS {
                 assert!(!lang::tr(&language, key).is_empty(), "missing {key}");
             }
         }
