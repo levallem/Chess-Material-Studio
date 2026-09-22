@@ -62,9 +62,35 @@ impl PgnTab {
         self.captured_snapshot.as_ref()
     }
 
+    pub fn load_snapshot(&mut self, snapshot: &PgnPositionSnapshot) -> Result<(), String> {
+        let session = match PgnReviewSession::from_snapshot(snapshot) {
+            Ok(session) => session,
+            Err(error) => {
+                self.status = Some(format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "pgn_load_error")
+                ));
+                return Err(error);
+            }
+        };
+
+        self.session = Some(session);
+        self.source = None;
+        self.captured_candidate = None;
+        self.captured_snapshot = None;
+        self.status = None;
+        self.next_load_generation();
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn captured_candidate(&self) -> Option<&PgnPositionCandidate> {
         self.captured_candidate.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn review_session(&self) -> Option<&PgnReviewSession> {
+        self.session.as_ref()
     }
 
     #[cfg(test)]
@@ -809,6 +835,88 @@ mod tests {
 
         assert_eq!(tab.captured_candidate, candidate);
         assert_eq!(tab.captured_snapshot, snapshot);
+    }
+
+    fn saved_snapshot() -> PgnPositionSnapshot {
+        let games = parse_pgn(first_game()).expect("fixture PGN must parse");
+        let mut session = PgnReviewSession::new(games).expect("fixture session must load");
+        assert!(session.next_ply());
+        assert!(session.next_ply());
+        session.capture_current_snapshot()
+    }
+
+    #[test]
+    fn loading_a_saved_snapshot_rebuilds_the_session_and_clears_transient_state() {
+        let snapshot = saved_snapshot();
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("old.pgn"), first_game())
+            .expect("old PGN must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+        tab.set_add_to_chapter_feedback("old feedback".into());
+
+        tab.load_snapshot(&snapshot)
+            .expect("saved snapshot must reconstruct");
+
+        let session = tab.session.as_mut().expect("saved session must exist");
+        assert_eq!(session.game_count(), 1);
+        assert_eq!(session.current_ply_index(), snapshot.ply_index);
+        assert_eq!(session.current_game().headers, snapshot.headers);
+        assert_eq!(session.current_board().to_string(), snapshot.selected_fen);
+        assert!(session.previous_ply());
+        assert!(session.next_ply());
+        assert_eq!(tab.source, None);
+        assert_eq!(tab.captured_candidate, None);
+        assert_eq!(tab.captured_snapshot, None);
+        assert_eq!(tab.status, None);
+    }
+
+    #[test]
+    fn invalid_saved_snapshot_preserves_existing_state_and_reports_feedback() {
+        let mut invalid_snapshot = saved_snapshot();
+        invalid_snapshot.initial_fen = "not a FEN".into();
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("old.pgn"), first_game())
+            .expect("old PGN must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+        let session = tab.session.clone();
+        let source = tab.source.clone();
+        let candidate = tab.captured_candidate.clone();
+        let captured_snapshot = tab.captured_snapshot.clone();
+        let generation = tab.load_generation;
+
+        assert!(tab.load_snapshot(&invalid_snapshot).is_err());
+
+        assert_eq!(tab.session, session);
+        assert_eq!(tab.source, source);
+        assert_eq!(tab.captured_candidate, candidate);
+        assert_eq!(tab.captured_snapshot, captured_snapshot);
+        assert_eq!(tab.load_generation, generation);
+        assert!(
+            tab.status
+                .as_deref()
+                .is_some_and(|status| status.contains(&lang::tr(&tab.lang, "pgn_load_error")))
+        );
+    }
+
+    #[test]
+    fn stale_file_read_cannot_replace_a_loaded_saved_snapshot() {
+        let snapshot = saved_snapshot();
+        let mut tab = PgnTab::new();
+        let _ = tab.update(PgnMessage::FileSelected(Some(PathBuf::from("pending.pgn"))));
+        let pending_generation = tab.load_generation;
+
+        tab.load_snapshot(&snapshot)
+            .expect("saved snapshot must reconstruct");
+        let saved_session = tab.session.clone();
+
+        let _ = tab.update(PgnMessage::FileRead {
+            generation: pending_generation,
+            path: PathBuf::from("pending.pgn"),
+            content: Ok("1. d4 0-1".into()),
+        });
+
+        assert_eq!(tab.session, saved_session);
+        assert_eq!(tab.source, None);
     }
 
     #[test]

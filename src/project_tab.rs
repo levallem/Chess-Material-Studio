@@ -174,6 +174,7 @@ pub enum ProjectMessage {
     SelectedPuzzlesPgnExportFinished(SelectedPuzzlesPgnExportResult),
     ExportSelectedPuzzlesPdf,
     SelectedPuzzlesPdfExportFinished(SelectedPuzzlesPdfExportResult),
+    OpenPgnPosition(usize),
 }
 
 pub struct ProjectTab {
@@ -236,6 +237,10 @@ impl ProjectTab {
         })
     }
 
+    pub fn pgn_position_snapshot_at(&self, index: usize) -> Option<PgnPositionSnapshot> {
+        self.pgn_positions()?.get(index).cloned()
+    }
+
     pub fn update(&mut self, message: ProjectMessage) -> Task<Message> {
         match message {
             ProjectMessage::ProjectNameChanged(value) => {
@@ -295,6 +300,7 @@ impl ProjectTab {
                 self.select_chapter(chapter_id);
                 Task::none()
             }
+            ProjectMessage::OpenPgnPosition(_) => Task::none(),
             ProjectMessage::SetChapterExportSelected {
                 chapter_id,
                 selected,
@@ -1600,7 +1606,12 @@ impl ProjectTab {
                         "{} {}",
                         lang::tr(&self.lang, "fen"),
                         snapshot.selected_fen,
-                    )));
+                    )))
+                    .push(
+                        Button::new(Text::new(lang::tr(&self.lang, "open")))
+                            .on_press(ProjectMessage::OpenPgnPosition(index))
+                            .style(btn_style_simple),
+                    );
             }
             return Some(content);
         }
@@ -3493,6 +3504,7 @@ mod tests {
         tab.refresh_pgn_positions();
 
         assert!(tab.pgn_positions().is_none());
+        assert_eq!(tab.pgn_position_snapshot_at(0), None);
         assert!(tab.pgn_positions_error().is_some());
         let _ = tab.content();
     }
@@ -3513,6 +3525,33 @@ mod tests {
         tab.open_project_path(&invalid_path);
 
         assert_eq!(tab.pgn_positions().unwrap(), before);
+    }
+
+    #[test]
+    fn cached_pgn_snapshot_accessor_uses_only_the_active_context() {
+        let project = TempProjectDb::new("pgn-positions-open-accessor");
+        create_project(&project.path, "Open").unwrap();
+        let first_chapter = create_chapter(&project.path, "First", None).unwrap();
+        let second_chapter = create_chapter(&project.path, "Second", None).unwrap();
+        let first = sample_pgn_snapshot();
+        let mut second = sample_pgn_snapshot();
+        second.headers.event = Some("Second".into());
+        add_pgn_position_snapshot(&project.path, first_chapter.id, &first).unwrap();
+        add_pgn_position_snapshot(&project.path, second_chapter.id, &second).unwrap();
+        let mut tab = ProjectTab::new();
+
+        assert_eq!(tab.pgn_position_snapshot_at(0), None);
+        tab.open_project_path(&project.path);
+        assert_eq!(tab.pgn_position_snapshot_at(0), Some(first));
+        assert_eq!(tab.pgn_position_snapshot_at(1), None);
+
+        tab.select_chapter(second_chapter.id);
+        assert_eq!(tab.pgn_position_snapshot_at(0), Some(second));
+        std::fs::remove_file(&project.path).unwrap();
+        let _ = tab.content();
+        assert!(tab.pgn_position_snapshot_at(0).is_some());
+        let _ = tab.update(ProjectMessage::CloseProject);
+        assert_eq!(tab.pgn_position_snapshot_at(0), None);
     }
 
     #[test]

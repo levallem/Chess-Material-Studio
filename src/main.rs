@@ -958,6 +958,15 @@ impl OfflinePuzzles {
                 Task::none()
             }
             (_, Message::Settings(message)) => self.settings_tab.update(message),
+            (_, Message::Project(ProjectMessage::OpenPgnPosition(index))) => {
+                let Some(snapshot) = self.project_tab.pgn_position_snapshot_at(index) else {
+                    return Task::none();
+                };
+                if self.pgn_tab.load_snapshot(&snapshot).is_ok() {
+                    self.active_tab = TabId::Pgn;
+                }
+                Task::none()
+            }
             (_, Message::Project(message)) => {
                 let task = self.project_tab.update(message);
                 self.refresh_current_puzzle_review();
@@ -2265,6 +2274,72 @@ mod tests {
             captured_candidate.as_ref()
         );
         assert_eq!(app.pgn_tab.captured_snapshot(), Some(&captured_snapshot));
+    }
+
+    #[test]
+    fn opening_a_saved_pgn_position_uses_the_cached_snapshot_without_touching_other_state() {
+        let project = TempProjectDb::new("pgn-open-saved-position");
+        create_project(&project.path, "Saved positions").unwrap();
+        create_chapter(&project.path, "PGN", None).unwrap();
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
+        load_pgn_for_presentation(&mut app, "[Event \"Saved\"]\n\n1. e4 e5 2. Nf3 1-0");
+        let _ = app.update(Message::Pgn(PgnMessage::NextPly));
+        let _ = app.update(Message::Pgn(PgnMessage::NextPly));
+        capture_pgn_position(&mut app);
+        let snapshot = app.pgn_tab.captured_snapshot().cloned().unwrap();
+        let _ = app.update(Message::Pgn(PgnMessage::AddToChapter));
+        app.game_mode = config::GameMode::Analysis;
+        let analysis_board = Board::from_str("8/8/8/8/8/8/8/K6k w - - 0 1").unwrap();
+        app.analysis = Game::new_with_board(analysis_board);
+        app.analysis_history = vec![analysis_board];
+        let puzzle_board = app.board;
+        let puzzle_index = app.puzzle_tab.current_puzzle;
+        let active_tab_before_invalid_open = app.active_tab;
+        let pgn_before_invalid_open = app.pgn_tab.review_session().cloned();
+        std::fs::remove_file(&project.path).unwrap();
+
+        let _ = app.update(Message::Project(ProjectMessage::OpenPgnPosition(1)));
+        assert_eq!(app.active_tab, active_tab_before_invalid_open);
+        assert_eq!(
+            app.pgn_tab.review_session(),
+            pgn_before_invalid_open.as_ref()
+        );
+
+        let _ = app.update(Message::Project(ProjectMessage::OpenPgnPosition(0)));
+
+        let session = app
+            .pgn_tab
+            .review_session()
+            .expect("saved session must load");
+        assert_eq!(app.active_tab, TabId::Pgn);
+        assert_eq!(session.game_count(), 1);
+        assert_eq!(session.current_ply_index(), snapshot.ply_index);
+        assert_eq!(session.current_game().headers, snapshot.headers);
+        assert_eq!(
+            app.board_for_presentation().to_string(),
+            snapshot.selected_fen
+        );
+        assert_eq!(app.game_mode, config::GameMode::Analysis);
+        assert_eq!(app.analysis.current_position(), analysis_board);
+        assert_eq!(app.analysis_history, vec![analysis_board]);
+        assert_eq!(app.board, puzzle_board);
+        assert_eq!(app.puzzle_tab.current_puzzle, puzzle_index);
+        assert_eq!(app.project_tab.pgn_position_snapshot_at(0), Some(snapshot));
+    }
+
+    #[test]
+    fn opening_an_invalid_saved_pgn_index_fails_closed() {
+        let mut app = OfflinePuzzles::new(false);
+        let active_tab = app.active_tab;
+        let session = app.pgn_tab.review_session().cloned();
+
+        let _ = app.update(Message::Project(ProjectMessage::OpenPgnPosition(0)));
+
+        assert_eq!(app.active_tab, active_tab);
+        assert_eq!(app.pgn_tab.review_session(), session.as_ref());
     }
 
     #[test]
