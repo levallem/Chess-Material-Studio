@@ -5,9 +5,11 @@ use rfd::AsyncFileDialog;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use chess_material_studio::pgn_review::PgnPositionSnapshot;
 use chess_material_studio::project::{
-    ProjectChapter, ProjectMetadata, ProjectPuzzleDecision, clear_puzzle_decision, create_chapter,
-    create_project, find_selected_puzzle_chapter, get_puzzle_decision, list_chapters,
+    PgnPositionSnapshotAddResult, ProjectChapter, ProjectMetadata, ProjectPuzzleDecision,
+    add_pgn_position_snapshot, clear_puzzle_decision, create_chapter, create_project,
+    find_selected_puzzle_chapter, get_puzzle_decision, list_chapters,
     list_reviewed_puzzle_ids_for_chapter, list_selected_puzzles_by_chapter,
     list_selected_puzzles_for_chapter, open_project, set_puzzle_decision,
 };
@@ -120,6 +122,12 @@ pub struct PuzzleReviewView {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgnSnapshotAddedToChapter {
+    pub chapter_name: String,
+    pub result: PgnPositionSnapshotAddResult,
+}
+
 #[derive(Debug, Clone)]
 pub enum ProjectMessage {
     ProjectNameChanged(String),
@@ -176,6 +184,31 @@ impl ProjectTab {
             selected_puzzles_cache: None,
             export_selected_chapter_ids: HashSet::new(),
         }
+    }
+
+    pub fn add_pgn_snapshot_to_active_chapter(
+        &self,
+        snapshot: &PgnPositionSnapshot,
+    ) -> Result<PgnSnapshotAddedToChapter, String> {
+        let Some(active_project) = self.active_project.as_ref() else {
+            return Err(lang::tr(&self.lang, "no_project_open"));
+        };
+        let Some(chapter_id) = active_project.active_chapter_id else {
+            return Err(lang::tr(&self.lang, "no_active_chapter"));
+        };
+        let Some(chapter) = active_project
+            .chapters
+            .iter()
+            .find(|chapter| chapter.id == chapter_id)
+        else {
+            return Err(lang::tr(&self.lang, "no_active_chapter"));
+        };
+
+        let result = add_pgn_position_snapshot(&active_project.path, chapter.id, snapshot)?;
+        Ok(PgnSnapshotAddedToChapter {
+            chapter_name: chapter.name.clone(),
+            result,
+        })
     }
 
     pub fn update(&mut self, message: ProjectMessage) -> Task<Message> {
@@ -1447,7 +1480,12 @@ impl ProjectTab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chess_material_studio::project::{ProjectPuzzleDecision, set_puzzle_decision};
+    use chess_material_studio::pgn_import::parse_pgn;
+    use chess_material_studio::pgn_review::PgnReviewSession;
+    use chess_material_studio::project::{
+        PgnPositionSnapshotAddResult, ProjectPuzzleDecision,
+        list_pgn_position_snapshots_for_chapter, set_puzzle_decision,
+    };
     use lopdf::content::Content;
     use lopdf::{Document, Encoding, Object};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1496,6 +1534,13 @@ mod tests {
         }
     }
 
+    fn sample_pgn_snapshot() -> PgnPositionSnapshot {
+        let games = parse_pgn("[Event \"Captured\"]\n\n1. e4 e5 1-0").unwrap();
+        let mut session = PgnReviewSession::new(games).unwrap();
+        assert!(session.next_ply());
+        session.capture_current_snapshot()
+    }
+
     #[test]
     fn starts_without_an_active_project() {
         let tab = ProjectTab::new();
@@ -1504,6 +1549,53 @@ mod tests {
         assert_eq!(tab.selected_count(), None);
         assert!(tab.selected_export_chapter_ids().is_empty());
         assert_eq!(tab.selected_export_chapter_count(), 0);
+    }
+
+    #[test]
+    fn adding_a_pgn_snapshot_without_a_project_does_not_write() {
+        let project = TempProjectDb::new("pgn-snapshot-no-project");
+        let tab = ProjectTab::new();
+
+        let error = tab
+            .add_pgn_snapshot_to_active_chapter(&sample_pgn_snapshot())
+            .unwrap_err();
+
+        assert_eq!(error, lang::tr(&tab.lang, "no_project_open"));
+        assert!(!project.path.exists());
+    }
+
+    #[test]
+    fn adding_a_pgn_snapshot_without_an_active_chapter_does_not_write() {
+        let project = TempProjectDb::new("pgn-snapshot-no-chapter");
+        create_project(&project.path, "No chapters").unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let error = tab
+            .add_pgn_snapshot_to_active_chapter(&sample_pgn_snapshot())
+            .unwrap_err();
+
+        assert_eq!(error, lang::tr(&tab.lang, "no_active_chapter"));
+        assert!(list_chapters(&project.path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn adding_a_pgn_snapshot_delegates_to_the_active_chapter() {
+        let project = TempProjectDb::new("pgn-snapshot-active-chapter");
+        create_project(&project.path, "Captured positions").unwrap();
+        let chapter = create_chapter(&project.path, "Tactics", None).unwrap();
+        let snapshot = sample_pgn_snapshot();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let added = tab.add_pgn_snapshot_to_active_chapter(&snapshot).unwrap();
+
+        assert_eq!(added.result, PgnPositionSnapshotAddResult::Inserted);
+        assert_eq!(added.chapter_name, chapter.name);
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter.id).unwrap(),
+            vec![snapshot]
+        );
     }
 
     #[test]

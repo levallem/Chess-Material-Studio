@@ -518,3 +518,7 @@ pgn_next_ply = 下一半回合
 pgn_capture_position = 捕获局面
 pgn_clear_captured_position = 清除已捕获局面
 pgn_captured_position = 已捕获局面
+pgn_add_to_chapter = 添加到章节
+pgn_position_added_to_chapter = 局面已添加到章节
+pgn_position_already_exists_in_chapter = 局面已存在于章节中
+pgn_add_to_chapter_failed = 无法添加 PGN 局面

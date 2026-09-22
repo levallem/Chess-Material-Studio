@@ -517,3 +517,7 @@ pgn_next_ply = Next ply
 pgn_capture_position = Capture position
 pgn_clear_captured_position = Clear captured position
 pgn_captured_position = Captured position
+pgn_add_to_chapter = Add to chapter
+pgn_position_added_to_chapter = Position added to chapter
+pgn_position_already_exists_in_chapter = Position already exists in chapter
+pgn_add_to_chapter_failed = Could not add PGN position

@@ -517,3 +517,7 @@ pgn_next_ply = Volgende halve zet
 pgn_capture_position = Positie vastleggen
 pgn_clear_captured_position = Vastgelegde positie wissen
 pgn_captured_position = Vastgelegde positie
+pgn_add_to_chapter = Aan hoofdstuk toevoegen
+pgn_position_added_to_chapter = Positie toegevoegd aan hoofdstuk
+pgn_position_already_exists_in_chapter = Positie bestaat al in hoofdstuk
+pgn_add_to_chapter_failed = PGN-positie kon niet worden toegevoegd

@@ -517,3 +517,7 @@ pgn_next_ply = Demi-coup suivant
 pgn_capture_position = Capturer la position
 pgn_clear_captured_position = Effacer la position capturée
 pgn_captured_position = Position capturée
+pgn_add_to_chapter = Ajouter au chapitre
+pgn_position_added_to_chapter = Position ajoutée au chapitre
+pgn_position_already_exists_in_chapter = La position existe déjà dans le chapitre
+pgn_add_to_chapter_failed = Impossible d’ajouter la position PGN
