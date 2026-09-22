@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use chess::Board;
 use chess_material_studio::pgn_import::parse_pgn;
-use chess_material_studio::pgn_review::PgnReviewSession;
+use chess_material_studio::pgn_review::{PgnPositionCandidate, PgnReviewSession};
 
 use crate::styles::btn_style_simple;
 use crate::{Message, Tab, config, lang};
@@ -24,11 +24,14 @@ pub enum PgnMessage {
     NextGame,
     PreviousPly,
     NextPly,
+    CapturePosition,
+    ClearCapturedPosition,
 }
 
 pub struct PgnTab {
     session: Option<PgnReviewSession>,
     source: Option<PathBuf>,
+    captured_candidate: Option<PgnPositionCandidate>,
     status: Option<String>,
     load_generation: u64,
     pub lang: lang::Language,
@@ -39,6 +42,7 @@ impl PgnTab {
         Self {
             session: None,
             source: None,
+            captured_candidate: None,
             status: None,
             load_generation: 0,
             lang: config::SETTINGS.lang,
@@ -108,6 +112,16 @@ impl PgnTab {
                 }
                 Task::none()
             }
+            PgnMessage::CapturePosition => {
+                if let Some(session) = &self.session {
+                    self.captured_candidate = Some(session.capture_current_position());
+                }
+                Task::none()
+            }
+            PgnMessage::ClearCapturedPosition => {
+                self.captured_candidate = None;
+                Task::none()
+            }
         }
     }
 
@@ -129,6 +143,7 @@ impl PgnTab {
         let session = PgnReviewSession::new(parse_pgn(content)?)?;
         self.session = Some(session);
         self.source = Some(source);
+        self.captured_candidate = None;
         Ok(())
     }
 
@@ -164,6 +179,19 @@ impl Tab for PgnTab {
             content = content.push(Text::new(status));
         }
 
+        if let Some(candidate) = &self.captured_candidate {
+            content = content.push(Text::new(format!(
+                "{} — {}: {} | {}: {} | {}: {}",
+                lang::tr(&self.lang, "pgn_captured_position"),
+                lang::tr(&self.lang, "pgn_game"),
+                candidate.game_index + 1,
+                lang::tr(&self.lang, "pgn_ply"),
+                candidate.ply_index,
+                lang::tr(&self.lang, "fen"),
+                candidate.board
+            )));
+        }
+
         if let Some(session) = &self.session {
             let game = session.current_game();
             let can_previous_game = session.current_game_index() > 0;
@@ -179,6 +207,15 @@ impl Tab for PgnTab {
                 .style(btn_style_simple);
             let next_ply = Button::new(Text::new(lang::tr(&self.lang, "pgn_next_ply")))
                 .style(btn_style_simple);
+            let capture_position =
+                Button::new(Text::new(lang::tr(&self.lang, "pgn_capture_position")))
+                    .on_press(PgnMessage::CapturePosition)
+                    .style(btn_style_simple);
+            let clear_captured_position = Button::new(Text::new(lang::tr(
+                &self.lang,
+                "pgn_clear_captured_position",
+            )))
+            .style(btn_style_simple);
 
             let previous_game = if can_previous_game {
                 previous_game.on_press(PgnMessage::PreviousGame)
@@ -199,6 +236,11 @@ impl Tab for PgnTab {
                 next_ply.on_press(PgnMessage::NextPly)
             } else {
                 next_ply
+            };
+            let clear_captured_position = if self.captured_candidate.is_some() {
+                clear_captured_position.on_press(PgnMessage::ClearCapturedPosition)
+            } else {
+                clear_captured_position
             };
 
             content = content
@@ -259,6 +301,11 @@ impl Tab for PgnTab {
                 )
                 .push(
                     row![previous_ply, next_ply]
+                        .spacing(10)
+                        .align_y(Alignment::Center),
+                )
+                .push(
+                    row![capture_position, clear_captured_position]
                         .spacing(10)
                         .align_y(Alignment::Center),
                 );
@@ -484,6 +531,149 @@ mod tests {
     }
 
     #[test]
+    fn captures_the_current_position() {
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("first.pgn"), first_game())
+            .expect("valid PGN must load");
+
+        let _ = tab.update(PgnMessage::CapturePosition);
+
+        let candidate = tab
+            .captured_candidate
+            .as_ref()
+            .expect("current position must be captured");
+        assert_eq!(candidate.game_index, 0);
+        assert_eq!(candidate.ply_index, 0);
+        assert_eq!(candidate.board, chess::Board::default());
+    }
+
+    #[test]
+    fn ply_navigation_after_capture_does_not_mutate_the_candidate() {
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("first.pgn"), first_game())
+            .expect("valid PGN must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+        let captured = tab.captured_candidate.clone();
+
+        let _ = tab.update(PgnMessage::NextPly);
+
+        assert_eq!(tab.captured_candidate, captured);
+    }
+
+    #[test]
+    fn game_navigation_after_capture_does_not_mutate_the_candidate() {
+        let mut tab = PgnTab::new();
+        tab.load_from_text(
+            PathBuf::from("matches.pgn"),
+            "[Event \"First\"]\n1. e4 1-0\n\n[Event \"Second\"]\n1. d4 0-1",
+        )
+        .expect("multiple games must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+        let captured = tab.captured_candidate.clone();
+
+        let _ = tab.update(PgnMessage::NextGame);
+
+        assert_eq!(tab.captured_candidate, captured);
+    }
+
+    #[test]
+    fn capturing_a_second_position_replaces_the_candidate() {
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("first.pgn"), first_game())
+            .expect("valid PGN must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+        let first_candidate = tab.captured_candidate.clone();
+
+        let _ = tab.update(PgnMessage::NextPly);
+        let _ = tab.update(PgnMessage::CapturePosition);
+
+        assert_ne!(tab.captured_candidate, first_candidate);
+        assert_eq!(
+            tab.captured_candidate
+                .as_ref()
+                .expect("replacement candidate must exist")
+                .ply_index,
+            1
+        );
+    }
+
+    #[test]
+    fn clears_the_captured_candidate_without_changing_the_session() {
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("first.pgn"), first_game())
+            .expect("valid PGN must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+        let session = tab.session.clone();
+        let source = tab.source.clone();
+
+        let _ = tab.update(PgnMessage::ClearCapturedPosition);
+
+        assert_eq!(tab.captured_candidate, None);
+        assert_eq!(tab.session, session);
+        assert_eq!(tab.source, source);
+    }
+
+    #[test]
+    fn a_valid_replacement_load_clears_the_captured_candidate() {
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("first.pgn"), first_game())
+            .expect("first PGN must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+
+        tab.load_from_text(PathBuf::from("second.pgn"), "1. d4 0-1")
+            .expect("replacement PGN must load");
+
+        assert_eq!(tab.captured_candidate, None);
+    }
+
+    #[test]
+    fn invalid_load_and_cancellation_preserve_the_captured_candidate() {
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("first.pgn"), first_game())
+            .expect("valid PGN must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+        let candidate = tab.captured_candidate.clone();
+
+        let _ = tab.update(PgnMessage::FileRead {
+            generation: tab.load_generation,
+            path: PathBuf::from("invalid.pgn"),
+            content: Ok("1. not-a-move 1-0".to_string()),
+        });
+        assert_eq!(tab.captured_candidate, candidate);
+
+        let _ = tab.update(PgnMessage::FileSelected(None));
+        assert_eq!(tab.captured_candidate, candidate);
+    }
+
+    #[test]
+    fn stale_file_read_preserves_the_captured_candidate() {
+        let mut tab = PgnTab::new();
+        tab.load_from_text(PathBuf::from("first.pgn"), first_game())
+            .expect("valid PGN must load");
+        let _ = tab.update(PgnMessage::CapturePosition);
+        let candidate = tab.captured_candidate.clone();
+        let stale_generation = tab.load_generation;
+        let _ = tab.update(PgnMessage::FileSelected(Some(PathBuf::from("newer.pgn"))));
+
+        let _ = tab.update(PgnMessage::FileRead {
+            generation: stale_generation,
+            path: PathBuf::from("stale.pgn"),
+            content: Ok("1. d4 0-1".to_string()),
+        });
+
+        assert_eq!(tab.captured_candidate, candidate);
+    }
+
+    #[test]
+    fn capture_without_a_session_is_inert() {
+        let mut tab = PgnTab::new();
+
+        let _ = tab.update(PgnMessage::CapturePosition);
+
+        assert_eq!(tab.captured_candidate, None);
+    }
+
+    #[test]
     fn pgn_translation_keys_exist_in_every_language() {
         let keys = [
             "pgn_review",
@@ -500,6 +690,9 @@ mod tests {
             "pgn_next_game",
             "pgn_previous_ply",
             "pgn_next_ply",
+            "pgn_capture_position",
+            "pgn_clear_captured_position",
+            "pgn_captured_position",
         ];
 
         for language in lang::Language::ALL {

@@ -514,3 +514,6 @@ pgn_previous_game = Vorige partij
 pgn_next_game = Volgende partij
 pgn_previous_ply = Vorige halve zet
 pgn_next_ply = Volgende halve zet
+pgn_capture_position = Positie vastleggen
+pgn_clear_captured_position = Vastgelegde positie wissen
+pgn_captured_position = Vastgelegde positie

@@ -514,3 +514,6 @@ pgn_previous_game = Partie précédente
 pgn_next_game = Partie suivante
 pgn_previous_ply = Demi-coup précédent
 pgn_next_ply = Demi-coup suivant
+pgn_capture_position = Capturer la position
+pgn_clear_captured_position = Effacer la position capturée
+pgn_captured_position = Position capturée
