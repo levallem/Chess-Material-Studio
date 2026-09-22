@@ -1,14 +1,17 @@
 use crate::models::Puzzle;
+use crate::pgn_import::ImportedGameHeaders;
+use crate::pgn_review::PgnPositionSnapshot;
 use diesel::Connection;
+use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
-use diesel::sql_types::{Integer, Nullable, Text};
+use diesel::sql_types::{BigInt, Integer, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use std::collections::HashSet;
 use std::path::Path;
 
 pub const PROJECT_APPLICATION_ID: &str = "chess-material-studio-project";
-pub const PROJECT_SCHEMA_VERSION: i32 = 3;
+pub const PROJECT_SCHEMA_VERSION: i32 = 4;
 pub const PROJECT_MIGRATIONS: EmbeddedMigrations = embed_migrations!("project_migrations");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +67,12 @@ pub struct ProjectChapterSelectedPuzzles {
     pub chapter_name: String,
     pub chapter_position: i32,
     pub puzzles: Vec<Puzzle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgnPositionSnapshotAddResult {
+    Inserted,
+    AlreadyExists,
 }
 
 #[derive(QueryableByName)]
@@ -170,6 +179,38 @@ struct ChapterExistsRow {
     chapter_exists: i32,
 }
 
+#[derive(QueryableByName)]
+struct PgnPositionSnapshotRow {
+    #[diesel(sql_type = BigInt)]
+    source_game_index: i64,
+    #[diesel(sql_type = BigInt)]
+    ply_index: i64,
+    #[diesel(sql_type = Text)]
+    selected_fen: String,
+    #[diesel(sql_type = Text)]
+    initial_fen: String,
+    #[diesel(sql_type = Text)]
+    main_line_uci: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_event: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_site: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_date: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_round: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_white: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_black: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_result: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_set_up: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    header_fen: Option<String>,
+}
+
 impl From<ProjectChapterRow> for ProjectChapter {
     fn from(row: ProjectChapterRow) -> Self {
         Self {
@@ -223,6 +264,43 @@ impl ProjectChapterSelectedPuzzleRow {
     }
 }
 
+impl TryFrom<PgnPositionSnapshotRow> for PgnPositionSnapshot {
+    type Error = String;
+
+    fn try_from(row: PgnPositionSnapshotRow) -> Result<Self, Self::Error> {
+        let source_game_index = usize::try_from(row.source_game_index)
+            .map_err(|_| "persisted PGN snapshot source game index is out of range".to_string())?;
+        let ply_index = usize::try_from(row.ply_index)
+            .map_err(|_| "persisted PGN snapshot ply index is out of range".to_string())?;
+        let snapshot = Self {
+            source_game_index,
+            ply_index,
+            selected_fen: row.selected_fen,
+            initial_fen: row.initial_fen,
+            main_line_uci: row
+                .main_line_uci
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
+            headers: ImportedGameHeaders {
+                event: row.header_event,
+                site: row.header_site,
+                date: row.header_date,
+                round: row.header_round,
+                white: row.header_white,
+                black: row.header_black,
+                result: row.header_result,
+                set_up: row.header_set_up,
+                fen: row.header_fen,
+            },
+        };
+        snapshot
+            .validate()
+            .map_err(|error| format!("persisted PGN snapshot is invalid: {error}"))?;
+        Ok(snapshot)
+    }
+}
+
 pub fn create_project(path: &Path, project_name: &str) -> Result<ProjectMetadata, String> {
     validate_name(project_name, "project name")?;
 
@@ -236,6 +314,7 @@ pub fn create_project(path: &Path, project_name: &str) -> Result<ProjectMetadata
     let result = (|| {
         let mut connection = SqliteConnection::establish(path_string)
             .map_err(|error| format!("cannot create SQLite project: {error}"))?;
+        enable_project_foreign_keys(&mut connection)?;
         connection
             .run_pending_migrations(PROJECT_MIGRATIONS)
             .map_err(|error| format!("cannot run project migrations: {error}"))?;
@@ -299,6 +378,110 @@ pub fn create_chapter(
 pub fn list_chapters(path: &Path) -> Result<Vec<ProjectChapter>, String> {
     let mut connection = open_validated_project_connection(path)?;
     list_chapters_from_connection(&mut connection)
+}
+
+pub fn add_pgn_position_snapshot(
+    path: &Path,
+    chapter_id: i32,
+    snapshot: &PgnPositionSnapshot,
+) -> Result<PgnPositionSnapshotAddResult, String> {
+    snapshot
+        .validate()
+        .map_err(|error| format!("cannot add PGN position snapshot: {error}"))?;
+    let source_game_index = i64::try_from(snapshot.source_game_index)
+        .map_err(|_| "PGN snapshot source game index is too large to persist".to_string())?;
+    let ply_index = i64::try_from(snapshot.ply_index)
+        .map_err(|_| "PGN snapshot ply index is too large to persist".to_string())?;
+    let main_line_uci = snapshot.main_line_uci.join(" ");
+    let mut connection = open_validated_project_connection(path)?;
+
+    connection
+        .transaction::<Result<PgnPositionSnapshotAddResult, String>, diesel::result::Error, _>(
+            |connection| {
+                let chapter = diesel::sql_query(
+                    "SELECT EXISTS(SELECT 1 FROM chapters WHERE id = ?) AS chapter_exists",
+                )
+                .bind::<Integer, _>(chapter_id)
+                .get_result::<ChapterExistsRow>(connection)?;
+                if chapter.chapter_exists == 0 {
+                    return Ok(Err("chapter not found".into()));
+                }
+
+                let inserted = diesel::sql_query(
+                    "INSERT INTO chapter_pgn_positions \
+                     (chapter_id, source_game_index, ply_index, selected_fen, initial_fen, main_line_uci, \
+                      header_event, header_site, header_date, header_round, header_white, header_black, \
+                      header_result, header_set_up, header_fen) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT(chapter_id, initial_fen, main_line_uci, ply_index) DO NOTHING",
+                )
+                .bind::<Integer, _>(chapter_id)
+                .bind::<BigInt, _>(source_game_index)
+                .bind::<BigInt, _>(ply_index)
+                .bind::<Text, _>(&snapshot.selected_fen)
+                .bind::<Text, _>(&snapshot.initial_fen)
+                .bind::<Text, _>(&main_line_uci)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.event)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.site)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.date)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.round)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.white)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.black)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.result)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.set_up)
+                .bind::<Nullable<Text>, _>(&snapshot.headers.fen)
+                .execute(connection)?;
+                if inserted == 1 {
+                    return Ok(Ok(PgnPositionSnapshotAddResult::Inserted));
+                }
+
+                let row = diesel::sql_query(
+                    "SELECT source_game_index, ply_index, selected_fen, initial_fen, main_line_uci, \
+                     header_event, header_site, header_date, header_round, header_white, header_black, \
+                     header_result, header_set_up, header_fen \
+                     FROM chapter_pgn_positions \
+                     WHERE chapter_id = ? AND initial_fen = ? AND main_line_uci = ? AND ply_index = ?",
+                )
+                .bind::<Integer, _>(chapter_id)
+                .bind::<Text, _>(&snapshot.initial_fen)
+                .bind::<Text, _>(&main_line_uci)
+                .bind::<BigInt, _>(ply_index)
+                .get_result::<PgnPositionSnapshotRow>(connection)?;
+                let existing = match PgnPositionSnapshot::try_from(row) {
+                    Ok(existing) => existing,
+                    Err(error) => return Ok(Err(error)),
+                };
+                if existing.headers == snapshot.headers {
+                    Ok(Ok(PgnPositionSnapshotAddResult::AlreadyExists))
+                } else {
+                    Ok(Err(
+                        "PGN position context already exists in this chapter with different metadata"
+                            .into(),
+                    ))
+                }
+            },
+        )
+        .map_err(|error| format!("cannot add PGN position snapshot: {error}"))?
+}
+
+pub fn list_pgn_position_snapshots_for_chapter(
+    path: &Path,
+    chapter_id: i32,
+) -> Result<Vec<PgnPositionSnapshot>, String> {
+    let mut connection = open_read_only_project_connection(path)?;
+    ensure_chapter_exists(&mut connection, chapter_id)?;
+    diesel::sql_query(
+        "SELECT source_game_index, ply_index, selected_fen, initial_fen, main_line_uci, \
+         header_event, header_site, header_date, header_round, header_white, header_black, \
+         header_result, header_set_up, header_fen \
+         FROM chapter_pgn_positions WHERE chapter_id = ? ORDER BY id ASC",
+    )
+    .bind::<Integer, _>(chapter_id)
+    .load::<PgnPositionSnapshotRow>(&mut connection)
+    .map_err(|error| format!("cannot list PGN position snapshots: {error}"))?
+    .into_iter()
+    .map(PgnPositionSnapshot::try_from)
+    .collect()
 }
 
 pub fn rename_chapter(path: &Path, chapter_id: i32, name: &str) -> Result<(), String> {
@@ -553,6 +736,7 @@ fn open_validated_project_connection(path: &Path) -> Result<SqliteConnection, St
     let path_string = project_path_string(path)?;
     let mut connection = SqliteConnection::establish(path_string)
         .map_err(|error| format!("cannot open SQLite project: {error}"))?;
+    enable_project_foreign_keys(&mut connection)?;
     let row = read_project_metadata(&mut connection)?;
     if row.application_id != PROJECT_APPLICATION_ID {
         return Err("SQLite file is not a Chess Material Studio project".into());
@@ -591,6 +775,7 @@ fn open_read_only_project_connection(path: &Path) -> Result<SqliteConnection, St
     let path_string = project_path_string(path)?;
     let mut connection = SqliteConnection::establish(path_string)
         .map_err(|error| format!("cannot open SQLite project: {error}"))?;
+    enable_project_foreign_keys(&mut connection)?;
     let row = read_project_metadata(&mut connection)?;
     if row.application_id != PROJECT_APPLICATION_ID {
         return Err("SQLite file is not a Chess Material Studio project".into());
@@ -740,9 +925,17 @@ fn project_path_string(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| "project path is not valid UTF-8".to_string())
 }
 
+fn enable_project_foreign_keys(connection: &mut SqliteConnection) -> Result<(), String> {
+    connection
+        .batch_execute("PRAGMA foreign_keys = ON")
+        .map_err(|error| format!("cannot enable project foreign keys: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pgn_import::parse_pgn;
+    use crate::pgn_review::{PgnPositionSnapshot, PgnReviewSession};
     use diesel::Connection;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -802,6 +995,18 @@ mod tests {
         existing_value: String,
     }
 
+    #[derive(QueryableByName)]
+    struct RowCount {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+
+    #[derive(QueryableByName)]
+    struct ForeignKeysRow {
+        #[diesel(sql_type = Integer)]
+        foreign_keys: i32,
+    }
+
     #[test]
     fn creating_a_project_creates_a_valid_sqlite_project() {
         let project = TempProjectDb::new("create");
@@ -826,14 +1031,14 @@ mod tests {
     }
 
     #[test]
-    fn project_schema_version_starts_at_three() {
+    fn project_schema_version_starts_at_four() {
         let project = TempProjectDb::new("schema-version");
 
         assert_eq!(
             create_project(project.path(), "Versión inicial")
                 .unwrap()
                 .schema_version,
-            3
+            4
         );
     }
 
@@ -927,6 +1132,7 @@ mod tests {
                 "20260908000000".to_string(),
                 "20260908010000".to_string(),
                 "20260908020000".to_string(),
+                "20260922000000".to_string(),
             ]
             .into_iter()
             .collect()
@@ -934,11 +1140,11 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_valid_v1_project_upgrades_it_to_version_three() {
+    fn opening_a_valid_v1_project_upgrades_it_to_version_four() {
         let project = TempProjectDb::new("upgrade-v1");
         create_valid_v1_project(&project);
 
-        assert_eq!(open_project(project.path()).unwrap().schema_version, 3);
+        assert_eq!(open_project(project.path()).unwrap().schema_version, 4);
         let mut connection = project.connection();
         assert!(table_names(&mut connection).contains("chapters"));
         assert_eq!(
@@ -947,6 +1153,7 @@ mod tests {
                 "20260908000000".to_string(),
                 "20260908010000".to_string(),
                 "20260908020000".to_string(),
+                "20260922000000".to_string(),
             ]
             .into_iter()
             .collect()
@@ -957,7 +1164,7 @@ mod tests {
     fn opening_a_future_project_version_rejects_without_modifying_it() {
         let project = create_test_project("future-version");
         let mut connection = project.connection();
-        diesel::sql_query("UPDATE project_metadata SET schema_version = 4")
+        diesel::sql_query("UPDATE project_metadata SET schema_version = 5")
             .execute(&mut connection)
             .unwrap();
         let migration_versions_before = migration_versions(&mut connection);
@@ -965,7 +1172,7 @@ mod tests {
         assert!(open_project(project.path()).is_err());
 
         let metadata = read_project_metadata(&mut connection).unwrap();
-        assert_eq!(metadata.schema_version, 4);
+        assert_eq!(metadata.schema_version, 5);
         assert_eq!(
             migration_versions(&mut connection),
             migration_versions_before
@@ -1127,11 +1334,11 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_valid_v2_project_upgrades_it_to_version_three() {
+    fn opening_a_valid_v2_project_upgrades_it_to_version_four() {
         let project = TempProjectDb::new("upgrade-v2");
         create_valid_v2_project(&project);
 
-        assert_eq!(open_project(project.path()).unwrap().schema_version, 3);
+        assert_eq!(open_project(project.path()).unwrap().schema_version, 4);
         let mut connection = project.connection();
         assert!(table_names(&mut connection).contains("chapter_puzzle_reviews"));
         assert_eq!(
@@ -1140,9 +1347,95 @@ mod tests {
                 "20260908000000".to_string(),
                 "20260908010000".to_string(),
                 "20260908020000".to_string(),
+                "20260922000000".to_string(),
             ]
             .into_iter()
             .collect()
+        );
+    }
+
+    #[test]
+    fn opening_a_valid_v3_project_upgrades_it_to_version_four() {
+        let project = TempProjectDb::new("upgrade-v3");
+        create_valid_v3_project(&project);
+
+        assert_eq!(open_project(project.path()).unwrap().schema_version, 4);
+        let mut connection = project.connection();
+        assert!(table_names(&mut connection).contains("chapter_pgn_positions"));
+        assert_eq!(
+            migration_versions(&mut connection),
+            [
+                "20260908000000".to_string(),
+                "20260908010000".to_string(),
+                "20260908020000".to_string(),
+                "20260922000000".to_string(),
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[test]
+    fn pgn_snapshot_listing_does_not_upgrade_a_v3_project() {
+        let project = TempProjectDb::new("pgn-snapshot-read-only-schema");
+        create_valid_v3_project(&project);
+
+        assert!(list_pgn_position_snapshots_for_chapter(project.path(), 1).is_err());
+
+        let mut connection = project.connection();
+        assert_eq!(
+            read_project_metadata(&mut connection)
+                .unwrap()
+                .schema_version,
+            3
+        );
+        assert!(!table_names(&mut connection).contains("chapter_pgn_positions"));
+    }
+
+    #[test]
+    fn failed_v3_upgrade_rolls_back_the_pgn_position_migration() {
+        let project = TempProjectDb::new("upgrade-v3-pgn-rollback");
+        create_valid_v3_project(&project);
+        let mut connection = project.connection();
+        diesel::sql_query("CREATE TABLE migration_guard (existing_value TEXT NOT NULL)")
+            .execute(&mut connection)
+            .unwrap();
+        diesel::sql_query("INSERT INTO migration_guard VALUES ('preserve me')")
+            .execute(&mut connection)
+            .unwrap();
+        diesel::sql_query(
+            "CREATE INDEX chapter_pgn_positions_chapter_id_id ON migration_guard (existing_value)",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        let migrations_before = migration_versions(&mut connection);
+
+        assert!(open_project(project.path()).is_err());
+
+        assert_eq!(
+            read_project_metadata(&mut connection)
+                .unwrap()
+                .schema_version,
+            3
+        );
+        assert_eq!(migration_versions(&mut connection), migrations_before);
+        assert!(!table_names(&mut connection).contains("chapter_pgn_positions"));
+        assert_eq!(
+            diesel::sql_query("SELECT existing_value FROM migration_guard")
+                .get_result::<ExistingValueRow>(&mut connection)
+                .unwrap()
+                .existing_value,
+            "preserve me"
+        );
+        assert_eq!(
+            diesel::sql_query(
+                "SELECT name AS existing_value FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'chapter_pgn_positions_chapter_id_id'",
+            )
+            .get_result::<ExistingValueRow>(&mut connection)
+            .unwrap()
+            .existing_value,
+            "chapter_pgn_positions_chapter_id_id"
         );
     }
 
@@ -1558,10 +1851,191 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pgn_position_snapshots_round_trip_standard_setup_and_zero_move_games() {
+        let project = create_test_project("pgn-snapshot-round-trip");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let standard = snapshot_at(
+            "[Event \"Standard\"]\n[White \"Alice\"]\n[Black \"Bob\"]\n\n1. e4 e5 2. Nf3",
+            2,
+            4,
+        );
+        let setup = snapshot_at(
+            "[Event \"Setup\"]\n[Site \"Madrid\"]\n[Date \"2026.09.22\"]\n[Round \"7\"]\n\
+             [White \"Alice\"]\n[Black \"Bob\"]\n[Result \"1-0\"]\n[SetUp \"1\"]\n\
+             [FEN \"8/8/8/8/8/8/8/K6k w - - 0 1\"]\n\n1. Kb1 1-0",
+            1,
+            8,
+        );
+        let zero_moves = snapshot_at("[Event \"Quiet\"]\n[Result \"1/2-1/2\"]\n\n1/2-1/2", 0, 9);
+
+        for snapshot in [&standard, &setup, &zero_moves] {
+            assert_eq!(
+                add_pgn_position_snapshot(project.path(), chapter.id, snapshot).unwrap(),
+                PgnPositionSnapshotAddResult::Inserted
+            );
+        }
+
+        let restored = list_pgn_position_snapshots_for_chapter(project.path(), chapter.id).unwrap();
+        assert_eq!(restored, vec![standard, setup, zero_moves]);
+        assert!(restored.iter().all(|snapshot| snapshot.validate().is_ok()));
+    }
+
+    #[test]
+    fn pgn_snapshot_duplicate_is_idempotent_when_only_source_game_index_changes() {
+        let project = create_test_project("pgn-snapshot-idempotent");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let original = snapshot_at("[Event \"World\"]\n[White \"Carlsen\"]\n\n1. e4 e5", 1, 4);
+        let mut reimported = original.clone();
+        reimported.source_game_index = 7;
+
+        assert_eq!(
+            add_pgn_position_snapshot(project.path(), chapter.id, &original).unwrap(),
+            PgnPositionSnapshotAddResult::Inserted
+        );
+        assert_eq!(
+            add_pgn_position_snapshot(project.path(), chapter.id, &reimported).unwrap(),
+            PgnPositionSnapshotAddResult::AlreadyExists
+        );
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(project.path(), chapter.id).unwrap(),
+            vec![original]
+        );
+    }
+
+    #[test]
+    fn pgn_snapshot_context_collision_with_different_headers_preserves_original() {
+        let project = create_test_project("pgn-snapshot-metadata-conflict");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let original = snapshot_at(
+            "[Event \"World Championship\"]\n[White \"Carlsen\"]\n\n1. e4 e5",
+            1,
+            0,
+        );
+        let mut conflicting = original.clone();
+        conflicting.headers.event = Some("Another Event".into());
+
+        add_pgn_position_snapshot(project.path(), chapter.id, &original).unwrap();
+        let error =
+            add_pgn_position_snapshot(project.path(), chapter.id, &conflicting).unwrap_err();
+
+        assert!(error.contains("context already exists"));
+        assert!(error.contains("different metadata"));
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(project.path(), chapter.id).unwrap(),
+            vec![original]
+        );
+    }
+
+    #[test]
+    fn pgn_snapshot_equivalent_selected_fen_is_idempotent() {
+        let project = create_test_project("pgn-snapshot-equivalent-fen");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let original = snapshot_at("[Event \"Equivalent\"]\n\n1. e4", 0, 0);
+        let mut equivalent = original.clone();
+        equivalent.selected_fen.push(' ');
+        equivalent.validate().unwrap();
+
+        add_pgn_position_snapshot(project.path(), chapter.id, &original).unwrap();
+        assert_eq!(
+            add_pgn_position_snapshot(project.path(), chapter.id, &equivalent).unwrap(),
+            PgnPositionSnapshotAddResult::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn pgn_snapshots_are_chapter_scoped_and_distinct_contexts_coexist() {
+        let project = create_test_project("pgn-snapshot-chapter-scope");
+        let first = create_chapter(project.path(), "Primero", None).unwrap();
+        let second = create_chapter(project.path(), "Segundo", None).unwrap();
+        let initial = snapshot_at("[Event \"Context\"]\n\n1. e4", 0, 0);
+        let later = snapshot_at("[Event \"Context\"]\n\n1. e4", 1, 0);
+
+        assert_eq!(
+            add_pgn_position_snapshot(project.path(), first.id, &initial).unwrap(),
+            PgnPositionSnapshotAddResult::Inserted
+        );
+        assert_eq!(
+            add_pgn_position_snapshot(project.path(), first.id, &later).unwrap(),
+            PgnPositionSnapshotAddResult::Inserted
+        );
+        assert_eq!(
+            add_pgn_position_snapshot(project.path(), second.id, &initial).unwrap(),
+            PgnPositionSnapshotAddResult::Inserted
+        );
+    }
+
+    #[test]
+    fn pgn_snapshot_rejects_invalid_input_without_writing() {
+        let project = create_test_project("pgn-snapshot-invalid");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let mut invalid = snapshot_at("[Event \"Invalid\"]\n\n1. e4", 1, 0);
+        invalid.selected_fen = "not a FEN".into();
+
+        assert!(add_pgn_position_snapshot(project.path(), chapter.id, &invalid).is_err());
+        assert!(
+            list_pgn_position_snapshots_for_chapter(project.path(), chapter.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn pgn_snapshot_listing_rejects_corrupt_persisted_rows() {
+        let project = create_test_project("pgn-snapshot-corrupt-row");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let snapshot = snapshot_at("[Event \"Corrupt\"]\n\n1. e4", 1, 0);
+        add_pgn_position_snapshot(project.path(), chapter.id, &snapshot).unwrap();
+
+        let mut connection = project.connection();
+        diesel::sql_query("UPDATE chapter_pgn_positions SET main_line_uci = 'not-uci'")
+            .execute(&mut connection)
+            .unwrap();
+
+        assert!(list_pgn_position_snapshots_for_chapter(project.path(), chapter.id).is_err());
+    }
+
+    #[test]
+    fn pgn_snapshot_foreign_key_cascades_when_chapter_is_deleted() {
+        let project = create_test_project("pgn-snapshot-cascade");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let snapshot = snapshot_at("[Event \"Cascade\"]\n\n1. e4", 1, 0);
+        add_pgn_position_snapshot(project.path(), chapter.id, &snapshot).unwrap();
+
+        let mut connection = open_validated_project_connection(project.path()).unwrap();
+        assert_eq!(
+            diesel::sql_query("PRAGMA foreign_keys")
+                .get_result::<ForeignKeysRow>(&mut connection)
+                .unwrap()
+                .foreign_keys,
+            1
+        );
+        diesel::sql_query("DELETE FROM chapters WHERE id = ?")
+            .bind::<Integer, _>(chapter.id)
+            .execute(&mut connection)
+            .unwrap();
+        let count = diesel::sql_query("SELECT COUNT(*) AS count FROM chapter_pgn_positions")
+            .get_result::<RowCount>(&mut connection)
+            .unwrap()
+            .count;
+        assert_eq!(count, 0);
+    }
+
     fn create_test_project(label: &str) -> TempProjectDb {
         let project = TempProjectDb::new(label);
         create_project(project.path(), "Proyecto de prueba").unwrap();
         project
+    }
+
+    fn snapshot_at(input: &str, ply_index: usize, source_game_index: usize) -> PgnPositionSnapshot {
+        let games = parse_pgn(input).unwrap();
+        let mut session = PgnReviewSession::new(games).unwrap();
+        for _ in 0..ply_index {
+            assert!(session.next_ply());
+        }
+        let mut snapshot = session.capture_current_snapshot();
+        snapshot.source_game_index = source_game_index;
+        snapshot
     }
 
     fn create_valid_v1_project(project: &TempProjectDb) {
@@ -1584,6 +2058,36 @@ mod tests {
         .execute(&mut connection)
         .unwrap();
         diesel::sql_query("UPDATE project_metadata SET schema_version = 2")
+            .execute(&mut connection)
+            .unwrap();
+    }
+
+    fn create_valid_v3_project(project: &TempProjectDb) {
+        create_valid_v2_project(project);
+        let mut connection = project.connection();
+        diesel::sql_query(
+            "CREATE TABLE chapter_puzzle_reviews (\
+             chapter_id INTEGER NOT NULL, puzzle_id TEXT NOT NULL, decision TEXT NOT NULL, \
+             fen TEXT NOT NULL, moves TEXT NOT NULL, rating INTEGER NOT NULL, \
+             rating_deviation INTEGER NOT NULL, popularity INTEGER NOT NULL, \
+             nb_plays INTEGER NOT NULL, themes TEXT NOT NULL, game_url TEXT NOT NULL, \
+             opening_tags TEXT NOT NULL, reviewed_at TEXT NOT NULL, \
+             PRIMARY KEY (chapter_id, puzzle_id))",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "CREATE UNIQUE INDEX chapter_puzzle_reviews_selected_puzzle_id_unique \
+             ON chapter_puzzle_reviews (puzzle_id) WHERE decision = 'selected'",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO __diesel_schema_migrations (version) VALUES ('20260908020000')",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        diesel::sql_query("UPDATE project_metadata SET schema_version = 3")
             .execute(&mut connection)
             .unwrap();
     }
