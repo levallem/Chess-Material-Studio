@@ -517,3 +517,7 @@ pgn_next_ply = Próximo lance
 pgn_capture_position = Capturar posição
 pgn_clear_captured_position = Limpar posição capturada
 pgn_captured_position = Posição capturada
+pgn_add_to_chapter = Adicionar ao capítulo
+pgn_position_added_to_chapter = Posição adicionada ao capítulo
+pgn_position_already_exists_in_chapter = A posição já existe no capítulo
+pgn_add_to_chapter_failed = Não foi possível adicionar a posição PGN

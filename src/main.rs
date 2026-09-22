@@ -21,7 +21,7 @@ use styles::PieceTheme;
 use tokio::sync::mpsc::{self, Sender};
 
 use chess::{ALL_SQUARES, Board, BoardStatus, ChessMove, Color, File, Game, Piece, Rank, Square};
-use chess_material_studio::project::ProjectPuzzleDecision;
+use chess_material_studio::project::{PgnPositionSnapshotAddResult, ProjectPuzzleDecision};
 use iced_aw::{TabLabel, Tabs};
 
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Source, source::SineWave};
@@ -1185,6 +1185,43 @@ impl OfflinePuzzles {
                 Task::none()
             }
             (_, Message::PuzzleInfo(message)) => self.puzzle_tab.update(message),
+            (_, Message::Pgn(PgnMessage::AddToChapter)) => {
+                let Some(snapshot) = self.pgn_tab.captured_snapshot().cloned() else {
+                    return Task::none();
+                };
+
+                let feedback = match self
+                    .project_tab
+                    .add_pgn_snapshot_to_active_chapter(&snapshot)
+                {
+                    Ok(added) => match added.result {
+                        PgnPositionSnapshotAddResult::Inserted => format!(
+                            "{}: {}",
+                            lang::tr(&self.lang, "pgn_position_added_to_chapter"),
+                            added.chapter_name
+                        ),
+                        PgnPositionSnapshotAddResult::AlreadyExists => format!(
+                            "{}: {}",
+                            lang::tr(&self.lang, "pgn_position_already_exists_in_chapter"),
+                            added.chapter_name
+                        ),
+                    },
+                    Err(error) => {
+                        let no_project_open = lang::tr(&self.lang, "no_project_open");
+                        let no_active_chapter = lang::tr(&self.lang, "no_active_chapter");
+                        if error == no_project_open || error == no_active_chapter {
+                            error
+                        } else {
+                            format!(
+                                "{}: {error}",
+                                lang::tr(&self.lang, "pgn_add_to_chapter_failed")
+                            )
+                        }
+                    }
+                };
+                self.pgn_tab.set_add_to_chapter_feedback(feedback);
+                Task::none()
+            }
             (_, Message::Pgn(message)) => self.pgn_tab.update(message),
             (_, Message::Search(SearchMesssage::ClickSearch)) => {
                 let generation = self.next_search_generation();
@@ -1737,7 +1774,10 @@ mod tests {
     use crate::openings::{Openings, Variation};
     use crate::search_tab::{OpeningSide, SearchBase, TacticalThemes};
     use chess_material_studio::models::Puzzle as PersistentPuzzle;
-    use chess_material_studio::project::{create_chapter, create_project, set_puzzle_decision};
+    use chess_material_studio::project::{
+        add_pgn_position_snapshot, create_chapter, create_project,
+        list_pgn_position_snapshots_for_chapter, set_puzzle_decision,
+    };
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2167,6 +2207,167 @@ mod tests {
             path: PathBuf::from("presentation.pgn"),
             content: Ok(pgn.to_string()),
         }));
+    }
+
+    fn capture_pgn_position(app: &mut OfflinePuzzles) {
+        let _ = app.update(Message::Pgn(PgnMessage::CapturePosition));
+        assert!(app.pgn_tab.captured_snapshot().is_some());
+    }
+
+    #[test]
+    fn captured_pgn_position_is_added_to_the_active_chapter_after_navigation() {
+        let project = TempProjectDb::new("pgn-add-full-flow");
+        create_project(&project.path, "Captured positions").unwrap();
+        let chapter = create_chapter(&project.path, "Tactics", None).unwrap();
+        let second_chapter = create_chapter(&project.path, "Endgames", None).unwrap();
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
+        load_pgn_for_presentation(&mut app, "[Event \"Capture\"]\n\n1. e4 e5 2. Nf3 1-0");
+        capture_pgn_position(&mut app);
+        let captured_candidate = app.pgn_tab.captured_candidate().cloned();
+        let captured_snapshot = app.pgn_tab.captured_snapshot().cloned().unwrap();
+
+        let _ = app.update(Message::Pgn(PgnMessage::NextPly));
+        let _ = app.update(Message::Pgn(PgnMessage::AddToChapter));
+
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter.id).unwrap(),
+            vec![captured_snapshot.clone()]
+        );
+        assert_ne!(
+            app.pgn_tab.current_board().unwrap().to_string(),
+            captured_snapshot.selected_fen
+        );
+        assert!(
+            app.pgn_tab
+                .status()
+                .unwrap()
+                .contains(&lang::tr(&app.lang, "pgn_position_added_to_chapter"))
+        );
+        assert_eq!(
+            app.pgn_tab.captured_candidate(),
+            captured_candidate.as_ref()
+        );
+        assert_eq!(app.pgn_tab.captured_snapshot(), Some(&captured_snapshot));
+
+        let _ = app.update(Message::Project(ProjectMessage::SelectChapter(
+            second_chapter.id,
+        )));
+        let _ = app.update(Message::Pgn(PgnMessage::AddToChapter));
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, second_chapter.id).unwrap(),
+            vec![captured_snapshot.clone()]
+        );
+        assert_eq!(
+            app.pgn_tab.captured_candidate(),
+            captured_candidate.as_ref()
+        );
+        assert_eq!(app.pgn_tab.captured_snapshot(), Some(&captured_snapshot));
+    }
+
+    #[test]
+    fn adding_the_same_captured_pgn_position_twice_reports_already_exists() {
+        let project = TempProjectDb::new("pgn-add-duplicate");
+        create_project(&project.path, "Captured positions").unwrap();
+        let chapter = create_chapter(&project.path, "Tactics", None).unwrap();
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
+        load_pgn_for_presentation(&mut app, "[Event \"Capture\"]\n\n1. e4 1-0");
+        capture_pgn_position(&mut app);
+        let captured_snapshot = app.pgn_tab.captured_snapshot().cloned().unwrap();
+
+        let _ = app.update(Message::Pgn(PgnMessage::AddToChapter));
+        let _ = app.update(Message::Pgn(PgnMessage::AddToChapter));
+
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter.id).unwrap(),
+            vec![captured_snapshot.clone()]
+        );
+        assert!(app.pgn_tab.status().unwrap().contains(&lang::tr(
+            &app.lang,
+            "pgn_position_already_exists_in_chapter"
+        )));
+        assert_eq!(app.pgn_tab.captured_snapshot(), Some(&captured_snapshot));
+    }
+
+    #[test]
+    fn adding_a_captured_pgn_position_without_a_project_keeps_the_capture() {
+        let mut app = OfflinePuzzles::new(false);
+        load_pgn_for_presentation(&mut app, "1. e4 1-0");
+        capture_pgn_position(&mut app);
+        let captured_candidate = app.pgn_tab.captured_candidate().cloned();
+        let captured_snapshot = app.pgn_tab.captured_snapshot().cloned().unwrap();
+
+        let _ = app.update(Message::Pgn(PgnMessage::AddToChapter));
+
+        assert_eq!(
+            app.pgn_tab.status(),
+            Some(lang::tr(&app.lang, "no_project_open").as_str())
+        );
+        assert_eq!(
+            app.pgn_tab.captured_candidate(),
+            captured_candidate.as_ref()
+        );
+        assert_eq!(app.pgn_tab.captured_snapshot(), Some(&captured_snapshot));
+    }
+
+    #[test]
+    fn adding_a_captured_pgn_position_without_a_chapter_keeps_the_capture() {
+        let project = TempProjectDb::new("pgn-add-no-chapter");
+        create_project(&project.path, "Captured positions").unwrap();
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
+        load_pgn_for_presentation(&mut app, "1. e4 1-0");
+        capture_pgn_position(&mut app);
+        let captured_snapshot = app.pgn_tab.captured_snapshot().cloned().unwrap();
+
+        let _ = app.update(Message::Pgn(PgnMessage::AddToChapter));
+
+        assert_eq!(
+            app.pgn_tab.status(),
+            Some(lang::tr(&app.lang, "no_active_chapter").as_str())
+        );
+        assert!(project.path.exists());
+        assert_eq!(app.pgn_tab.captured_snapshot(), Some(&captured_snapshot));
+    }
+
+    #[test]
+    fn metadata_conflict_reports_pgn_feedback_and_preserves_the_existing_row() {
+        let project = TempProjectDb::new("pgn-add-metadata-conflict");
+        create_project(&project.path, "Captured positions").unwrap();
+        let chapter = create_chapter(&project.path, "Tactics", None).unwrap();
+        let mut app = OfflinePuzzles::new(false);
+        let _ = app.update(Message::Project(ProjectMessage::ProjectToOpenChosen(Some(
+            project.path.clone(),
+        ))));
+        load_pgn_for_presentation(&mut app, "[Event \"Capture\"]\n\n1. e4 1-0");
+        capture_pgn_position(&mut app);
+        let captured_candidate = app.pgn_tab.captured_candidate().cloned();
+        let captured_snapshot = app.pgn_tab.captured_snapshot().cloned().unwrap();
+        let mut existing_snapshot = captured_snapshot.clone();
+        existing_snapshot.headers.event = Some("Existing metadata".into());
+        add_pgn_position_snapshot(&project.path, chapter.id, &existing_snapshot).unwrap();
+
+        let _ = app.update(Message::Pgn(PgnMessage::AddToChapter));
+
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter.id).unwrap(),
+            vec![existing_snapshot]
+        );
+        let feedback = app.pgn_tab.status().unwrap();
+        assert!(feedback.contains(&lang::tr(&app.lang, "pgn_add_to_chapter_failed")));
+        assert!(feedback.contains("different metadata"));
+        assert_eq!(
+            app.pgn_tab.captured_candidate(),
+            captured_candidate.as_ref()
+        );
+        assert_eq!(app.pgn_tab.captured_snapshot(), Some(&captured_snapshot));
     }
 
     #[test]
