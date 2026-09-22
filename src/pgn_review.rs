@@ -1,5 +1,6 @@
 use crate::pgn_import::{ImportedGame, ImportedGameHeaders};
-use chess::Board;
+use chess::{Board, ChessMove};
+use std::str::FromStr;
 
 /// An immutable in-memory snapshot of one position in a reviewed PGN game.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,6 +9,81 @@ pub struct PgnPositionCandidate {
     pub ply_index: usize,
     pub board: Board,
     pub headers: ImportedGameHeaders,
+}
+
+/// A self-contained, reproducible PGN position prepared for future persistence.
+///
+/// The FEN values are canonical `Board` representations and `main_line_uci`
+/// contains one UCI move per main-line ply. The snapshot intentionally keeps
+/// no UI, project, or persistence state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgnPositionSnapshot {
+    pub source_game_index: usize,
+    pub ply_index: usize,
+    pub selected_fen: String,
+    pub initial_fen: String,
+    pub main_line_uci: Vec<String>,
+    pub headers: ImportedGameHeaders,
+}
+
+impl PgnPositionSnapshot {
+    /// Replays the complete main line and returns the board at `ply_index`.
+    pub fn reconstruct_selected_board(&self) -> Result<Board, String> {
+        let mut board = Board::from_str(&self.initial_fen)
+            .map_err(|error| format!("snapshot initial FEN is invalid: {error:?}"))?;
+        if self.ply_index > self.main_line_uci.len() {
+            return Err(format!(
+                "snapshot ply index {} is outside the main line of {} moves",
+                self.ply_index,
+                self.main_line_uci.len()
+            ));
+        }
+
+        let mut selected_board = (self.ply_index == 0).then_some(board);
+        for (index, uci) in self.main_line_uci.iter().enumerate() {
+            let chess_move = ChessMove::from_str(uci).map_err(|_| {
+                format!(
+                    "snapshot main line has invalid UCI at ply {}: {uci}",
+                    index + 1
+                )
+            })?;
+            if !board.legal(chess_move) {
+                return Err(format!(
+                    "snapshot main line has illegal move at ply {}: {uci}",
+                    index + 1
+                ));
+            }
+            board = board.make_move_new(chess_move);
+            if index + 1 == self.ply_index {
+                selected_board = Some(board);
+            }
+        }
+
+        let selected_board = selected_board.ok_or_else(|| {
+            "snapshot ply index did not select a board after main-line replay".to_string()
+        })?;
+        let selected_fen_board = Board::from_str(&self.selected_fen)
+            .map_err(|error| format!("snapshot selected FEN is invalid: {error:?}"))?;
+        if selected_board != selected_fen_board {
+            return Err("snapshot selected FEN does not match the reconstructed board".into());
+        }
+        Ok(selected_board)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.reconstruct_selected_board().map(|_| ())
+    }
+
+    pub fn previous_uci(&self) -> Option<&str> {
+        self.ply_index
+            .checked_sub(1)
+            .and_then(|index| self.main_line_uci.get(index))
+            .map(String::as_str)
+    }
+
+    pub fn next_uci(&self) -> Option<&str> {
+        self.main_line_uci.get(self.ply_index).map(String::as_str)
+    }
 }
 
 /// Navigates validated PGN games without coupling them to the puzzle workflow.
@@ -75,6 +151,20 @@ impl PgnReviewSession {
             ply_index: self.current_ply_index(),
             board: *self.current_board(),
             headers: self.current_game().headers.clone(),
+        }
+    }
+
+    /// Captures the current position with enough validated game context to
+    /// reproduce it without the original PGN text.
+    pub fn capture_current_snapshot(&self) -> PgnPositionSnapshot {
+        let game = self.current_game();
+        PgnPositionSnapshot {
+            source_game_index: self.current_game_index(),
+            ply_index: self.current_ply_index(),
+            selected_fen: self.current_board().to_string(),
+            initial_fen: game.positions[0].to_string(),
+            main_line_uci: game.moves.iter().map(ToString::to_string).collect(),
+            headers: game.headers.clone(),
         }
     }
 
@@ -332,5 +422,182 @@ mod tests {
         assert!(error.contains("game 2"));
         assert!(error.contains("positions"));
         assert!(error.contains("moves"));
+    }
+
+    #[test]
+    fn captures_a_standard_snapshot_that_replays_to_the_selected_middle_ply() {
+        let games = parsed_games(
+            "[Event \"Demo\"]\n[Site \"Madrid\"]\n[Date \"2026.09.22\"]\n[Round \"3\"]\n[White \"Alice\"]\n[Black \"Bob\"]\n[Result \"1-0\"]\n\n1. e4 e5 2. Nf3 1-0",
+        );
+        let mut session = PgnReviewSession::new(games).expect("parsed game must be coherent");
+        let initial_snapshot = session.capture_current_snapshot();
+        assert_eq!(initial_snapshot.ply_index, 0);
+        assert_eq!(initial_snapshot.previous_uci(), None);
+        assert_eq!(initial_snapshot.next_uci(), Some("e2e4"));
+        assert_eq!(
+            initial_snapshot.reconstruct_selected_board().unwrap(),
+            Board::default()
+        );
+        assert!(session.next_ply());
+        assert!(session.next_ply());
+
+        let snapshot = session.capture_current_snapshot();
+
+        assert_eq!(snapshot.source_game_index, 0);
+        assert_eq!(snapshot.ply_index, 2);
+        assert_eq!(snapshot.initial_fen, Board::default().to_string());
+        assert_eq!(snapshot.main_line_uci, ["e2e4", "e7e5", "g1f3"]);
+        assert_eq!(snapshot.headers, session.current_game().headers);
+        assert_eq!(snapshot.previous_uci(), Some("e7e5"));
+        assert_eq!(snapshot.next_uci(), Some("g1f3"));
+        assert_eq!(
+            snapshot
+                .reconstruct_selected_board()
+                .expect("snapshot must replay"),
+            *session.current_board()
+        );
+        snapshot
+            .validate()
+            .expect("captured snapshot must validate");
+    }
+
+    #[test]
+    fn captures_a_setup_fen_snapshot_at_the_final_ply() {
+        let initial_fen = "8/8/8/8/8/8/8/K6k w - - 0 1";
+        let games = parsed_games(&format!(
+            "[SetUp \"1\"]\n[FEN \"{initial_fen}\"]\n[White \"Alice\"]\n[Black \"Bob\"]\n\n1. Kb1"
+        ));
+        let mut session = PgnReviewSession::new(games).expect("setup game must be coherent");
+        assert!(session.next_ply());
+
+        let snapshot = session.capture_current_snapshot();
+
+        assert_eq!(snapshot.ply_index, 1);
+        assert_eq!(snapshot.initial_fen, initial_fen);
+        assert_eq!(snapshot.main_line_uci, ["a1b1"]);
+        assert_eq!(snapshot.headers.set_up.as_deref(), Some("1"));
+        assert_eq!(snapshot.headers.fen.as_deref(), Some(initial_fen));
+        assert_eq!(snapshot.previous_uci(), Some("a1b1"));
+        assert_eq!(snapshot.next_uci(), None);
+        assert_eq!(
+            snapshot.reconstruct_selected_board().unwrap(),
+            *session.current_board()
+        );
+    }
+
+    #[test]
+    fn captures_a_zero_move_snapshot_at_ply_zero() {
+        let games = parsed_games("[Event \"Quiet\"]\n[Result \"1/2-1/2\"]\n\n1/2-1/2");
+        let session = PgnReviewSession::new(games).expect("result-only game must be coherent");
+
+        let snapshot = session.capture_current_snapshot();
+
+        assert_eq!(snapshot.ply_index, 0);
+        assert!(snapshot.main_line_uci.is_empty());
+        assert_eq!(snapshot.previous_uci(), None);
+        assert_eq!(snapshot.next_uci(), None);
+        assert_eq!(
+            snapshot.reconstruct_selected_board().unwrap(),
+            Board::default()
+        );
+        snapshot.validate().unwrap();
+    }
+
+    fn snapshot_with(
+        initial_fen: &str,
+        main_line_uci: &[&str],
+        ply_index: usize,
+        selected_fen: String,
+    ) -> PgnPositionSnapshot {
+        PgnPositionSnapshot {
+            source_game_index: 0,
+            ply_index,
+            selected_fen,
+            initial_fen: initial_fen.into(),
+            main_line_uci: main_line_uci.iter().map(|uci| (*uci).into()).collect(),
+            headers: ImportedGameHeaders::default(),
+        }
+    }
+
+    #[test]
+    fn rejects_snapshots_with_an_invalid_initial_fen() {
+        let snapshot = snapshot_with("not a FEN", &[], 0, Board::default().to_string());
+
+        assert!(snapshot.validate().unwrap_err().contains("initial FEN"));
+    }
+
+    #[test]
+    fn rejects_snapshots_with_an_invalid_selected_fen() {
+        let snapshot = snapshot_with(&Board::default().to_string(), &[], 0, "not a FEN".into());
+
+        assert!(
+            snapshot
+                .validate()
+                .unwrap_err()
+                .contains("selected FEN is invalid")
+        );
+    }
+
+    #[test]
+    fn accepts_a_textually_distinct_selected_fen_for_the_same_board() {
+        let canonical_fen = Board::default().to_string();
+        let equivalent_fen = format!("{canonical_fen} ");
+        assert_ne!(equivalent_fen, canonical_fen);
+        assert_eq!(
+            equivalent_fen
+                .parse::<Board>()
+                .expect("fixture FEN is valid"),
+            Board::default()
+        );
+
+        let snapshot = snapshot_with(&canonical_fen, &[], 0, equivalent_fen);
+
+        snapshot
+            .validate()
+            .expect("equivalent selected FEN must validate");
+    }
+
+    #[test]
+    fn rejects_snapshots_with_an_invalid_uci_or_illegal_main_line_move() {
+        let invalid_uci = snapshot_with(
+            &Board::default().to_string(),
+            &["not-uci"],
+            0,
+            Board::default().to_string(),
+        );
+        assert!(invalid_uci.validate().unwrap_err().contains("UCI"));
+
+        let after_e4 = parsed_games("1. e4 1-0")[0].positions[1].to_string();
+        let illegal_move = snapshot_with(
+            &Board::default().to_string(),
+            &["e2e4", "e2e5"],
+            1,
+            after_e4,
+        );
+        assert!(illegal_move.validate().unwrap_err().contains("illegal"));
+    }
+
+    #[test]
+    fn rejects_snapshots_with_an_out_of_range_ply_or_mismatched_selected_fen() {
+        let out_of_range = snapshot_with(
+            &Board::default().to_string(),
+            &["e2e4"],
+            2,
+            Board::default().to_string(),
+        );
+        assert!(out_of_range.validate().unwrap_err().contains("ply"));
+
+        let mismatched_fen = snapshot_with(
+            &Board::default().to_string(),
+            &["e2e4"],
+            1,
+            Board::default().to_string(),
+        );
+        assert!(
+            mismatched_fen
+                .validate()
+                .unwrap_err()
+                .contains("selected FEN")
+        );
     }
 }
