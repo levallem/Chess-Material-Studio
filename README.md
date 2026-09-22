@@ -21,12 +21,15 @@ Chess Material Studio helps chess players and coaches work with a local puzzle c
 - Create or open editorial projects, organize them into Chapters, and optionally set a target puzzle count for each Chapter.
 - Review puzzles in an active Chapter as `Selected` or `Discarded`, clear a review decision, and resume the same editorial work after reopening the project.
 - Load and export selected editorial puzzles by active Chapter, marked Chapters, or the complete project.
+- Review PGN files, capture a position, and add it to the active Chapter; saved PGN position snapshots are recovered as a read-only list when the project is reopened.
 
 ## Editorial workflow
 
 Projects are optional: the normal offline puzzle search and solver work without opening one. To prepare editorial material, create or open a project, create Chapters, choose an active Chapter, and optionally set its target puzzle count. Search the puzzle corpus, then review each puzzle as `Selected` or `Discarded`; a decision can also be cleared.
 
-Each project is stored in its own `.cms.sqlite` file. Reviews persist with a complete snapshot of the relevant puzzle data, rather than only its `PuzzleId`, so `Selected` and `Discarded` work survives closing and reopening a project. The selected puzzles of the active Chapter can be loaded back into the solver in their editorial order.
+Each project is stored in its own `.cms.sqlite` file. Reviews persist with a complete snapshot of the relevant puzzle data, rather than only its `PuzzleId`, so `Selected` and `Discarded` work survives closing and reopening a project. Project files also persist reproducible PGN position snapshots by Chapter. The selected puzzles of the active Chapter can be loaded back into the solver in their editorial order.
+
+The current PGN editorial flow is **PGN review → capture position → Add to active chapter**. Saved positions are recovered and shown read-only in the Projects tab after reopening the project.
 
 During normal searches of the puzzle corpus, reviewed puzzles in the active Chapter are excluded from new results. This exclusion does not apply to Favorites searches. A puzzle marked `Selected` cannot be selected simultaneously in another Chapter of the same project; this restriction does not apply to `Discarded` reviews.
 
