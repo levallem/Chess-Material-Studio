@@ -75,6 +75,12 @@ pub enum PgnPositionSnapshotAddResult {
     AlreadyExists,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgnPositionSnapshotDeleteResult {
+    Deleted,
+    NotFound,
+}
+
 #[derive(QueryableByName)]
 struct ProjectMetadataRow {
     #[diesel(sql_type = Text)]
@@ -462,6 +468,56 @@ pub fn add_pgn_position_snapshot(
             },
         )
         .map_err(|error| format!("cannot add PGN position snapshot: {error}"))?
+}
+
+pub fn delete_pgn_position_snapshot(
+    path: &Path,
+    chapter_id: i32,
+    snapshot: &PgnPositionSnapshot,
+) -> Result<PgnPositionSnapshotDeleteResult, String> {
+    snapshot
+        .validate()
+        .map_err(|error| format!("cannot delete PGN position snapshot: {error}"))?;
+    let ply_index = i64::try_from(snapshot.ply_index)
+        .map_err(|_| "PGN snapshot ply index is too large to persist".to_string())?;
+    let main_line_uci = snapshot.main_line_uci.join(" ");
+    let mut connection = open_validated_project_connection(path)?;
+
+    connection
+        .transaction::<Result<PgnPositionSnapshotDeleteResult, String>, diesel::result::Error, _>(
+            |connection| {
+                let chapter = diesel::sql_query(
+                    "SELECT EXISTS(SELECT 1 FROM chapters WHERE id = ?) AS chapter_exists",
+                )
+                .bind::<Integer, _>(chapter_id)
+                .get_result::<ChapterExistsRow>(connection)?;
+                if chapter.chapter_exists == 0 {
+                    return Ok(Err("chapter not found".into()));
+                }
+
+                let deleted = diesel::sql_query(
+                    "DELETE FROM chapter_pgn_positions \
+                     WHERE chapter_id = ? AND initial_fen = ? AND main_line_uci = ? AND ply_index = ?",
+                )
+                .bind::<Integer, _>(chapter_id)
+                .bind::<Text, _>(&snapshot.initial_fen)
+                .bind::<Text, _>(&main_line_uci)
+                .bind::<BigInt, _>(ply_index)
+                .execute(connection)?;
+                match deleted {
+                    0 => Ok(Ok(PgnPositionSnapshotDeleteResult::NotFound)),
+                    1 => Ok(Ok(PgnPositionSnapshotDeleteResult::Deleted)),
+                    _ => Err(diesel::result::Error::RollbackTransaction),
+                }
+            },
+        )
+        .map_err(|error| {
+            if matches!(error, diesel::result::Error::RollbackTransaction) {
+                "cannot delete PGN position snapshot: multiple rows matched one context".into()
+            } else {
+                format!("cannot delete PGN position snapshot: {error}")
+            }
+        })?
 }
 
 pub fn list_pgn_position_snapshots_for_chapter(
@@ -1962,6 +2018,142 @@ mod tests {
         assert_eq!(
             add_pgn_position_snapshot(project.path(), second.id, &initial).unwrap(),
             PgnPositionSnapshotAddResult::Inserted
+        );
+    }
+
+    #[test]
+    fn deleting_pgn_snapshot_removes_only_the_selected_ply_and_is_idempotent() {
+        let project = create_test_project("pgn-snapshot-delete-ply");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let initial = snapshot_at("[Event \"Context\"]\n\n1. e4 e5", 0, 0);
+        let later = snapshot_at("[Event \"Context\"]\n\n1. e4 e5", 1, 0);
+        add_pgn_position_snapshot(project.path(), chapter.id, &initial).unwrap();
+        add_pgn_position_snapshot(project.path(), chapter.id, &later).unwrap();
+
+        assert_eq!(
+            delete_pgn_position_snapshot(project.path(), chapter.id, &initial).unwrap(),
+            PgnPositionSnapshotDeleteResult::Deleted
+        );
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(project.path(), chapter.id).unwrap(),
+            vec![later]
+        );
+        assert_eq!(
+            delete_pgn_position_snapshot(project.path(), chapter.id, &initial).unwrap(),
+            PgnPositionSnapshotDeleteResult::NotFound
+        );
+    }
+
+    #[test]
+    fn deleting_pgn_snapshot_preserves_another_main_line() {
+        let project = create_test_project("pgn-snapshot-delete-line");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let first = snapshot_at("[Event \"First\"]\n\n1. e4", 1, 0);
+        let second = snapshot_at("[Event \"Second\"]\n\n1. d4", 1, 1);
+        add_pgn_position_snapshot(project.path(), chapter.id, &first).unwrap();
+        add_pgn_position_snapshot(project.path(), chapter.id, &second).unwrap();
+
+        assert_eq!(
+            delete_pgn_position_snapshot(project.path(), chapter.id, &first).unwrap(),
+            PgnPositionSnapshotDeleteResult::Deleted
+        );
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(project.path(), chapter.id).unwrap(),
+            vec![second]
+        );
+    }
+
+    #[test]
+    fn deleting_pgn_snapshot_preserves_another_chapter() {
+        let project = create_test_project("pgn-snapshot-delete-chapter");
+        let first = create_chapter(project.path(), "First", None).unwrap();
+        let second = create_chapter(project.path(), "Second", None).unwrap();
+        let snapshot = snapshot_at("[Event \"Shared\"]\n\n1. e4", 1, 0);
+        add_pgn_position_snapshot(project.path(), first.id, &snapshot).unwrap();
+        add_pgn_position_snapshot(project.path(), second.id, &snapshot).unwrap();
+
+        assert_eq!(
+            delete_pgn_position_snapshot(project.path(), first.id, &snapshot).unwrap(),
+            PgnPositionSnapshotDeleteResult::Deleted
+        );
+        assert!(
+            list_pgn_position_snapshots_for_chapter(project.path(), first.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(project.path(), second.id).unwrap(),
+            vec![snapshot]
+        );
+    }
+
+    #[test]
+    fn deleting_pgn_snapshot_preserves_another_project() {
+        let first = create_test_project("pgn-snapshot-delete-project-first");
+        let second = create_test_project("pgn-snapshot-delete-project-second");
+        let first_chapter = create_chapter(first.path(), "PGN", None).unwrap();
+        let second_chapter = create_chapter(second.path(), "PGN", None).unwrap();
+        let snapshot = snapshot_at("[Event \"Shared\"]\n\n1. e4", 1, 0);
+        add_pgn_position_snapshot(first.path(), first_chapter.id, &snapshot).unwrap();
+        add_pgn_position_snapshot(second.path(), second_chapter.id, &snapshot).unwrap();
+
+        assert_eq!(
+            delete_pgn_position_snapshot(first.path(), first_chapter.id, &snapshot).unwrap(),
+            PgnPositionSnapshotDeleteResult::Deleted
+        );
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(second.path(), second_chapter.id).unwrap(),
+            vec![snapshot]
+        );
+    }
+
+    #[test]
+    fn deleting_pgn_snapshot_requires_an_existing_chapter() {
+        let project = create_test_project("pgn-snapshot-delete-missing-chapter");
+        let snapshot = snapshot_at("[Event \"Missing\"]\n\n1. e4", 1, 0);
+
+        assert_eq!(
+            delete_pgn_position_snapshot(project.path(), 999, &snapshot).unwrap_err(),
+            "chapter not found"
+        );
+    }
+
+    #[test]
+    fn deleting_pgn_snapshot_rejects_invalid_input_without_removing_the_row() {
+        let project = create_test_project("pgn-snapshot-delete-invalid");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let snapshot = snapshot_at("[Event \"Valid\"]\n\n1. e4", 1, 0);
+        add_pgn_position_snapshot(project.path(), chapter.id, &snapshot).unwrap();
+        let mut invalid = snapshot.clone();
+        invalid.selected_fen = "not a FEN".into();
+
+        assert!(delete_pgn_position_snapshot(project.path(), chapter.id, &invalid).is_err());
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(project.path(), chapter.id).unwrap(),
+            vec![snapshot]
+        );
+    }
+
+    #[test]
+    fn deleting_pgn_snapshot_ignores_provenance_and_headers_in_identity() {
+        let project = create_test_project("pgn-snapshot-delete-identity");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let snapshot = snapshot_at("[Event \"Original\"]\n\n1. e4", 1, 0);
+        add_pgn_position_snapshot(project.path(), chapter.id, &snapshot).unwrap();
+        let mut equivalent_context = snapshot.clone();
+        equivalent_context.source_game_index = 17;
+        equivalent_context.headers.event = Some("Changed".into());
+        equivalent_context.selected_fen.push(' ');
+        equivalent_context.validate().unwrap();
+
+        assert_eq!(
+            delete_pgn_position_snapshot(project.path(), chapter.id, &equivalent_context).unwrap(),
+            PgnPositionSnapshotDeleteResult::Deleted
+        );
+        assert!(
+            list_pgn_position_snapshots_for_chapter(project.path(), chapter.id)
+                .unwrap()
+                .is_empty()
         );
     }
 
