@@ -1,4 +1,4 @@
-use iced::widget::{Button, Column, Container, Scrollable, Text, TextInput, checkbox};
+use iced::widget::{Button, Column, Container, Row, Scrollable, Text, TextInput, checkbox};
 use iced::{Alignment, Element, Length, Task, alignment};
 use iced_aw::TabLabel;
 use rfd::AsyncFileDialog;
@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 
 use chess_material_studio::pgn_review::PgnPositionSnapshot;
 use chess_material_studio::project::{
-    PgnPositionSnapshotAddResult, ProjectChapter, ProjectMetadata, ProjectPuzzleDecision,
-    add_pgn_position_snapshot, clear_puzzle_decision, create_chapter, create_project,
-    find_selected_puzzle_chapter, get_puzzle_decision, list_chapters,
-    list_pgn_position_snapshots_for_chapter, list_reviewed_puzzle_ids_for_chapter,
-    list_selected_puzzles_by_chapter, list_selected_puzzles_for_chapter, open_project,
-    set_puzzle_decision,
+    PgnPositionSnapshotAddResult, PgnPositionSnapshotDeleteResult, ProjectChapter, ProjectMetadata,
+    ProjectPuzzleDecision, add_pgn_position_snapshot, clear_puzzle_decision, create_chapter,
+    create_project, delete_pgn_position_snapshot, find_selected_puzzle_chapter,
+    get_puzzle_decision, list_chapters, list_pgn_position_snapshots_for_chapter,
+    list_reviewed_puzzle_ids_for_chapter, list_selected_puzzles_by_chapter,
+    list_selected_puzzles_for_chapter, open_project, set_puzzle_decision,
 };
 
 use crate::lang;
@@ -83,6 +83,12 @@ enum CachedPgnPositions {
 struct PgnPositionsCache {
     context: PgnPositionsContext,
     state: CachedPgnPositions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPgnPositionDelete {
+    context: PgnPositionsContext,
+    snapshot: PgnPositionSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +181,9 @@ pub enum ProjectMessage {
     ExportSelectedPuzzlesPdf,
     SelectedPuzzlesPdfExportFinished(SelectedPuzzlesPdfExportResult),
     OpenPgnPosition(usize),
+    RequestDeletePgnPosition(usize),
+    ConfirmDeletePgnPosition,
+    CancelDeletePgnPosition,
 }
 
 pub struct ProjectTab {
@@ -188,6 +197,7 @@ pub struct ProjectTab {
     review_cache: Option<CachedPuzzleReview>,
     selected_puzzles_cache: Option<SelectedPuzzlesCache>,
     pgn_positions_cache: Option<PgnPositionsCache>,
+    pending_pgn_position_delete: Option<PendingPgnPositionDelete>,
     export_selected_chapter_ids: HashSet<i32>,
 }
 
@@ -204,6 +214,7 @@ impl ProjectTab {
             review_cache: None,
             selected_puzzles_cache: None,
             pgn_positions_cache: None,
+            pending_pgn_position_delete: None,
             export_selected_chapter_ids: HashSet::new(),
         }
     }
@@ -273,6 +284,7 @@ impl ProjectTab {
             ProjectMessage::ProjectToOpenChosen(None) => Task::none(),
             ProjectMessage::CloseProject => {
                 self.active_project = None;
+                self.pending_pgn_position_delete = None;
                 self.export_selected_chapter_ids.clear();
                 self.chapter_name.clear();
                 self.target_puzzle_count.clear();
@@ -301,6 +313,18 @@ impl ProjectTab {
                 Task::none()
             }
             ProjectMessage::OpenPgnPosition(_) => Task::none(),
+            ProjectMessage::RequestDeletePgnPosition(index) => {
+                self.request_delete_pgn_position(index);
+                Task::none()
+            }
+            ProjectMessage::ConfirmDeletePgnPosition => {
+                self.confirm_delete_pgn_position();
+                Task::none()
+            }
+            ProjectMessage::CancelDeletePgnPosition => {
+                self.pending_pgn_position_delete = None;
+                Task::none()
+            }
             ProjectMessage::SetChapterExportSelected {
                 chapter_id,
                 selected,
@@ -487,6 +511,7 @@ impl ProjectTab {
             .and_then(|metadata| load_active_project(path.clone(), metadata))
         {
             Ok(active_project) => {
+                self.pending_pgn_position_delete = None;
                 self.active_project = Some(active_project);
                 self.export_selected_chapter_ids.clear();
                 self.clear_puzzle_review_cache();
@@ -505,6 +530,7 @@ impl ProjectTab {
             .and_then(|metadata| load_active_project(path.to_path_buf(), metadata))
         {
             Ok(active_project) => {
+                self.pending_pgn_position_delete = None;
                 self.active_project = Some(active_project);
                 self.export_selected_chapter_ids.clear();
                 self.clear_puzzle_review_cache();
@@ -546,6 +572,7 @@ impl ProjectTab {
             },
         ) {
             Ok(active_project) => {
+                self.pending_pgn_position_delete = None;
                 self.active_project = Some(active_project);
                 self.reconcile_export_selected_chapter_ids();
                 self.clear_puzzle_review_cache();
@@ -569,6 +596,7 @@ impl ProjectTab {
             .iter()
             .any(|chapter| chapter.id == chapter_id)
         {
+            self.pending_pgn_position_delete = None;
             active_project.active_chapter_id = Some(chapter_id);
             self.status.clear();
             self.clear_puzzle_review_cache();
@@ -960,6 +988,50 @@ impl ProjectTab {
             path: active_project.path.clone(),
             chapter_id: active_project.active_chapter_id?,
         })
+    }
+
+    fn request_delete_pgn_position(&mut self, index: usize) {
+        let Some(context) = self.pgn_positions_context() else {
+            return;
+        };
+        let Some(snapshot) = self
+            .pgn_positions()
+            .and_then(|snapshots| snapshots.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.pending_pgn_position_delete = Some(PendingPgnPositionDelete { context, snapshot });
+    }
+
+    fn confirm_delete_pgn_position(&mut self) {
+        let Some(pending) = self.pending_pgn_position_delete.take() else {
+            return;
+        };
+        if self.pgn_positions_context().as_ref() != Some(&pending.context) {
+            return;
+        }
+
+        match delete_pgn_position_snapshot(
+            &pending.context.path,
+            pending.context.chapter_id,
+            &pending.snapshot,
+        ) {
+            Ok(PgnPositionSnapshotDeleteResult::Deleted) => {
+                self.refresh_pgn_positions();
+                self.status = lang::tr(&self.lang, "saved_pgn_position_deleted");
+            }
+            Ok(PgnPositionSnapshotDeleteResult::NotFound) => {
+                self.refresh_pgn_positions();
+                self.status = lang::tr(&self.lang, "saved_pgn_position_not_found");
+            }
+            Err(error) => {
+                self.status = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "saved_pgn_position_delete_failed")
+                );
+            }
+        }
     }
 
     fn refresh_pgn_positions(&mut self) {
@@ -1586,6 +1658,59 @@ impl ProjectTab {
                 let white = snapshot.headers.white.as_deref().unwrap_or("-");
                 let black = snapshot.headers.black.as_deref().unwrap_or("-");
                 let event = snapshot.headers.event.as_deref().unwrap_or("-");
+                let pending_for_item =
+                    self.pending_pgn_position_delete
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            self.pgn_positions_context().as_ref() == Some(&pending.context)
+                                && &pending.snapshot == snapshot
+                        });
+                let actions = if pending_for_item {
+                    Column::new()
+                        .spacing(4)
+                        .push(Text::new(lang::tr(
+                            &self.lang,
+                            "confirm_delete_saved_pgn_position",
+                        )))
+                        .push(
+                            Row::new()
+                                .spacing(5)
+                                .push(
+                                    Button::new(Text::new(lang::tr(
+                                        &self.lang,
+                                        "confirm_delete_saved_pgn_position_button",
+                                    )))
+                                    .on_press(ProjectMessage::ConfirmDeletePgnPosition)
+                                    .style(btn_style_simple),
+                                )
+                                .push(
+                                    Button::new(Text::new(lang::tr(
+                                        &self.lang,
+                                        "cancel_delete_saved_pgn_position",
+                                    )))
+                                    .on_press(ProjectMessage::CancelDeletePgnPosition)
+                                    .style(btn_style_simple),
+                                ),
+                        )
+                } else {
+                    Column::new().push(
+                        Row::new()
+                            .spacing(5)
+                            .push(
+                                Button::new(Text::new(lang::tr(&self.lang, "open")))
+                                    .on_press(ProjectMessage::OpenPgnPosition(index))
+                                    .style(btn_style_simple),
+                            )
+                            .push(
+                                Button::new(Text::new(lang::tr(
+                                    &self.lang,
+                                    "delete_saved_pgn_position",
+                                )))
+                                .on_press(ProjectMessage::RequestDeletePgnPosition(index))
+                                .style(btn_style_simple),
+                            ),
+                    )
+                };
                 content = content
                     .push(Text::new(format!(
                         "{}. {}: {white} | {}: {black}",
@@ -1607,11 +1732,7 @@ impl ProjectTab {
                         lang::tr(&self.lang, "fen"),
                         snapshot.selected_fen,
                     )))
-                    .push(
-                        Button::new(Text::new(lang::tr(&self.lang, "open")))
-                            .on_press(ProjectMessage::OpenPgnPosition(index))
-                            .style(btn_style_simple),
-                    );
+                    .push(actions);
             }
             return Some(content);
         }
@@ -1632,8 +1753,8 @@ mod tests {
     use chess_material_studio::pgn_import::parse_pgn;
     use chess_material_studio::pgn_review::PgnReviewSession;
     use chess_material_studio::project::{
-        PgnPositionSnapshotAddResult, ProjectPuzzleDecision,
-        list_pgn_position_snapshots_for_chapter, set_puzzle_decision,
+        PgnPositionSnapshotAddResult, PgnPositionSnapshotDeleteResult, ProjectPuzzleDecision,
+        delete_pgn_position_snapshot, list_pgn_position_snapshots_for_chapter, set_puzzle_decision,
     };
     use lopdf::content::Content;
     use lopdf::{Document, Encoding, Object};
@@ -1688,6 +1809,263 @@ mod tests {
         let mut session = PgnReviewSession::new(games).unwrap();
         assert!(session.next_ply());
         session.capture_current_snapshot()
+    }
+
+    fn another_sample_pgn_snapshot() -> PgnPositionSnapshot {
+        let games = parse_pgn("[Event \"Another\"]\n\n1. d4 d5 1-0").unwrap();
+        let mut session = PgnReviewSession::new(games).unwrap();
+        assert!(session.next_ply());
+        session.capture_current_snapshot()
+    }
+
+    fn tab_with_saved_pgn_position(
+        label: &str,
+    ) -> (TempProjectDb, ProjectTab, i32, PgnPositionSnapshot) {
+        let project = TempProjectDb::new(label);
+        create_project(&project.path, "PGN").unwrap();
+        let chapter = create_chapter(&project.path, "Saved", None).unwrap();
+        let snapshot = sample_pgn_snapshot();
+        add_pgn_position_snapshot(&project.path, chapter.id, &snapshot).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        (project, tab, chapter.id, snapshot)
+    }
+
+    fn request_delete(tab: &mut ProjectTab) {
+        let _ = tab.update(ProjectMessage::RequestDeletePgnPosition(0));
+    }
+
+    #[test]
+    fn requesting_saved_pgn_delete_owns_context_and_snapshot_without_writing() {
+        let (project, mut tab, chapter_id, snapshot) =
+            tab_with_saved_pgn_position("pgn-delete-request");
+        let cached_before = tab.pgn_positions().unwrap().to_vec();
+
+        request_delete(&mut tab);
+
+        let pending = tab.pending_pgn_position_delete.as_ref().unwrap();
+        assert_eq!(pending.context.path, project.path);
+        assert_eq!(pending.context.chapter_id, chapter_id);
+        assert_eq!(pending.snapshot, snapshot);
+        assert_eq!(tab.pgn_positions().unwrap(), cached_before);
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter_id).unwrap(),
+            [snapshot]
+        );
+    }
+
+    #[test]
+    fn cancelling_saved_pgn_delete_leaves_persistence_and_cache_unchanged() {
+        let (project, mut tab, chapter_id, snapshot) =
+            tab_with_saved_pgn_position("pgn-delete-cancel");
+        let cached_before = tab.pgn_positions().unwrap().to_vec();
+        request_delete(&mut tab);
+
+        let _ = tab.update(ProjectMessage::CancelDeletePgnPosition);
+
+        assert!(tab.pending_pgn_position_delete.is_none());
+        assert_eq!(tab.pgn_positions().unwrap(), cached_before);
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter_id).unwrap(),
+            [snapshot]
+        );
+    }
+
+    #[test]
+    fn confirming_saved_pgn_delete_refreshes_cache_and_preserves_other_positions() {
+        let project = TempProjectDb::new("pgn-delete-confirmed");
+        create_project(&project.path, "PGN").unwrap();
+        let chapter = create_chapter(&project.path, "Saved", None).unwrap();
+        let deleted = sample_pgn_snapshot();
+        let retained = another_sample_pgn_snapshot();
+        add_pgn_position_snapshot(&project.path, chapter.id, &deleted).unwrap();
+        add_pgn_position_snapshot(&project.path, chapter.id, &retained).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        assert_eq!(
+            tab.pgn_positions().unwrap(),
+            [deleted.clone(), retained.clone()]
+        );
+
+        request_delete(&mut tab);
+        let _ = tab.update(ProjectMessage::ConfirmDeletePgnPosition);
+
+        assert!(tab.pending_pgn_position_delete.is_none());
+        assert_eq!(
+            tab.status,
+            lang::tr(&tab.lang, "saved_pgn_position_deleted")
+        );
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter.id).unwrap(),
+            std::slice::from_ref(&retained)
+        );
+        assert_eq!(tab.pgn_positions().unwrap(), [retained]);
+    }
+
+    #[test]
+    fn confirming_stale_saved_pgn_delete_recovers_from_not_found() {
+        let (project, mut tab, chapter_id, snapshot) =
+            tab_with_saved_pgn_position("pgn-delete-not-found");
+        assert_eq!(
+            tab.pgn_positions().unwrap(),
+            std::slice::from_ref(&snapshot)
+        );
+        assert_eq!(
+            delete_pgn_position_snapshot(&project.path, chapter_id, &snapshot).unwrap(),
+            PgnPositionSnapshotDeleteResult::Deleted
+        );
+        assert_eq!(tab.pgn_positions().unwrap(), [snapshot]);
+
+        request_delete(&mut tab);
+        let _ = tab.update(ProjectMessage::ConfirmDeletePgnPosition);
+
+        assert!(tab.pending_pgn_position_delete.is_none());
+        assert_eq!(
+            tab.status,
+            lang::tr(&tab.lang, "saved_pgn_position_not_found")
+        );
+        assert!(tab.pgn_positions().unwrap().is_empty());
+        assert!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_saved_pgn_delete_keeps_loaded_cache_and_reports_error() {
+        let (project, mut tab, chapter_id, snapshot) =
+            tab_with_saved_pgn_position("pgn-delete-error");
+        request_delete(&mut tab);
+        std::fs::remove_file(&project.path).unwrap();
+
+        let _ = tab.update(ProjectMessage::ConfirmDeletePgnPosition);
+
+        assert!(tab.pending_pgn_position_delete.is_none());
+        assert_eq!(tab.pgn_positions().unwrap(), [snapshot]);
+        assert!(tab.status.starts_with(&format!(
+            "{}: ",
+            lang::tr(&tab.lang, "saved_pgn_position_delete_failed")
+        )));
+        assert!(
+            tab.status.len() > lang::tr(&tab.lang, "saved_pgn_position_delete_failed").len() + 2
+        );
+        assert_eq!(
+            tab.pgn_positions_cache.as_ref().unwrap().context.chapter_id,
+            chapter_id
+        );
+    }
+
+    #[test]
+    fn invalid_saved_pgn_delete_requests_fail_closed() {
+        let mut no_project = ProjectTab::new();
+        request_delete(&mut no_project);
+        assert!(no_project.pending_pgn_position_delete.is_none());
+
+        let (project, mut tab, chapter_id, snapshot) =
+            tab_with_saved_pgn_position("pgn-delete-invalid-request");
+        let _ = tab.update(ProjectMessage::RequestDeletePgnPosition(1));
+        assert!(tab.pending_pgn_position_delete.is_none());
+        assert_eq!(
+            tab.pgn_positions().unwrap(),
+            std::slice::from_ref(&snapshot)
+        );
+
+        tab.pgn_positions_cache = None;
+        request_delete(&mut tab);
+        assert!(tab.pending_pgn_position_delete.is_none());
+
+        tab.refresh_pgn_positions();
+        tab.pgn_positions_cache.as_mut().unwrap().context.chapter_id += 1;
+        request_delete(&mut tab);
+        assert!(tab.pending_pgn_position_delete.is_none());
+
+        tab.pgn_positions_cache = Some(PgnPositionsCache {
+            context: tab.pgn_positions_context().unwrap(),
+            state: CachedPgnPositions::Failed {
+                status: "read failed".into(),
+            },
+        });
+        request_delete(&mut tab);
+        assert!(tab.pending_pgn_position_delete.is_none());
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, chapter_id).unwrap(),
+            [snapshot]
+        );
+    }
+
+    #[test]
+    fn confirmation_rechecks_context_even_without_lifecycle_invalidation() {
+        let project = TempProjectDb::new("pgn-delete-context-mismatch");
+        create_project(&project.path, "PGN").unwrap();
+        let first = create_chapter(&project.path, "First", None).unwrap();
+        let second = create_chapter(&project.path, "Second", None).unwrap();
+        let snapshot = sample_pgn_snapshot();
+        add_pgn_position_snapshot(&project.path, first.id, &snapshot).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        request_delete(&mut tab);
+        tab.active_project.as_mut().unwrap().active_chapter_id = Some(second.id);
+
+        let _ = tab.update(ProjectMessage::ConfirmDeletePgnPosition);
+
+        assert!(tab.pending_pgn_position_delete.is_none());
+        assert_eq!(
+            list_pgn_position_snapshots_for_chapter(&project.path, first.id).unwrap(),
+            [snapshot]
+        );
+    }
+
+    #[test]
+    fn successful_chapter_selection_and_creation_cancel_pending_delete() {
+        let project = TempProjectDb::new("pgn-delete-chapter-lifecycle");
+        create_project(&project.path, "PGN").unwrap();
+        let first = create_chapter(&project.path, "First", None).unwrap();
+        let second = create_chapter(&project.path, "Second", None).unwrap();
+        add_pgn_position_snapshot(&project.path, first.id, &sample_pgn_snapshot()).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+        request_delete(&mut tab);
+        tab.select_chapter(second.id);
+        assert!(tab.pending_pgn_position_delete.is_none());
+
+        tab.select_chapter(first.id);
+        request_delete(&mut tab);
+        tab.chapter_name = "Third".into();
+        tab.create_chapter_from_draft();
+        assert!(tab.pending_pgn_position_delete.is_none());
+        assert_eq!(tab.active_chapter().unwrap().name, "Third");
+    }
+
+    #[test]
+    fn project_creation_open_switch_and_close_cancel_pending_delete() {
+        let (first_project, mut tab, _, _) =
+            tab_with_saved_pgn_position("pgn-delete-project-lifecycle-first");
+        let second_project = TempProjectDb::new("pgn-delete-project-lifecycle-second");
+        create_project(&second_project.path, "Second").unwrap();
+        let second_chapter = create_chapter(&second_project.path, "Saved", None).unwrap();
+        add_pgn_position_snapshot(
+            &second_project.path,
+            second_chapter.id,
+            &another_sample_pgn_snapshot(),
+        )
+        .unwrap();
+
+        request_delete(&mut tab);
+        tab.open_project_path(&second_project.path);
+        assert!(tab.pending_pgn_position_delete.is_none());
+
+        request_delete(&mut tab);
+        let third_project = TempProjectDb::new("pgn-delete-project-lifecycle-create");
+        tab.new_project_path = Some(third_project.path.clone());
+        tab.project_name = "Third".into();
+        tab.create_project_from_draft();
+        assert!(tab.pending_pgn_position_delete.is_none());
+
+        tab.open_project_path(&first_project.path);
+        request_delete(&mut tab);
+        let _ = tab.update(ProjectMessage::CloseProject);
+        assert!(tab.pending_pgn_position_delete.is_none());
     }
 
     #[test]
@@ -3521,10 +3899,25 @@ mod tests {
         let mut tab = ProjectTab::new();
         tab.open_project_path(&project.path);
         let before = tab.pgn_positions().unwrap().to_vec();
+        request_delete(&mut tab);
 
         tab.open_project_path(&invalid_path);
 
         assert_eq!(tab.pgn_positions().unwrap(), before);
+        assert!(tab.pending_pgn_position_delete.is_some());
+    }
+
+    #[test]
+    fn pending_delete_rendering_reads_only_the_loaded_cache() {
+        let (project, mut tab, _, snapshot) =
+            tab_with_saved_pgn_position("pgn-delete-render-cache-only");
+        request_delete(&mut tab);
+        std::fs::remove_file(&project.path).unwrap();
+
+        let _ = tab.pgn_positions_content();
+
+        assert!(tab.pending_pgn_position_delete.is_some());
+        assert_eq!(tab.pgn_positions().unwrap(), [snapshot]);
     }
 
     #[test]
@@ -3556,10 +3949,17 @@ mod tests {
 
     #[test]
     fn pgn_position_translation_keys_exist_for_every_supported_language() {
-        const PGN_POSITION_KEYS: [&str; 3] = [
+        const PGN_POSITION_KEYS: [&str; 10] = [
             "saved_pgn_positions",
             "no_saved_pgn_positions",
             "saved_pgn_positions_error",
+            "delete_saved_pgn_position",
+            "confirm_delete_saved_pgn_position",
+            "confirm_delete_saved_pgn_position_button",
+            "cancel_delete_saved_pgn_position",
+            "saved_pgn_position_deleted",
+            "saved_pgn_position_not_found",
+            "saved_pgn_position_delete_failed",
         ];
 
         for language in lang::Language::ALL {
