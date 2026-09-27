@@ -2,7 +2,8 @@ use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Rank, Square};
 use lopdf::content::{Content, Operation};
 use lopdf::dictionary;
 use lopdf::{Document, Object, Stream};
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use unicode_normalization::UnicodeNormalization;
@@ -382,13 +383,96 @@ fn build_pgn_content(puzzles: &[config::Puzzle], date: &str) -> Result<String, S
     Ok(content)
 }
 
+const PGN_TEMP_ATTEMPTS: u32 = 32;
+
+fn temporary_pgn_path(destination: &Path, counter: u32) -> Result<PathBuf, String> {
+    let file_name = destination.file_name().ok_or_else(|| {
+        format!(
+            "PGN destination has no file name: '{}'",
+            destination.display()
+        )
+    })?;
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(format!(".cms-{}-{counter}.tmp", std::process::id()));
+    Ok(destination.with_file_name(temporary_name))
+}
+
+fn write_pgn_content(destination: &Path, content: &[u8]) -> Result<(), String> {
+    write_pgn_content_with_renamer(destination, content, |from, to| std::fs::rename(from, to))
+}
+
+fn write_pgn_content_with_renamer<F>(
+    destination: &Path,
+    content: &[u8],
+    renamer: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    let (temporary, mut file) = (0..PGN_TEMP_ATTEMPTS)
+        .find_map(|counter| {
+            let temporary = match temporary_pgn_path(destination, counter) {
+                Ok(path) => path,
+                Err(error) => return Some(Err(error)),
+            };
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => Some(Ok((temporary, file))),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(format!(
+                    "Error creating temporary PGN file '{}' for '{}': {error}",
+                    temporary.display(),
+                    destination.display()
+                ))),
+            }
+        })
+        .unwrap_or_else(|| {
+            Err(format!(
+                "All {PGN_TEMP_ATTEMPTS} temporary names exist for '{}'",
+                destination.display()
+            ))
+        })?;
+
+    let prepared = file
+        .write_all(content)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            format!(
+                "Error preparing temporary PGN file '{}' for '{}': {error}",
+                temporary.display(),
+                destination.display()
+            )
+        });
+    drop(file);
+
+    if let Err(error) = prepared {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+
+    let published = renamer(&temporary, destination).map_err(|error| {
+        format!(
+            "Error publishing temporary PGN file '{}' to '{}': {error}",
+            temporary.display(),
+            destination.display()
+        )
+    });
+    if published.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    published
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────
 
 pub fn write_pgn(puzzles: &[config::Puzzle], path: &Path) -> Result<(), String> {
     let date = chrono::Local::now().format("%Y.%m.%d").to_string();
     let content = build_pgn_content(puzzles, &date)
         .map_err(|error| format!("Error building PGN content: {error}"))?;
-    std::fs::write(path, content)
+    write_pgn_content(path, content.as_bytes())
         .map_err(|error| format!("Error writing PGN file '{}': {error}", path.display()))
 }
 
@@ -435,7 +519,7 @@ pub fn write_project_pgn(
         }
     }
 
-    std::fs::write(path, content)
+    write_pgn_content(path, content.as_bytes())
         .map_err(|error| format!("Error writing PGN file '{}': {error}", path.display()))
 }
 
@@ -2227,6 +2311,148 @@ mod tests {
     }
 
     // ── PGN file write tests ──
+
+    fn cms025a_test_path(stem: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.join(format!("cms025a-{stem}-{}-{nonce}.pgn", std::process::id()))
+    }
+
+    #[test]
+    fn cms025a_existing_destination_is_replaced_with_complete_pgn() {
+        let path = cms025a_test_path("replace");
+        std::fs::write(&path, b"old sentinel bytes").unwrap();
+
+        write_pgn(&[fixture_puzzle_00010()], &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[Event \"Chess Puzzle\"]"));
+        assert!(content.contains("[Site \"https://lichess.org/training/00010\"]"));
+        assert!(content.trim_end().ends_with('*'));
+        assert!(!content.contains("old sentinel bytes"));
+        assert!(!temporary_pgn_path(&path, 0).unwrap().exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cms025a_build_failure_preserves_destination_bytes() {
+        let path = cms025a_test_path("build-failure");
+        let sentinel = b"old sentinel bytes\0\xff";
+        std::fs::write(&path, sentinel).unwrap();
+        let mut invalid = fixture_puzzle_00010();
+        invalid.moves.clear();
+
+        assert!(write_pgn(&[invalid], &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        assert!(!temporary_pgn_path(&path, 0).unwrap().exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cms025a_publication_failure_preserves_destination_and_cleans_temp() {
+        let path = cms025a_test_path("rename-failure");
+        let sentinel = b"old sentinel bytes\0\xff";
+        std::fs::write(&path, sentinel).unwrap();
+        let content = build_pgn_content(&[fixture_puzzle_00010()], "2026.09.27").unwrap();
+        let mut temporary = None;
+
+        let result = write_pgn_content_with_renamer(&path, content.as_bytes(), |from, to| {
+            assert_eq!(to, path);
+            assert_eq!(std::fs::read(from).unwrap(), content.as_bytes());
+            temporary = Some(from.to_path_buf());
+            Err(std::io::Error::other("injected rename failure"))
+        });
+
+        assert!(result.unwrap_err().contains("injected rename failure"));
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        assert!(!temporary.unwrap().exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cms025a_exhausted_temp_names_preserve_destination() {
+        let path = cms025a_test_path("create-failure");
+        let sentinel = b"old sentinel bytes\0\xff";
+        std::fs::write(&path, sentinel).unwrap();
+        let candidates: Vec<_> = (0..PGN_TEMP_ATTEMPTS)
+            .map(|counter| temporary_pgn_path(&path, counter).unwrap())
+            .collect();
+        for candidate in &candidates {
+            std::fs::write(candidate, b"stale temp").unwrap();
+        }
+
+        let result = write_pgn(&[fixture_puzzle_00010()], &path);
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        for candidate in &candidates {
+            assert_eq!(std::fs::read(candidate).unwrap(), b"stale temp");
+            let _ = std::fs::remove_file(candidate);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cms025a_new_destination_is_published_without_temp() {
+        let path = cms025a_test_path("new");
+        let _ = std::fs::remove_file(&path);
+
+        write_pgn(&[fixture_puzzle_00010()], &path).unwrap();
+
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("[Event \"Chess Puzzle\"]")
+        );
+        assert!(!temporary_pgn_path(&path, 0).unwrap().exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cms025a_stale_temp_is_preserved_and_next_candidate_is_used() {
+        let path = cms025a_test_path("collision");
+        let stale = temporary_pgn_path(&path, 0).unwrap();
+        std::fs::write(&path, b"old sentinel bytes").unwrap();
+        std::fs::write(&stale, b"stale temp").unwrap();
+
+        write_pgn(&[fixture_puzzle_00010()], &path).unwrap();
+
+        assert_eq!(std::fs::read(&stale).unwrap(), b"stale temp");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("[Event \"Chess Puzzle\"]")
+        );
+        assert!(!temporary_pgn_path(&path, 1).unwrap().exists());
+        let _ = std::fs::remove_file(stale);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cms025a_project_writer_replaces_existing_destination() {
+        let path = cms025a_test_path("project-replace");
+        std::fs::write(&path, b"old sentinel bytes").unwrap();
+        let chapters = [ProjectPgnChapter {
+            name: "Capítulo".into(),
+            puzzles: vec![fixture_puzzle_00010()],
+        }];
+
+        write_project_pgn("Libro", &chapters, &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[Project \"Libro\"]"));
+        assert!(content.contains("[Chapter \"Capítulo\"]"));
+        assert!(content.trim_end().ends_with('*'));
+        assert!(!content.contains("old sentinel bytes"));
+        assert!(!temporary_pgn_path(&path, 0).unwrap().exists());
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn test_write_pgn_writes_games_in_received_order() {
