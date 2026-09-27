@@ -6,6 +6,10 @@ use crate::{
     styles,
 };
 use chess::{Board, ChessMove, Piece, Square};
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::fmt;
+use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -24,10 +28,222 @@ pub const PDF_CHESS_SYMBOL_FONT_NAME: &str = "NotoSansSymbols2-Regular";
 
 //pub const FONT_DIRECTORY: &str = "font/";
 pub const PUZZLES_DIRECTORY: &str = "puzzles/";
-pub const TRANSLATIONS_DIRECTORY: &str = "./translations/";
-pub const PIECES_DIRECTORY: &str = "pieces/";
+pub const PIECES_DIRECTORY: &str = "pieces";
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const DATABASE_URL: &str = "ocp.db";
+
+pub const REQUIRED_TRANSLATION_RESOURCES: [&str; 6] = [
+    "translations/en-US/ocp.ftl",
+    "translations/pt-BR/ocp.ftl",
+    "translations/es/ocp.ftl",
+    "translations/fr/ocp.ftl",
+    "translations/cn/ocp.ftl",
+    "translations/nl/ocp.ftl",
+];
+
+pub const REQUIRED_PIECE_RESOURCES: [&str; 12] = [
+    "pieces/cburnett/wP.svg",
+    "pieces/cburnett/wR.svg",
+    "pieces/cburnett/wN.svg",
+    "pieces/cburnett/wB.svg",
+    "pieces/cburnett/wQ.svg",
+    "pieces/cburnett/wK.svg",
+    "pieces/cburnett/bP.svg",
+    "pieces/cburnett/bR.svg",
+    "pieces/cburnett/bN.svg",
+    "pieces/cburnett/bB.svg",
+    "pieces/cburnett/bQ.svg",
+    "pieces/cburnett/bK.svg",
+];
+
+#[derive(Debug)]
+pub struct RuntimeResourceError {
+    relative_path: PathBuf,
+    attempted_paths: Vec<PathBuf>,
+    io_error: io::Error,
+}
+
+impl RuntimeResourceError {
+    fn new(relative_path: &Path, attempted_paths: Vec<PathBuf>, io_error: io::Error) -> Self {
+        Self {
+            relative_path: relative_path.to_path_buf(),
+            attempted_paths,
+            io_error,
+        }
+    }
+
+    pub fn relative_path(&self) -> &Path {
+        &self.relative_path
+    }
+
+    #[cfg(test)]
+    pub fn attempted_paths(&self) -> &[PathBuf] {
+        &self.attempted_paths
+    }
+
+    #[cfg(test)]
+    pub fn io_error(&self) -> &io::Error {
+        &self.io_error
+    }
+}
+
+impl fmt::Display for RuntimeResourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(formatter, "Resource:")?;
+        writeln!(formatter, "{}", self.relative_path.display())?;
+        if !self.attempted_paths.is_empty() {
+            writeln!(formatter)?;
+            writeln!(formatter, "Attempted location(s):")?;
+            for path in &self.attempted_paths {
+                writeln!(formatter, "{}", path.display())?;
+            }
+        }
+        writeln!(formatter)?;
+        write!(formatter, "Error:\n{}", self.io_error)
+    }
+}
+
+impl std::error::Error for RuntimeResourceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.io_error)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeResourceResolver {
+    executable_path: PathBuf,
+    manifest_directory: PathBuf,
+}
+
+impl RuntimeResourceResolver {
+    pub(crate) fn new(executable_path: PathBuf, manifest_directory: PathBuf) -> Self {
+        Self {
+            executable_path,
+            manifest_directory,
+        }
+    }
+
+    fn for_current_process() -> Result<Self, RuntimeResourceError> {
+        let executable_path = std::env::current_exe().map_err(|error| {
+            RuntimeResourceError::new(Path::new("<current executable>"), Vec::new(), error)
+        })?;
+        Ok(Self::new(
+            executable_path,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        ))
+    }
+
+    fn cargo_manifest_fallback_allowed(&self) -> bool {
+        let Some(executable_directory) = self.executable_path.parent() else {
+            return false;
+        };
+        let Ok(executable_directory) = std::fs::canonicalize(executable_directory) else {
+            return false;
+        };
+        let Ok(cargo_target_directory) =
+            std::fs::canonicalize(self.manifest_directory.join("target"))
+        else {
+            return false;
+        };
+
+        executable_directory.starts_with(cargo_target_directory)
+    }
+
+    pub(crate) fn resolve(&self, relative_path: &Path) -> Result<PathBuf, RuntimeResourceError> {
+        if relative_path.is_absolute() {
+            return Err(RuntimeResourceError::new(
+                relative_path,
+                Vec::new(),
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "runtime resource path must be relative",
+                ),
+            ));
+        }
+
+        let executable_directory = self.executable_path.parent().ok_or_else(|| {
+            RuntimeResourceError::new(
+                relative_path,
+                Vec::new(),
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "current executable has no parent directory",
+                ),
+            )
+        })?;
+        let primary = executable_directory.join(relative_path);
+        match probe_regular_file(&primary) {
+            Ok(()) => return Ok(primary),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && self.cargo_manifest_fallback_allowed() => {}
+            Err(error) => {
+                return Err(RuntimeResourceError::new(
+                    relative_path,
+                    vec![primary],
+                    error,
+                ));
+            }
+        }
+
+        let fallback = self.manifest_directory.join(relative_path);
+        probe_regular_file(&fallback).map_err(|error| {
+            RuntimeResourceError::new(relative_path, vec![primary, fallback.clone()], error)
+        })?;
+        Ok(fallback)
+    }
+}
+
+fn probe_regular_file(path: &Path) -> io::Result<()> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.is_file() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime resource is not a regular file",
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeResources {
+    paths: HashMap<PathBuf, PathBuf>,
+}
+
+impl RuntimeResources {
+    fn load() -> Result<Self, RuntimeResourceError> {
+        let resolver = RuntimeResourceResolver::for_current_process()?;
+        let mut paths = HashMap::with_capacity(
+            REQUIRED_TRANSLATION_RESOURCES.len() + REQUIRED_PIECE_RESOURCES.len(),
+        );
+        for relative in REQUIRED_TRANSLATION_RESOURCES
+            .iter()
+            .chain(REQUIRED_PIECE_RESOURCES.iter())
+        {
+            let relative = PathBuf::from(relative);
+            let resolved = resolver.resolve(&relative)?;
+            paths.insert(relative, resolved);
+        }
+        Ok(Self { paths })
+    }
+
+    pub(crate) fn path(&self, relative_path: &Path) -> Option<&Path> {
+        self.paths.get(relative_path).map(PathBuf::as_path)
+    }
+}
+
+static RUNTIME_RESOURCES: LazyLock<Result<RuntimeResources, RuntimeResourceError>> =
+    LazyLock::new(RuntimeResources::load);
+
+pub(crate) fn runtime_resources() -> Result<&'static RuntimeResources, &'static RuntimeResourceError>
+{
+    RUNTIME_RESOURCES.as_ref()
+}
+
+pub(crate) fn piece_resource_relative_path(theme: &OsStr, file_name: &OsStr) -> PathBuf {
+    Path::new(PIECES_DIRECTORY).join(theme).join(file_name)
+}
 
 // Iced widget IDs need to be static
 pub static BTN_IDS: [&str; 64] = [
@@ -707,5 +923,251 @@ mod tests {
             "SQLite missing should NOT fall back to CSV"
         );
         let _ = std::fs::remove_file(&csv_path);
+    }
+
+    fn write_resource(path: &Path, contents: &[u8]) {
+        std::fs::create_dir_all(path.parent().expect("resource should have a parent"))
+            .expect("resource parent should be created");
+        std::fs::write(path, contents).expect("resource should be written");
+    }
+
+    fn create_executable_directory(executable: &Path) {
+        std::fs::create_dir_all(
+            executable
+                .parent()
+                .expect("executable should have a parent directory"),
+        )
+        .expect("executable directory should be created");
+    }
+
+    #[test]
+    fn runtime_resource_prefers_candidate_beside_executable() {
+        let directory = TestDirectory::new("runtime-resource-primary");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/debug/chess-material-studio.exe");
+        let relative = Path::new("translations/es/ocp.ftl");
+        let primary = executable.parent().unwrap().join(relative);
+        write_resource(&primary, b"primary");
+
+        let resolver = RuntimeResourceResolver::new(executable, manifest);
+
+        assert_eq!(resolver.resolve(relative).unwrap(), primary);
+    }
+
+    #[test]
+    fn runtime_resource_primary_wins_over_manifest_fallback() {
+        let directory = TestDirectory::new("runtime-resource-priority");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/release/chess-material-studio.exe");
+        let relative = Path::new("pieces/cburnett/wK.svg");
+        let primary = executable.parent().unwrap().join(relative);
+        write_resource(&primary, b"primary");
+        write_resource(&manifest.join(relative), b"fallback");
+
+        let resolver = RuntimeResourceResolver::new(executable, manifest);
+
+        assert_eq!(resolver.resolve(relative).unwrap(), primary);
+    }
+
+    #[test]
+    fn runtime_resource_uses_manifest_only_for_cargo_target_execution() {
+        let directory = TestDirectory::new("runtime-resource-cargo-fallback");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/debug/chess-material-studio.exe");
+        let relative = Path::new("translations/nl/ocp.ftl");
+        let fallback = manifest.join(relative);
+        create_executable_directory(&executable);
+        write_resource(&fallback, b"fallback");
+
+        let resolver = RuntimeResourceResolver::new(executable, manifest);
+
+        assert_eq!(resolver.resolve(relative).unwrap(), fallback);
+    }
+
+    #[test]
+    fn runtime_resource_allows_manifest_fallback_from_release() {
+        let directory = TestDirectory::new("runtime-resource-release-fallback");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/release/chess-material-studio.exe");
+        let relative = Path::new("translations/es/ocp.ftl");
+        let fallback = manifest.join(relative);
+        create_executable_directory(&executable);
+        write_resource(&fallback, b"fallback");
+
+        let resolver = RuntimeResourceResolver::new(executable, manifest);
+
+        assert_eq!(resolver.resolve(relative).unwrap(), fallback);
+    }
+
+    #[test]
+    fn runtime_resource_allows_manifest_fallback_from_debug_deps() {
+        let directory = TestDirectory::new("runtime-resource-deps-fallback");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/debug/deps/chess-material-studio.exe");
+        let relative = Path::new("translations/pt-BR/ocp.ftl");
+        let fallback = manifest.join(relative);
+        create_executable_directory(&executable);
+        write_resource(&fallback, b"fallback");
+
+        let resolver = RuntimeResourceResolver::new(executable, manifest);
+
+        assert_eq!(resolver.resolve(relative).unwrap(), fallback);
+    }
+
+    #[test]
+    fn runtime_resource_denies_lexical_target_parent_escape() {
+        let directory = TestDirectory::new("runtime-resource-target-escape");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/../outside/chess-material-studio.exe");
+        let relative = Path::new("translations/fr/ocp.ftl");
+        create_executable_directory(&executable);
+        write_resource(&manifest.join(relative), b"must not be used");
+
+        let error = RuntimeResourceResolver::new(executable.clone(), manifest)
+            .resolve(relative)
+            .unwrap_err();
+
+        assert_eq!(
+            error.attempted_paths(),
+            &[executable.parent().unwrap().join(relative)]
+        );
+    }
+
+    #[test]
+    fn runtime_resource_denies_fallback_when_target_cannot_be_canonicalized() {
+        let directory = TestDirectory::new("runtime-resource-canonicalization-failure");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/debug/chess-material-studio.exe");
+        let relative = Path::new("translations/cn/ocp.ftl");
+        write_resource(&manifest.join(relative), b"must not be used");
+
+        let error = RuntimeResourceResolver::new(executable.clone(), manifest)
+            .resolve(relative)
+            .unwrap_err();
+
+        assert_eq!(
+            error.attempted_paths(),
+            &[executable.parent().unwrap().join(relative)]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_resource_allows_windows_case_variants_of_the_same_real_target() {
+        let directory = TestDirectory::new("runtime-resource-windows-casing");
+        let manifest = directory.0.join("repo-lowercase");
+        let executable = manifest.join("target/debug/chess-material-studio.exe");
+        let relative = Path::new("translations/en-US/ocp.ftl");
+        let fallback = manifest.join(relative);
+        create_executable_directory(&executable);
+        write_resource(&fallback, b"fallback");
+        let differently_cased_executable =
+            PathBuf::from(executable.to_string_lossy().to_uppercase());
+
+        let resolver = RuntimeResourceResolver::new(differently_cased_executable, manifest);
+
+        assert_eq!(resolver.resolve(relative).unwrap(), fallback);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_resource_allows_symlinked_path_to_real_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new("runtime-resource-unix-symlink");
+        let manifest = directory.0.join("repo");
+        let target = manifest.join("target");
+        let linked_target = directory.0.join("linked-target");
+        let executable = linked_target.join("debug/chess-material-studio");
+        let relative = Path::new("translations/nl/ocp.ftl");
+        let fallback = manifest.join(relative);
+        std::fs::create_dir_all(target.join("debug")).expect("target/debug should be created");
+        symlink(&target, &linked_target).expect("target symlink should be created");
+        write_resource(&fallback, b"fallback");
+
+        let resolver = RuntimeResourceResolver::new(executable, manifest);
+
+        assert_eq!(resolver.resolve(relative).unwrap(), fallback);
+    }
+
+    #[test]
+    fn distributed_executable_never_borrows_manifest_resource() {
+        let directory = TestDirectory::new("runtime-resource-distribution");
+        let manifest = directory.0.join("repo");
+        let executable = directory.0.join("package/chess-material-studio.exe");
+        let relative = Path::new("translations/fr/ocp.ftl");
+        write_resource(&manifest.join(relative), b"must not be used");
+
+        let error = RuntimeResourceResolver::new(executable.clone(), manifest)
+            .resolve(relative)
+            .unwrap_err();
+
+        assert_eq!(error.relative_path(), relative);
+        assert_eq!(
+            error.attempted_paths(),
+            &[executable.parent().unwrap().join(relative)]
+        );
+    }
+
+    #[test]
+    fn missing_runtime_resource_reports_every_attempted_location() {
+        let directory = TestDirectory::new("runtime-resource-missing");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/debug/chess-material-studio.exe");
+        let relative = Path::new("pieces/cburnett/bQ.svg");
+        create_executable_directory(&executable);
+
+        let error = RuntimeResourceResolver::new(executable.clone(), manifest.clone())
+            .resolve(relative)
+            .unwrap_err();
+        let diagnostic = error.to_string();
+
+        assert_eq!(error.relative_path(), relative);
+        assert_eq!(
+            error.attempted_paths(),
+            &[
+                executable.parent().unwrap().join(relative),
+                manifest.join(relative),
+            ]
+        );
+        assert!(diagnostic.contains("pieces/cburnett/bQ.svg"));
+        for attempted in error.attempted_paths() {
+            assert!(diagnostic.contains(&attempted.display().to_string()));
+        }
+    }
+
+    #[test]
+    fn runtime_resource_preserves_unicode_pathbufs() {
+        let directory = TestDirectory::new("cms025b-á-é-棋");
+        let manifest = directory.0.join("repo-棋");
+        let executable = manifest.join("target/debug/chess-material-studio.exe");
+        let relative = Path::new("translations/es/ocp.ftl");
+        let fallback = manifest.join(relative);
+        create_executable_directory(&executable);
+        write_resource(&fallback, b"unicode");
+
+        let resolved = RuntimeResourceResolver::new(executable, manifest)
+            .resolve(relative)
+            .unwrap();
+
+        assert_eq!(resolved, fallback);
+    }
+
+    #[test]
+    fn non_not_found_primary_error_is_never_hidden_by_fallback() {
+        let directory = TestDirectory::new("runtime-resource-primary-error");
+        let manifest = directory.0.join("repo");
+        let executable = manifest.join("target/debug/chess-material-studio.exe");
+        let relative = Path::new("translations/en-US/ocp.ftl");
+        let primary = executable.parent().unwrap().join(relative);
+        std::fs::create_dir_all(&primary).expect("primary directory should be created");
+        write_resource(&manifest.join(relative), b"fallback must not be used");
+
+        let error = RuntimeResourceResolver::new(executable, manifest)
+            .resolve(relative)
+            .unwrap_err();
+
+        assert_eq!(error.attempted_paths(), &[primary]);
+        assert_ne!(error.io_error().kind(), std::io::ErrorKind::NotFound);
     }
 }

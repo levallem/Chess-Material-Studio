@@ -7,7 +7,7 @@ use iced::{Alignment, Element, Length, Task, Theme, alignment};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::config::{PIECES_DIRECTORY, SETTINGS_FILE, load_config, load_config_from_path};
+use crate::config::{SETTINGS_FILE, load_config, load_config_from_path};
 use crate::styles::{PieceTheme, btn_style_simple};
 use crate::{Message, Tab, config, db, lang, openings, styles};
 use chess::{PROMOTION_PIECES, Piece};
@@ -312,30 +312,38 @@ pub enum SearchBase {
 }
 
 pub fn gen_piece_vec(theme: &PieceTheme) -> Vec<Handle> {
-    let mut handles = Vec::<Handle>::with_capacity(5);
-    let theme_str = &theme.to_string();
-    // this first entry won't be used, it's there just to fill the vec, so we can index by the Piece
-    handles.insert(
-        0,
-        Handle::from_path(String::from(PIECES_DIRECTORY) + "cburnett/wP.svg"),
-    );
-    handles.insert(
-        Piece::Knight.to_index(),
-        Handle::from_path(String::from(PIECES_DIRECTORY) + theme_str + "/wN.svg"),
-    );
-    handles.insert(
-        Piece::Bishop.to_index(),
-        Handle::from_path(String::from(PIECES_DIRECTORY) + theme_str + "/wB.svg"),
-    );
-    handles.insert(
-        Piece::Rook.to_index(),
-        Handle::from_path(String::from(PIECES_DIRECTORY) + theme_str + "/wR.svg"),
-    );
-    handles.insert(
-        Piece::Queen.to_index(),
-        Handle::from_path(String::from(PIECES_DIRECTORY) + theme_str + "/wQ.svg"),
-    );
-    handles
+    promotion_piece_paths(theme)
+        .into_iter()
+        .map(Handle::from_path)
+        .collect()
+}
+
+fn promotion_piece_paths(theme: &PieceTheme) -> Vec<PathBuf> {
+    let resources = config::runtime_resources()
+        .unwrap_or_else(|error| panic!("Required runtime resources were not validated: {error}"));
+    promotion_piece_paths_with(theme, |relative| {
+        Ok::<PathBuf, std::convert::Infallible>(
+            resources
+                .path(relative)
+                .unwrap_or_else(|| panic!("Missing validated resource: {}", relative.display()))
+                .to_path_buf(),
+        )
+    })
+    .unwrap_or_else(|never| match never {})
+}
+
+fn promotion_piece_paths_with<F, E>(theme: &PieceTheme, mut resolve: F) -> Result<Vec<PathBuf>, E>
+where
+    F: FnMut(&Path) -> Result<PathBuf, E>,
+{
+    let theme = theme.to_string();
+    ["wP.svg", "wN.svg", "wB.svg", "wR.svg", "wQ.svg"]
+        .into_iter()
+        .map(|file_name| {
+            let relative = config::piece_resource_relative_path(theme.as_ref(), file_name.as_ref());
+            resolve(&relative)
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -1025,6 +1033,23 @@ mod tests {
     const FIXTURE: &str = include_str!("../tests/fixtures/lichess_puzzles_sample.csv");
 
     static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn promotion_piece_paths_use_the_shared_runtime_resource_policy() {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/cms025b-promotion");
+        let paths = promotion_piece_paths_with(&PieceTheme::Cburnett, |relative| {
+            Ok::<PathBuf, std::convert::Infallible>(base.join(relative))
+        })
+        .expect("injected resolver should succeed");
+
+        assert_eq!(paths.len(), 5);
+        assert!(paths.iter().all(|path| path.is_absolute()));
+        assert_eq!(paths[0], base.join("pieces/cburnett/wP.svg"));
+        assert_eq!(
+            paths[Piece::Queen.to_index()],
+            base.join("pieces/cburnett/wQ.svg")
+        );
+    }
 
     fn tmp_path(name: &str) -> std::path::PathBuf {
         let id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);

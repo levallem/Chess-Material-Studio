@@ -13,7 +13,7 @@ use iced::window::{self, Screenshot};
 use iced::{Alignment, Length, Task, alignment};
 use iced::{Element, Rectangle, Size, Subscription, Theme};
 use image::{DynamicImage, RgbaImage};
-use rfd::AsyncFileDialog;
+use rfd::{AsyncFileDialog, MessageDialog, MessageLevel};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -254,60 +254,41 @@ fn play_audio_if_available(playback: Option<&SoundPlayback>, cue: AudioCue) -> b
 }
 
 fn get_image_handles(theme: &PieceTheme) -> Vec<Handle> {
-    let mut handles = Vec::<Handle>::with_capacity(12);
-    let theme_str = &theme.to_string();
+    board_piece_paths(theme)
+        .into_iter()
+        .map(Handle::from_path)
+        .collect()
+}
 
-    handles.insert(
-        PieceWithColor::WhitePawn.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/wP.svg"),
-    );
-    handles.insert(
-        PieceWithColor::WhiteRook.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/wR.svg"),
-    );
-    handles.insert(
-        PieceWithColor::WhiteKnight.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/wN.svg"),
-    );
-    handles.insert(
-        PieceWithColor::WhiteBishop.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/wB.svg"),
-    );
-    handles.insert(
-        PieceWithColor::WhiteQueen.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/wQ.svg"),
-    );
-    handles.insert(
-        PieceWithColor::WhiteKing.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/wK.svg"),
-    );
+fn board_piece_paths(theme: &PieceTheme) -> Vec<PathBuf> {
+    let resources = config::runtime_resources()
+        .unwrap_or_else(|error| panic!("Required runtime resources were not validated: {error}"));
+    board_piece_paths_with(theme, |relative| {
+        Ok::<PathBuf, std::convert::Infallible>(
+            resources
+                .path(relative)
+                .unwrap_or_else(|| panic!("Missing validated resource: {}", relative.display()))
+                .to_path_buf(),
+        )
+    })
+    .unwrap_or_else(|never| match never {})
+}
 
-    handles.insert(
-        PieceWithColor::BlackPawn.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/bP.svg"),
-    );
-    handles.insert(
-        PieceWithColor::BlackRook.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/bR.svg"),
-    );
-    handles.insert(
-        PieceWithColor::BlackKnight.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/bN.svg"),
-    );
-    handles.insert(
-        PieceWithColor::BlackBishop.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/bB.svg"),
-    );
-    handles.insert(
-        PieceWithColor::BlackQueen.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/bQ.svg"),
-    );
-    handles.insert(
-        PieceWithColor::BlackKing.index(),
-        Handle::from_path(String::from("pieces/") + theme_str + "/bK.svg"),
-    );
-
-    handles
+fn board_piece_paths_with<F, E>(theme: &PieceTheme, mut resolve: F) -> Result<Vec<PathBuf>, E>
+where
+    F: FnMut(&Path) -> Result<PathBuf, E>,
+{
+    let theme = theme.to_string();
+    [
+        "wP.svg", "wR.svg", "wN.svg", "wB.svg", "wQ.svg", "wK.svg", "bP.svg", "bR.svg", "bN.svg",
+        "bB.svg", "bQ.svg", "bK.svg",
+    ]
+    .into_iter()
+    .map(|file_name| {
+        let relative = config::piece_resource_relative_path(theme.as_ref(), file_name.as_ref());
+        resolve(&relative)
+    })
+    .collect()
 }
 
 fn gen_board_button_ids() -> Vec<GenericId> {
@@ -1754,6 +1735,31 @@ impl OfflinePuzzles {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_runtime_resource_preflight_accepts_checkout_assets() {
+        validate_required_runtime_resources().expect("checkout runtime resources should be valid");
+    }
+
+    #[test]
+    fn board_piece_paths_are_resolved_without_using_relative_cwd_paths() {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/cms025b-board");
+        let paths = board_piece_paths_with(&PieceTheme::Cburnett, |relative| {
+            Ok::<PathBuf, std::convert::Infallible>(base.join(relative))
+        })
+        .expect("injected resolver should succeed");
+
+        assert_eq!(paths.len(), 12);
+        assert!(paths.iter().all(|path| path.is_absolute()));
+        assert_eq!(
+            paths[PieceWithColor::WhitePawn.index()],
+            base.join("pieces/cburnett/wP.svg")
+        );
+        assert_eq!(
+            paths[PieceWithColor::BlackKing.index()],
+            base.join("pieces/cburnett/bK.svg")
+        );
+    }
 
     #[test]
     fn synthesized_audio_cues_have_distinct_specs() {
@@ -4374,7 +4380,47 @@ trait Tab {
     fn content(&self) -> Element<'_, Self::Message>;
 }
 
+fn validate_required_runtime_resources() -> Result<(), String> {
+    lang::validate_required_translations().map_err(ToString::to_string)?;
+    let resources = config::runtime_resources().map_err(ToString::to_string)?;
+    for relative in config::REQUIRED_PIECE_RESOURCES {
+        let relative = Path::new(relative);
+        let resolved = resources.path(relative).ok_or_else(|| {
+            format!(
+                "Resource:\n{}\n\nError:\nvalidated runtime resource is missing from the catalog",
+                relative.display()
+            )
+        })?;
+        std::fs::read(resolved).map_err(|error| {
+            format!(
+                "Resource:\n{}\n\nAttempted location:\n{}\n\nError:\nread: {}",
+                relative.display(),
+                resolved.display(),
+                error
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn report_startup_resource_error(diagnostic: &str) {
+    let message = format!(
+        "Chess Material Studio cannot start because a required runtime resource is unavailable.\n\n{diagnostic}"
+    );
+    eprintln!("{message}");
+    let _ = MessageDialog::new()
+        .set_title("Chess Material Studio startup error")
+        .set_description(&message)
+        .set_level(MessageLevel::Error)
+        .show();
+}
+
 fn main() -> iced::Result {
+    if let Err(error) = validate_required_runtime_resources() {
+        report_startup_resource_error(&error);
+        std::process::exit(1);
+    }
+
     let window_settings = iced::window::Settings {
         size: Size {
             width: config::SETTINGS.window_width, //(config::SETTINGS.square_size * 8) as u32 + 450,
