@@ -1031,6 +1031,8 @@ impl OfflinePuzzles {
                     self.puzzle_status = error;
                     return Task::none();
                 }
+                self.next_search_generation();
+                self.search_tab.show_searching_msg = false;
                 self.from_square = None;
                 if self.engine_state != EngineStatus::TurnedOff
                     && self.engine_sender.is_some()
@@ -3537,6 +3539,203 @@ mod tests {
             generation: current_generation,
             result: Ok(Vec::new()),
         });
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    fn pending_search_then_project_batch(
+        favorites: bool,
+    ) -> (OfflinePuzzles, TempProjectDb, TempSettingsFile, u64) {
+        let (mut app, project) = app_with_normal_export_review_context();
+        let settings = isolate_search_settings(&mut app, "project-search-invalidation");
+        if favorites {
+            let _ = app.update(Message::Search(SearchMesssage::SelectBase(
+                SearchBase::Favorites,
+            )));
+        }
+        let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
+        assert!(app.search_tab.show_searching_msg);
+        let generation = app.search_generation;
+        let _ = app.update(Message::LoadProjectPuzzles(vec![navigation_puzzle(
+            "normal-export-current",
+        )]));
+        assert_ne!(app.search_generation, generation);
+        assert!(!app.search_tab.show_searching_msg);
+        assert_current_review(
+            &app,
+            "normal-export-current",
+            ProjectPuzzleDecision::Selected,
+        );
+        (app, project, settings, generation)
+    }
+
+    #[test]
+    fn stale_normal_valid_result_cannot_replace_project_batch() {
+        let (mut app, _project, _settings, generation) = pending_search_then_project_batch(false);
+        let expected = normal_export_state(&app);
+        let status = app.puzzle_status.clone();
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation,
+            result: Ok(vec![navigation_puzzle("stale-normal-valid")]),
+        });
+
+        assert_normal_export_state_preserved(&app, &expected, "stale normal valid");
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert_eq!(app.puzzle_status, status);
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn stale_normal_empty_result_cannot_clear_project_batch() {
+        let (mut app, _project, _settings, generation) = pending_search_then_project_batch(false);
+        let expected = normal_export_state(&app);
+        let status = app.puzzle_status.clone();
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation,
+            result: Ok(Vec::new()),
+        });
+
+        assert_normal_export_state_preserved(&app, &expected, "stale normal empty");
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert_eq!(app.puzzle_status, status);
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn stale_normal_error_cannot_change_project_batch() {
+        let (mut app, _project, _settings, generation) = pending_search_then_project_batch(false);
+        let expected = normal_export_state(&app);
+        let status = app.puzzle_status.clone();
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation,
+            result: Err("stale normal failure".into()),
+        });
+
+        assert_normal_export_state_preserved(&app, &expected, "stale normal error");
+        assert_eq!(app.puzzle_status, status);
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn stale_favorites_valid_result_cannot_replace_project_batch() {
+        let (mut app, _project, _settings, generation) = pending_search_then_project_batch(true);
+        let expected = normal_export_state(&app);
+        let status = app.puzzle_status.clone();
+
+        let _ = app.update(Message::LoadFavorites {
+            generation,
+            result: Ok(vec![navigation_puzzle("stale-favorites-valid")]),
+        });
+
+        assert_normal_export_state_preserved(&app, &expected, "stale favorites valid");
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert_eq!(app.puzzle_status, status);
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn stale_favorites_empty_result_cannot_clear_project_batch() {
+        let (mut app, _project, _settings, generation) = pending_search_then_project_batch(true);
+        let expected = normal_export_state(&app);
+        let status = app.puzzle_status.clone();
+
+        let _ = app.update(Message::LoadFavorites {
+            generation,
+            result: Ok(Vec::new()),
+        });
+
+        assert_normal_export_state_preserved(&app, &expected, "stale favorites empty");
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
+        assert_eq!(app.puzzle_status, status);
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn stale_favorites_error_cannot_change_project_batch() {
+        let (mut app, _project, _settings, generation) = pending_search_then_project_batch(true);
+        let expected = normal_export_state(&app);
+        let status = app.puzzle_status.clone();
+
+        let _ = app.update(Message::LoadFavorites {
+            generation,
+            result: Err("stale favorites failure".into()),
+        });
+
+        assert_normal_export_state_preserved(&app, &expected, "stale favorites error");
+        assert_eq!(app.puzzle_status, status);
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn empty_project_batch_keeps_pending_search_current() {
+        let mut app = app_with_current_puzzle("existing-before-empty-project");
+        let generation = app.next_search_generation();
+        app.search_tab.show_searching_msg = true;
+
+        let _ = app.update(Message::LoadProjectPuzzles(Vec::new()));
+
+        assert_eq!(app.search_generation, generation);
+        assert!(app.search_tab.show_searching_msg);
+        let _ = app.update(Message::LoadPuzzle {
+            generation,
+            result: Ok(vec![navigation_puzzle("accepted-after-empty-project")]),
+        });
+        assert_eq!(
+            app.puzzle_tab.puzzles[0].puzzle_id,
+            "accepted-after-empty-project"
+        );
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn invalid_project_batch_keeps_pending_search_current() {
+        let mut app = app_with_current_puzzle("existing-before-invalid-project");
+        let generation = app.next_search_generation();
+        app.search_tab.show_searching_msg = true;
+        let mut invalid = navigation_puzzle("invalid-project-batch");
+        invalid.fen = "invalid FEN".into();
+
+        let _ = app.update(Message::LoadProjectPuzzles(vec![invalid]));
+
+        assert_eq!(app.search_generation, generation);
+        assert!(app.search_tab.show_searching_msg);
+        assert_eq!(
+            app.puzzle_tab.puzzles[0].puzzle_id,
+            "existing-before-invalid-project"
+        );
+        let _ = app.update(Message::LoadPuzzle {
+            generation,
+            result: Ok(vec![navigation_puzzle("accepted-after-invalid-project")]),
+        });
+        assert_eq!(
+            app.puzzle_tab.puzzles[0].puzzle_id,
+            "accepted-after-invalid-project"
+        );
+        assert!(!app.search_tab.show_searching_msg);
+    }
+
+    #[test]
+    fn search_started_after_project_batch_can_replace_it() {
+        let (mut app, _project, _settings, old_generation) =
+            pending_search_then_project_batch(false);
+        let project_generation = app.search_generation;
+        let _ = app.update(Message::Search(SearchMesssage::ClickSearch));
+        let new_generation = app.search_generation;
+        assert_ne!(new_generation, old_generation);
+        assert_ne!(new_generation, project_generation);
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation: new_generation,
+            result: Ok(vec![navigation_puzzle("new-search-after-project")]),
+        });
+
+        assert_eq!(
+            app.puzzle_tab.puzzles[0].puzzle_id,
+            "new-search-after-project"
+        );
+        assert_eq!(app.puzzle_tab.game_status, GameStatus::Playing);
         assert!(!app.search_tab.show_searching_msg);
     }
 
