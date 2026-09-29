@@ -1938,6 +1938,28 @@ mod tests {
     }
 
     #[test]
+    fn pgn_terminal_only_result_survives_snapshot_sqlite_round_trip() {
+        let project = create_test_project("pgn-terminal-result-round-trip");
+        let chapter = create_chapter(project.path(), "PGN", None).unwrap();
+        let snapshot = snapshot_at("1. e4 e5 1-0", 2, 0);
+        assert_eq!(snapshot.headers.result.as_deref(), Some("1-0"));
+
+        assert_eq!(
+            add_pgn_position_snapshot(project.path(), chapter.id, &snapshot).unwrap(),
+            PgnPositionSnapshotAddResult::Inserted
+        );
+        let restored = list_pgn_position_snapshots_for_chapter(project.path(), chapter.id).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].headers.result.as_deref(), Some("1-0"));
+        assert_eq!(restored[0], snapshot);
+        let reopened = PgnReviewSession::from_snapshot(&restored[0]).unwrap();
+        assert_eq!(
+            reopened.current_game().headers.result.as_deref(),
+            Some("1-0")
+        );
+    }
+
+    #[test]
     fn pgn_snapshot_duplicate_is_idempotent_when_only_source_game_index_changes() {
         let project = create_test_project("pgn-snapshot-idempotent");
         let chapter = create_chapter(project.path(), "PGN", None).unwrap();

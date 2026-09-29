@@ -82,6 +82,16 @@ pub fn parse_pgn(input: &str) -> Result<Vec<ImportedGame>, String> {
                     if let Some(builder) = current.as_mut()
                         && builder.has_content
                     {
+                        if let Some(header_result) = builder.headers.result.as_deref() {
+                            if header_result != token {
+                                return Err(format!(
+                                    "PGN result mismatch in game {}: Result header '{header_result}' and movetext terminal result '{token}' do not match",
+                                    games.len() + 1
+                                ));
+                            }
+                        } else {
+                            builder.headers.result = Some(token.to_string());
+                        }
                         builder.saw_result = true;
                     }
                     continue;
@@ -541,6 +551,38 @@ mod tests {
         assert_eq!(games.len(), 2);
         assert_eq!(games[0].moves.len(), 2);
         assert_eq!(games[1].moves.len(), 2);
+        assert_eq!(games[0].headers.result.as_deref(), Some("1-0"));
+        assert_eq!(games[1].headers.result.as_deref(), Some("0-1"));
+        assert_eq!(games[0].moves[0].to_string(), "e2e4");
+        assert_eq!(games[1].moves[0].to_string(), "d2d4");
+    }
+
+    #[test]
+    fn preserves_all_terminal_results_without_headers() {
+        for result in ["1-0", "0-1", "1/2-1/2", "*"] {
+            let game = parse_one(&format!("1. e4 e5 {result}"));
+            assert_eq!(game.headers.result.as_deref(), Some(result));
+        }
+    }
+
+    #[test]
+    fn accepts_matching_result_header_and_terminal() {
+        for result in ["1-0", "*"] {
+            let game = parse_one(&format!("[Result \"{result}\"]\n\n1. e4 e5 {result}"));
+            assert_eq!(game.headers.result.as_deref(), Some(result));
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_result_header_and_terminal() {
+        for (header, terminal) in [("0-1", "1-0"), ("*", "1-0"), ("1-0", "*")] {
+            let error = parse_pgn(&format!("[Result \"{header}\"]\n\n1. e4 e5 {terminal}"))
+                .expect_err("contradictory results must fail");
+            assert!(error.contains("Result header"), "{error}");
+            assert!(error.contains("terminal"), "{error}");
+            assert!(error.contains(header), "{error}");
+            assert!(error.contains(terminal), "{error}");
+        }
     }
 
     #[test]

@@ -481,6 +481,15 @@ mod tests {
     }
 
     #[test]
+    fn captures_terminal_only_result_in_snapshot() {
+        let games = parsed_games("1. e4 e5 1-0");
+        let session = PgnReviewSession::new(games).expect("parsed game must be coherent");
+        let snapshot = session.capture_current_snapshot();
+
+        assert_eq!(snapshot.headers.result.as_deref(), Some("1-0"));
+    }
+
+    #[test]
     fn captures_a_setup_fen_snapshot_at_the_final_ply() {
         let initial_fen = "8/8/8/8/8/8/8/K6k w - - 0 1";
         let games = parsed_games(&format!(
