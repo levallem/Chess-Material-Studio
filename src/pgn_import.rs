@@ -78,29 +78,27 @@ pub fn parse_pgn(input: &str) -> Result<Vec<ImportedGame>, String> {
                     continue;
                 }
 
-                if is_result(token) {
-                    if let Some(builder) = current.as_mut()
-                        && builder.has_content
-                    {
-                        if let Some(header_result) = builder.headers.result.as_deref() {
-                            if header_result != token {
-                                return Err(format!(
-                                    "PGN result mismatch in game {}: Result header '{header_result}' and movetext terminal result '{token}' do not match",
-                                    games.len() + 1
-                                ));
-                            }
-                        } else {
-                            builder.headers.result = Some(token.to_string());
-                        }
-                        builder.saw_result = true;
-                    }
-                    continue;
-                }
-
                 if current.as_ref().is_some_and(|builder| builder.saw_result)
                     && let Some(completed_game) = current.take()
                 {
                     finish_game(completed_game, games.len() + 1, &mut games)?;
+                }
+
+                if is_result(token) {
+                    let builder = current.get_or_insert_with(GameBuilder::default);
+                    builder.has_content = true;
+                    if let Some(header_result) = builder.headers.result.as_deref() {
+                        if header_result != token {
+                            return Err(format!(
+                                "PGN result mismatch in game {}: Result header '{header_result}' and movetext terminal result '{token}' do not match",
+                                games.len() + 1
+                            ));
+                        }
+                    } else {
+                        builder.headers.result = Some(token.to_string());
+                    }
+                    builder.saw_result = true;
+                    continue;
                 }
 
                 let builder = current.get_or_insert_with(GameBuilder::default);
@@ -563,6 +561,31 @@ mod tests {
             let game = parse_one(&format!("1. e4 e5 {result}"));
             assert_eq!(game.headers.result.as_deref(), Some(result));
         }
+    }
+
+    #[test]
+    fn preserves_headerless_result_only_games() {
+        for result in ["1-0", "0-1", "1/2-1/2", "*"] {
+            let game = parse_one(result);
+            assert!(game.moves.is_empty());
+            assert_eq!(game.positions, vec![Board::default()]);
+            assert_eq!(game.headers.result.as_deref(), Some(result));
+        }
+    }
+
+    #[test]
+    fn separates_consecutive_result_only_games() {
+        let games = parse_pgn("1-0\n\n0-1").expect("result-only games must parse");
+
+        assert_eq!(games.len(), 2);
+        assert!(games.iter().all(|game| game.moves.is_empty()));
+        assert!(
+            games
+                .iter()
+                .all(|game| game.positions == vec![Board::default()])
+        );
+        assert_eq!(games[0].headers.result.as_deref(), Some("1-0"));
+        assert_eq!(games[1].headers.result.as_deref(), Some("0-1"));
     }
 
     #[test]
