@@ -919,21 +919,35 @@ fn editorial_diagram_pages(puzzle_count: usize) -> usize {
     puzzle_count.div_ceil(PDF_PUZZLES_PER_PAGE)
 }
 
-fn historical_pdf_plan(puzzle_count: usize, number_of_pages: i32) -> (usize, usize) {
-    let capacity = (PDF_PUZZLES_PER_PAGE as i32 * number_of_pages) as usize;
+fn historical_pdf_plan(
+    puzzle_count: usize,
+    number_of_pages: i32,
+) -> Result<(usize, usize), String> {
+    if number_of_pages <= 0 {
+        return Err("PDF page limit must be positive".to_string());
+    }
+
+    let capacity = (PDF_PUZZLES_PER_PAGE as i32)
+        .checked_mul(number_of_pages)
+        .ok_or_else(|| "PDF page limit is too large".to_string())?;
+    let capacity = capacity as usize;
+    if capacity == 0 || puzzle_count == 0 {
+        return Err("PDF page limit selects no puzzles".to_string());
+    }
+
     if capacity > puzzle_count {
-        (puzzle_count, editorial_diagram_pages(puzzle_count))
+        Ok((puzzle_count, editorial_diagram_pages(puzzle_count)))
     } else {
-        (capacity, number_of_pages as usize)
+        Ok((capacity, number_of_pages as usize))
     }
 }
 
 fn historical_pdf_prefix(
     puzzles: &[config::Puzzle],
     number_of_pages: i32,
-) -> (&[config::Puzzle], usize) {
-    let (puzzle_count, diagram_pages) = historical_pdf_plan(puzzles.len(), number_of_pages);
-    (&puzzles[..puzzle_count], diagram_pages)
+) -> Result<(&[config::Puzzle], usize), String> {
+    let (puzzle_count, diagram_pages) = historical_pdf_plan(puzzles.len(), number_of_pages)?;
+    Ok((&puzzles[..puzzle_count], diagram_pages))
 }
 
 const PROJECT_PDF_HEADING_LEFT: i32 = 50;
@@ -1126,7 +1140,7 @@ pub fn to_pdf(
     lang: &lang::Language,
     path: String,
 ) -> Result<(), String> {
-    let (puzzle_prefix, diagram_pages) = historical_pdf_prefix(puzzles, number_of_pages);
+    let (puzzle_prefix, diagram_pages) = historical_pdf_prefix(puzzles, number_of_pages)?;
     write_pdf(puzzle_prefix, diagram_pages, lang, Path::new(&path))
 }
 
@@ -3911,7 +3925,7 @@ mod tests {
         for (index, puzzle) in puzzles.iter_mut().enumerate() {
             puzzle.puzzle_id = format!("ordered-{index}");
         }
-        let (prefix, pages) = historical_pdf_prefix(&puzzles[..7], 1);
+        let (prefix, pages) = historical_pdf_prefix(&puzzles[..7], 1).unwrap();
         assert_eq!(pages, 1);
         assert_eq!(prefix.len(), 6);
         assert_eq!(
@@ -3944,6 +3958,65 @@ mod tests {
             2,
             "one diagram page plus one solution page"
         );
+    }
+
+    #[test]
+    fn historical_pdf_rejects_invalid_page_limits_before_touching_destination() {
+        let puzzles = vec![fixture_puzzle_00010(); 7];
+
+        for (limit, name) in [(0, "zero"), (-1, "negative")] {
+            let path = pdf_test_path(&format!("historical-invalid-{name}-missing"));
+            let _ = std::fs::remove_file(&path);
+            let result = to_pdf(
+                &puzzles,
+                limit,
+                &lang::Language::English,
+                path.display().to_string(),
+            );
+            assert!(result.is_err());
+            assert!(
+                !path.exists(),
+                "invalid limit {limit} must not create a missing destination"
+            );
+
+            let sentinel_path = pdf_test_path(&format!("historical-invalid-{name}-sentinel"));
+            let sentinel = b"cms-025e-sentinel";
+            std::fs::write(&sentinel_path, sentinel).unwrap();
+            let result = to_pdf(
+                &puzzles,
+                limit,
+                &lang::Language::English,
+                sentinel_path.display().to_string(),
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                std::fs::read(&sentinel_path).unwrap(),
+                sentinel,
+                "invalid limit {limit} must not modify an existing destination"
+            );
+            let _ = std::fs::remove_file(&sentinel_path);
+        }
+    }
+
+    #[test]
+    fn historical_pdf_rejects_overflowing_page_limit_without_panicking() {
+        let puzzles = vec![fixture_puzzle_00010(); 7];
+        let path = pdf_test_path("historical-overflowing-limit");
+        let result = std::panic::catch_unwind(|| {
+            to_pdf(
+                &puzzles,
+                i32::MAX,
+                &lang::Language::English,
+                path.display().to_string(),
+            )
+        });
+
+        assert!(
+            result.is_ok(),
+            "overflowing limit must return Err, not panic"
+        );
+        assert!(result.unwrap().is_err());
+        assert!(!path.exists());
     }
 
     #[test]
