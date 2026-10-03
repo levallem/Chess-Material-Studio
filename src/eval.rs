@@ -4,17 +4,15 @@ use iced::futures::sink::SinkExt;
 use iced::stream;
 
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, Command};
 use tokio::sync::mpsc::{self, Receiver, error::TryRecvError};
 
+use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::time::{Instant, timeout};
 
 use crate::Message;
-
-pub const STOP_COMMAND: &str = "STOP";
-pub const EXIT_APP_COMMAND: &str = "EXIT";
 
 /// Extracts the relevant fields from one UCI `info` line without trusting
 /// engine stdout. `info string` payloads are free-form text, not UCI data.
@@ -59,7 +57,19 @@ fn parse_uci_info_line(line: &str) -> (Option<String>, Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_uci_info_line;
+    use super::{
+        Engine, EngineRequest, parse_uci_info_line, read_analysis_output,
+        wait_for_running_search_boundary,
+    };
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    fn subscription_identity_hash(engine: &Engine) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        engine.hash(&mut hasher);
+        hasher.finish()
+    }
 
     #[test]
     fn parses_positive_and_negative_centipawn_scores() {
@@ -157,6 +167,115 @@ mod tests {
             (Some(String::from("0.35")), Some(String::from("e2e4")))
         );
     }
+
+    #[test]
+    fn engine_subscription_identity_ignores_current_request() {
+        let mut first = Engine::new(
+            Some(String::from("stockfish-a")),
+            String::from("movetime 100"),
+            String::from("8/8/8/8/8/8/8/K6k w - - 0 1"),
+        );
+        let mut second = first.clone();
+        second.current_request =
+            EngineRequest::new(42, String::from("8/8/8/8/8/8/P7/K6k w - - 0 1"));
+
+        assert_eq!(
+            subscription_identity_hash(&first),
+            subscription_identity_hash(&second)
+        );
+
+        first.engine_path = String::from("stockfish-b");
+        assert_ne!(
+            subscription_identity_hash(&first),
+            subscription_identity_hash(&second)
+        );
+        first.engine_path = second.engine_path.clone();
+        first.search_up_to = String::from("depth 8");
+        assert_ne!(
+            subscription_identity_hash(&first),
+            subscription_identity_hash(&second)
+        );
+    }
+
+    #[test]
+    fn active_search_boundary_discards_late_old_output_before_new_search_output() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime should start");
+
+        runtime.block_on(async {
+            let stdout = concat!(
+                "info depth 20 score cp 125 pv e2e4\n",
+                "bestmove e2e4\n",
+                "info depth 1 score cp -20 pv e7e5\n",
+            );
+            let (mut writer, reader) = tokio::io::duplex(1024);
+            writer
+                .write_all(stdout.as_bytes())
+                .await
+                .expect("synthetic engine output should be written");
+            let mut reader = BufReader::new(reader).lines();
+            let mut active_search_running = true;
+
+            wait_for_running_search_boundary(&mut reader, &mut active_search_running)
+                .await
+                .expect("old search should end at bestmove");
+            assert!(!active_search_running);
+
+            let mut eval = None;
+            let mut best_move = None;
+            let completed = read_analysis_output(&mut reader, &mut eval, &mut best_move)
+                .await
+                .expect("new search output should be readable");
+
+            assert!(!completed);
+            assert_eq!(eval, Some(String::from("-0.20")));
+            assert_eq!(best_move, Some(String::from("e7e5")));
+        });
+    }
+
+    #[test]
+    fn completed_search_does_not_wait_for_a_second_bestmove_before_new_output() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime should start");
+
+        runtime.block_on(async {
+            let stdout = concat!("bestmove e2e4\n", "info depth 1 score cp -20 pv e7e5\n",);
+            let (mut writer, reader) = tokio::io::duplex(1024);
+            writer
+                .write_all(stdout.as_bytes())
+                .await
+                .expect("synthetic engine output should be written");
+            let mut reader = BufReader::new(reader).lines();
+            let mut active_search_running = true;
+
+            let mut eval = None;
+            let mut best_move = None;
+            let completed = read_analysis_output(&mut reader, &mut eval, &mut best_move)
+                .await
+                .expect("natural bestmove should be consumed");
+            if completed {
+                active_search_running = false;
+            }
+
+            wait_for_running_search_boundary(&mut reader, &mut active_search_running)
+                .await
+                .expect("completed search should not wait for another bestmove");
+
+            let mut eval = None;
+            let mut best_move = None;
+            let completed = read_analysis_output(&mut reader, &mut eval, &mut best_move)
+                .await
+                .expect("new search output should still be readable");
+
+            assert!(!completed);
+            assert_eq!(eval, Some(String::from("-0.20")));
+            assert_eq!(best_move, Some(String::from("e7e5")));
+        });
+    }
 }
 #[allow(
     clippy::large_enum_variant,
@@ -166,9 +285,11 @@ pub enum EngineState {
     Start,
     Thinking(
         Child,
-        Lines<BufReader<ChildStdout>>,
+        Lines<BufReader<tokio::process::ChildStdout>>,
         String,
-        Receiver<String>,
+        Receiver<EngineCommand>,
+        EngineRequest,
+        bool,
     ),
 }
 
@@ -178,11 +299,44 @@ pub enum EngineStatus {
     TurnedOff,
 }
 
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct EngineRequest {
+    pub generation: u64,
+    pub fen: String,
+}
+
+impl EngineRequest {
+    pub fn new(generation: u64, fen: String) -> Self {
+        Self { generation, fen }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EngineUpdate {
+    pub generation: u64,
+    pub eval: Option<String>,
+    pub best_move: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum EngineCommand {
+    Search(EngineRequest),
+    Stop,
+    Exit,
+}
+
+#[derive(Debug, Clone)]
 pub struct Engine {
     pub engine_path: String,
     pub search_up_to: String,
-    pub position: String,
+    pub current_request: EngineRequest,
+}
+
+impl Hash for Engine {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.engine_path.hash(state);
+        self.search_up_to.hash(state);
+    }
 }
 
 impl Engine {
@@ -190,7 +344,7 @@ impl Engine {
         Self {
             engine_path: path.unwrap_or_default(),
             search_up_to: limit,
-            position,
+            current_request: EngineRequest::new(0, position),
         }
     }
 
@@ -231,8 +385,10 @@ impl Engine {
                                 return;
                             }
                         };
-                        let pos =
-                            String::from("position fen ") + &engine.position + &String::from("\n");
+                        let active_request = engine.current_request.clone();
+                        let pos = String::from("position fen ")
+                            + &active_request.fen
+                            + &String::from("\n");
                         let limit = String::from("go ") + &engine.search_up_to + "\n";
                         let stdout = match child.stdout.take() {
                             Some(stdout) => stdout,
@@ -292,7 +448,14 @@ impl Engine {
                             return;
                         }
 
-                        if output.send(Message::EngineReady(sender)).await.is_err() {
+                        if output
+                            .send(Message::EngineReady {
+                                generation: active_request.generation,
+                                sender,
+                            })
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                         state = EngineState::Thinking(
@@ -300,10 +463,19 @@ impl Engine {
                             reader,
                             engine.search_up_to.to_string(),
                             receiver,
+                            active_request,
+                            true,
                         );
                         continue;
                     }
-                    EngineState::Thinking(child, reader, search_up_to, receiver) => {
+                    EngineState::Thinking(
+                        child,
+                        reader,
+                        search_up_to,
+                        receiver,
+                        active_request,
+                        active_search_running,
+                    ) => {
                         let msg = match receiver.try_recv() {
                             Ok(message) => Some(message),
                             Err(TryRecvError::Empty) => None,
@@ -327,11 +499,12 @@ impl Engine {
                             }
                         };
                         if let Some(msg) = msg {
-                            if msg == STOP_COMMAND || msg == EXIT_APP_COMMAND {
+                            if matches!(msg, EngineCommand::Stop | EngineCommand::Exit) {
+                                let exit_requested = matches!(msg, EngineCommand::Exit);
                                 match shutdown_engine(child).await {
                                     Ok(()) => {
                                         if output
-                                            .send(Message::EngineStopped(msg == EXIT_APP_COMMAND))
+                                            .send(Message::EngineStopped(exit_requested))
                                             .await
                                             .is_err()
                                         {
@@ -342,7 +515,7 @@ impl Engine {
                                         if output
                                             .send(Message::EngineFailed {
                                                 reason,
-                                                exit_requested: msg == EXIT_APP_COMMAND,
+                                                exit_requested,
                                             })
                                             .await
                                             .is_err()
@@ -352,17 +525,22 @@ impl Engine {
                                     }
                                 }
                                 return;
-                            } else {
-                                let pos =
-                                    String::from("position fen ") + &msg + &String::from("\n");
+                            } else if let EngineCommand::Search(request) = msg {
+                                let pos = String::from("position fen ")
+                                    + &request.fen
+                                    + &String::from("\n");
                                 let limit = String::from("go ") + search_up_to + "\n";
                                 let position_result = async {
-                                    write_engine_command(
-                                        child,
-                                        b"stop\n",
-                                        "stopping previous analysis",
-                                    )
-                                    .await?;
+                                    if *active_search_running {
+                                        write_engine_command(
+                                            child,
+                                            b"stop\n",
+                                            "stopping previous analysis",
+                                        )
+                                        .await?;
+                                    }
+                                    wait_for_running_search_boundary(reader, active_search_running)
+                                        .await?;
                                     write_engine_command(child, pos.as_bytes(), "sending position")
                                         .await?;
                                     write_engine_command(
@@ -370,7 +548,10 @@ impl Engine {
                                         limit.as_bytes(),
                                         "starting analysis",
                                     )
-                                    .await
+                                    .await?;
+                                    *active_request = request;
+                                    *active_search_running = true;
+                                    Ok::<(), String>(())
                                 }
                                 .await;
                                 if let Err(reason) = position_result {
@@ -394,21 +575,31 @@ impl Engine {
 
                         let read_result =
                             read_analysis_output(reader, &mut eval, &mut best_move).await;
-                        if let Err(reason) = read_result {
-                            let reason = with_shutdown_result(child, reason).await;
-                            if output
-                                .send(Message::EngineFailed {
-                                    reason,
-                                    exit_requested: false,
-                                })
-                                .await
-                                .is_err()
-                            {
+                        let search_completed = match read_result {
+                            Ok(search_completed) => search_completed,
+                            Err(reason) => {
+                                let reason = with_shutdown_result(child, reason).await;
+                                if output
+                                    .send(Message::EngineFailed {
+                                        reason,
+                                        exit_requested: false,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
                                 return;
                             }
-                            return;
+                        };
+                        if search_completed {
+                            *active_search_running = false;
                         }
-                        match output.try_send(Message::UpdateEval((eval, best_move))) {
+                        match output.try_send(Message::UpdateEval(EngineUpdate {
+                            generation: active_request.generation,
+                            eval,
+                            best_move,
+                        })) {
                             Ok(()) => {}
                             Err(error) if error.is_full() => {}
                             Err(_) => return,
@@ -436,7 +627,7 @@ async fn write_engine_command(
 }
 
 async fn wait_for_token(
-    reader: &mut Lines<BufReader<ChildStdout>>,
+    reader: &mut Lines<BufReader<impl AsyncRead + Unpin>>,
     token: &str,
     token_name: &str,
 ) -> Result<(), String> {
@@ -460,22 +651,71 @@ async fn wait_for_token(
 
 const MAX_ANALYSIS_LINES_PER_CYCLE: usize = 32;
 const ANALYSIS_READ_BUDGET: Duration = Duration::from_millis(50);
+const STOPPED_SEARCH_BOUNDARY_TIMEOUT: Duration = Duration::from_millis(1000);
+
+async fn wait_for_stopped_search_boundary(
+    reader: &mut Lines<BufReader<impl AsyncRead + Unpin>>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + STOPPED_SEARCH_BOUNDARY_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(String::from(
+                "timed out waiting for stopped search bestmove",
+            ));
+        }
+        match timeout(remaining, reader.next_line()).await {
+            Err(_) => {
+                return Err(String::from(
+                    "timed out waiting for stopped search bestmove",
+                ));
+            }
+            Ok(Ok(None)) => {
+                return Err(String::from(
+                    "engine stdout closed before stopped search bestmove",
+                ));
+            }
+            Ok(Ok(Some(line))) if line.starts_with("bestmove") => return Ok(()),
+            Ok(Ok(Some(_))) => {}
+            Ok(Err(error)) => {
+                return Err(format!(
+                    "failed while waiting for stopped search bestmove: {error}"
+                ));
+            }
+        }
+    }
+}
+
+async fn wait_for_running_search_boundary(
+    reader: &mut Lines<BufReader<impl AsyncRead + Unpin>>,
+    active_search_running: &mut bool,
+) -> Result<(), String> {
+    if !*active_search_running {
+        return Ok(());
+    }
+    wait_for_stopped_search_boundary(reader).await?;
+    *active_search_running = false;
+    Ok(())
+}
 
 async fn read_analysis_output(
-    reader: &mut Lines<BufReader<ChildStdout>>,
+    reader: &mut Lines<BufReader<impl AsyncRead + Unpin>>,
     eval: &mut Option<String>,
     best_move: &mut Option<String>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let deadline = Instant::now() + ANALYSIS_READ_BUDGET;
     for _ in 0..MAX_ANALYSIS_LINES_PER_CYCLE {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Ok(());
+            return Ok(false);
         }
         match timeout(remaining, reader.next_line()).await {
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(false),
             Ok(Ok(None)) => return Err(String::from("engine stdout closed during analysis")),
             Ok(Ok(Some(line))) => {
+                if line.starts_with("bestmove") {
+                    return Ok(true);
+                }
                 let (line_eval, line_best_move) = parse_uci_info_line(&line);
                 if line_eval.is_some() {
                     *eval = line_eval;
@@ -487,7 +727,7 @@ async fn read_analysis_output(
             Ok(Err(error)) => return Err(format!("failed while reading engine analysis: {error}")),
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn with_shutdown_result(child: &mut Child, reason: String) -> String {
