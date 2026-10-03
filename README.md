@@ -96,6 +96,12 @@ Neither a project file nor `ocp.db` replaces the Lichess puzzle corpus, and the 
 
 `settings.json` is optional local configuration. It is ignored by Git, and if it is absent at startup Chess Material Studio uses built-in default settings. Saving preferences can create or update this local file; it is not required to run the application and should not be versioned. The current release-packaging workflow does not include `settings.json` in its packages.
 
+## Downloads
+
+Packaged release archives are available from [GitHub Releases](https://github.com/levallem/Chess-Material-Studio/releases).
+
+Current release builds are published for Linux, macOS, Windows x86_64, and Windows i686. These are packaged application archives rather than platform installers.
+
 ## Building and running
 
 Install the [Rust toolchain](https://www.rust-lang.org/tools/install), clone this repository, and run the main application explicitly:
