@@ -3141,6 +3141,30 @@ mod tests {
     }
 
     #[test]
+    fn invalid_normal_pdf_page_limit_fails_without_touching_destination_or_loaded_state() {
+        let (mut app, _project) = app_with_normal_export_review_context();
+        let original_state = normal_export_state(&app);
+        let pdf_path = normal_export_test_path("pdf");
+        let sentinel = b"cms-025e-ui-sentinel";
+        std::fs::write(&pdf_path, sentinel).unwrap();
+
+        app.settings_tab.export_pgs = "0".into();
+        let _ = app.update(Message::ExportPDF(Some(pdf_path.display().to_string())));
+
+        assert!(
+            app.puzzle_status
+                .contains(&lang::tr(&app.lang, "normal_pdf_export_failed"))
+        );
+        assert_eq!(
+            std::fs::read(&pdf_path).unwrap(),
+            sentinel,
+            "invalid normal PDF export must not touch an existing destination"
+        );
+        assert_normal_export_state_preserved(&app, &original_state, "invalid PDF page limit");
+        let _ = std::fs::remove_file(&pdf_path);
+    }
+
+    #[test]
     fn screenshot_helper_saves_a_jpeg() {
         let output = TempScreenshotFile::new("successful-save");
 
