@@ -4,9 +4,9 @@ Chess Material Studio uses `cargo audit` and the RustSec advisory database to re
 
 ## Current baseline
 
-- **Review date:** 2026-09-17
-- **Reference commit:** `bec03f1daad4e7ac675e9706a89c41b9ac15f537`
-- **`cargo audit`:** 7 allowed warnings
+- **Review date:** 2026-10-03
+- **Reference baseline:** `v2.7.0` plus CMS-026B lock maintenance (`iced_drop 0.2.48`, direct `rand 0.10.3`)
+- **`cargo audit`:** 0 vulnerabilities; 7 allowed warnings
 - **Yanked warnings:** none currently reported after updating `chacha20` to 0.10.2
 
 ## Summary
@@ -27,7 +27,7 @@ Chess Material Studio uses `cargo audit` and the RustSec advisory database to re
 
 `chess` 3.2.0 brings in both `failure` advisories and `rand` 0.7.3. No compatible published update that removes these dependencies was identified. Resolving this group requires an evaluated `chess` update, a maintained fork, or a rules-backend migration; it must not be made as an incidental dependency change.
 
-`failure`/RUSTSEC-2019-0036 requires a problematic `Fail::__private_get_type_id__` implementation. `chess` uses `derive(Fail)`, while CMS does not implement `Fail` directly; no exploitable path was identified in the audited CMS usage. `rand` 0.7.3 is used only while building `chess`; the advisory conditions were not observed in the current configuration. CMS's direct `rand` dependency is 0.10.2.
+`failure`/RUSTSEC-2019-0036 requires a problematic `Fail::__private_get_type_id__` implementation. `chess` uses `derive(Fail)`, while CMS does not implement `Fail` directly; no exploitable path was identified in the audited CMS usage. `rand` 0.7.3 is used only while building `chess`; the advisory conditions were not observed in the current configuration. CMS's direct `rand` requirement remains compatible with 0.10.2+, and the current lockfile resolves it to 0.10.3.
 
 ### Iced / rendering stack
 
@@ -59,7 +59,7 @@ Do not force `lru` 0.18 or later through a patch or fork without a dedicated tas
 
 - **Path and scope:** build dependency of `chess` 3.2.0.
 - **Why it remains:** no isolated correction exists within the current `chess` 3.2.0 graph.
-- **Current context:** the advisory conditions were not observed in the current build configuration; CMS directly uses corrected `rand` 0.10.2.
+- **Current context:** the advisory conditions were not observed in the current build configuration; CMS's direct `rand` requirement is unaffected and currently resolves to corrected `rand` 0.10.3.
 - **Reevaluate when:** a maintained `chess` release is published, a viable fork exists, or a rules-backend migration is proposed.
 
 ### `paste` 1.0.15 — RUSTSEC-2024-0436
@@ -92,7 +92,7 @@ Do not force `lru` 0.18 or later through a patch or fork without a dedicated tas
 
 ## Dependabot note
 
-CMS directly uses `rand` 0.10.2. The remaining warning concerns `rand` 0.7.3, which is transitive to `chess` 3.2.0. Dependabot can assess the direct dependency and return `security_update_not_needed`; that result does not mean the transitive warning has disappeared. `cargo audit` remains the verification source for this warning.
+CMS's direct `rand` requirement currently resolves to `rand` 0.10.3. The remaining warning concerns `rand` 0.7.3, which is transitive to `chess` 3.2.0. Dependabot can assess the direct dependency and return `security_update_not_needed`; that result does not mean the transitive warning has disappeared. `cargo audit` remains the verification source for this warning.
 
 ## Review policy
 
