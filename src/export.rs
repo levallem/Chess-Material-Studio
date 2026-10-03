@@ -8,6 +8,8 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use unicode_normalization::UnicodeNormalization;
 
+use chess_material_studio::pgn_review::PgnPositionSnapshot;
+
 use crate::{config, lang};
 
 // ─── Private helpers for PGN generation ────────────────────────────────────
@@ -383,6 +385,259 @@ fn build_pgn_content(puzzles: &[config::Puzzle], date: &str) -> Result<String, S
     Ok(content)
 }
 
+fn saved_position_result(snapshot: &PgnPositionSnapshot) -> Result<&str, String> {
+    match snapshot.headers.result.as_deref().unwrap_or("*") {
+        "1-0" => Ok("1-0"),
+        "0-1" => Ok("0-1"),
+        "1/2-1/2" => Ok("1/2-1/2"),
+        "*" => Ok("*"),
+        other => Err(format!(
+            "Unsupported PGN result for saved position: {other}"
+        )),
+    }
+}
+
+fn parse_fen_side_and_fullmove(fen: &str, context: &str) -> Result<(Color, usize), String> {
+    let fields: Vec<&str> = fen.split_whitespace().collect();
+    if fields.len() != 6 {
+        return Err(format!(
+            "{context} must have 6 FEN fields, got {}",
+            fields.len()
+        ));
+    }
+    let side = match fields[1] {
+        "w" => Color::White,
+        "b" => Color::Black,
+        other => {
+            return Err(format!("{context} has invalid side to move: {other}"));
+        }
+    };
+    let fullmove = fields[5]
+        .parse::<usize>()
+        .map_err(|_| format!("{context} has invalid fullmove: {}", fields[5]))?;
+    if fullmove == 0 {
+        return Err(format!("{context} fullmove must be at least 1"));
+    }
+    Ok((side, fullmove))
+}
+
+fn source_initial_move_state(snapshot: &PgnPositionSnapshot) -> Result<(Color, usize), String> {
+    if snapshot.headers.set_up.as_deref() == Some("1")
+        && let Some(header_fen) = snapshot.headers.fen.as_deref()
+    {
+        let initial_board = Board::from_str(&snapshot.initial_fen)
+            .map_err(|error| format!("saved PGN position initial FEN is invalid: {error:?}"))?;
+        let header_board = Board::from_str(header_fen)
+            .map_err(|error| format!("saved PGN position header FEN is invalid: {error:?}"))?;
+        if initial_board != header_board {
+            return Err("saved PGN position header FEN does not match snapshot initial FEN".into());
+        }
+        return parse_fen_side_and_fullmove(header_fen, "saved PGN position header FEN");
+    }
+
+    parse_fen_side_and_fullmove(&snapshot.initial_fen, "saved PGN position initial FEN")
+}
+
+fn expected_selected_side(initial_side: Color, ply_index: usize) -> Color {
+    if ply_index.is_multiple_of(2) {
+        initial_side
+    } else {
+        !initial_side
+    }
+}
+
+fn derived_selected_fullmove(
+    initial_side: Color,
+    initial_fullmove: usize,
+    ply_index: usize,
+) -> Result<usize, String> {
+    let completed_black_moves = match initial_side {
+        Color::White => ply_index / 2,
+        Color::Black => {
+            ply_index
+                .checked_add(1)
+                .ok_or_else(|| "saved PGN position ply index overflowed".to_string())?
+                / 2
+        }
+    };
+    initial_fullmove
+        .checked_add(completed_black_moves)
+        .ok_or_else(|| "saved PGN position fullmove overflowed".to_string())
+}
+
+fn selected_export_fen_state(
+    snapshot: &PgnPositionSnapshot,
+    selected_board: &Board,
+) -> Result<(String, usize), String> {
+    let (initial_side, initial_fullmove) = source_initial_move_state(snapshot)?;
+    let expected_side = expected_selected_side(initial_side, snapshot.ply_index);
+    let selected_fullmove =
+        derived_selected_fullmove(initial_side, initial_fullmove, snapshot.ply_index)?;
+    let fields: Vec<&str> = snapshot.selected_fen.split_whitespace().collect();
+    if fields.len() != 6 {
+        return Err(format!(
+            "saved PGN position selected FEN must have 6 FEN fields, got {}",
+            fields.len()
+        ));
+    }
+    let selected_side = match fields[1] {
+        "w" => Color::White,
+        "b" => Color::Black,
+        other => {
+            return Err(format!(
+                "saved PGN position selected FEN has invalid side to move: {other}"
+            ));
+        }
+    };
+    if selected_side != expected_side {
+        return Err("saved PGN position selected FEN side does not match source ply".into());
+    }
+    if selected_board.side_to_move() != expected_side {
+        return Err("saved PGN position reconstructed board side does not match source ply".into());
+    }
+
+    Ok((
+        format!(
+            "{} {} {} {} {} {}",
+            fields[0], fields[1], fields[2], fields[3], fields[4], selected_fullmove
+        ),
+        selected_fullmove,
+    ))
+}
+
+fn build_saved_pgn_position_movetext(
+    snapshot: &PgnPositionSnapshot,
+    board: Board,
+    result: &str,
+    selected_fullmove: usize,
+) -> Result<String, String> {
+    if snapshot.ply_index > snapshot.main_line_uci.len() {
+        return Err(format!(
+            "saved PGN position ply {} is outside the main line of {} moves",
+            snapshot.ply_index,
+            snapshot.main_line_uci.len()
+        ));
+    }
+
+    let mut fullmove = selected_fullmove;
+    let mut board = board;
+    let mut move_text = String::new();
+    let mut first_move = true;
+
+    for uci_move in &snapshot.main_line_uci[snapshot.ply_index..] {
+        let chess_move = parse_legal_uci_move(&board, uci_move)
+            .map_err(|error| format!("Saved PGN position continuation error: {error}"))?;
+        let san = move_to_standard_san(&board, chess_move)?;
+
+        if board.side_to_move() == Color::White {
+            if !move_text.is_empty() {
+                move_text.push(' ');
+            }
+            move_text.push_str(&format!("{fullmove}. "));
+        } else if first_move {
+            move_text.push_str(&format!("{fullmove}... "));
+        } else {
+            move_text.push(' ');
+        }
+        move_text.push_str(&san);
+
+        board = board.make_move_new(chess_move);
+        if board.side_to_move() == Color::White {
+            fullmove = fullmove
+                .checked_add(1)
+                .ok_or_else(|| "saved PGN position fullmove overflowed".to_string())?;
+        }
+        first_move = false;
+    }
+
+    if !move_text.is_empty() {
+        move_text.push(' ');
+    }
+    move_text.push_str(result);
+    move_text.push('\n');
+    Ok(move_text)
+}
+
+fn append_optional_saved_position_tag(pgn: &mut String, tag: &str, value: &Option<String>) {
+    if let Some(value) = value {
+        pgn.push_str(&format!("[{tag} \"{}\"]\n", escape_pgn_tag_value(value)));
+    }
+}
+
+fn build_saved_pgn_position_game(
+    project_name: &str,
+    chapter_name: &str,
+    snapshot: &PgnPositionSnapshot,
+) -> Result<String, String> {
+    let selected_board = snapshot.reconstruct_selected_board()?;
+    let selected_fen_board = Board::from_str(&snapshot.selected_fen)
+        .map_err(|error| format!("saved PGN position selected FEN is invalid: {error:?}"))?;
+    if selected_board != selected_fen_board {
+        return Err("saved PGN position selected FEN does not match reconstructed board".into());
+    }
+    let (exported_selected_fen, selected_fullmove) =
+        selected_export_fen_state(snapshot, &selected_board)?;
+
+    let result = saved_position_result(snapshot)?;
+    let mut pgn = String::new();
+    append_optional_saved_position_tag(&mut pgn, "Event", &snapshot.headers.event);
+    append_optional_saved_position_tag(&mut pgn, "Site", &snapshot.headers.site);
+    append_optional_saved_position_tag(&mut pgn, "Date", &snapshot.headers.date);
+    append_optional_saved_position_tag(&mut pgn, "Round", &snapshot.headers.round);
+    append_optional_saved_position_tag(&mut pgn, "White", &snapshot.headers.white);
+    append_optional_saved_position_tag(&mut pgn, "Black", &snapshot.headers.black);
+    pgn.push_str(&format!(
+        "[Project \"{}\"]\n",
+        escape_pgn_tag_value(project_name)
+    ));
+    pgn.push_str(&format!(
+        "[Chapter \"{}\"]\n",
+        escape_pgn_tag_value(chapter_name)
+    ));
+    pgn.push_str(&format!(
+        "[SourceGameIndex \"{}\"]\n",
+        snapshot.source_game_index
+    ));
+    pgn.push_str(&format!("[SourcePly \"{}\"]\n", snapshot.ply_index));
+    pgn.push_str("[SetUp \"1\"]\n");
+    pgn.push_str(&format!(
+        "[FEN \"{}\"]\n",
+        escape_pgn_tag_value(&exported_selected_fen)
+    ));
+    pgn.push_str(&format!("[Result \"{result}\"]\n"));
+    pgn.push('\n');
+    pgn.push_str(&build_saved_pgn_position_movetext(
+        snapshot,
+        selected_board,
+        result,
+        selected_fullmove,
+    )?);
+    Ok(pgn)
+}
+
+fn build_saved_pgn_positions_content(
+    project_name: &str,
+    chapter_name: &str,
+    snapshots: &[PgnPositionSnapshot],
+) -> Result<String, String> {
+    if snapshots.is_empty() {
+        return Err("active chapter has no saved PGN positions".into());
+    }
+
+    let mut content = String::new();
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if index > 0 {
+            content.push('\n');
+        }
+        content.push_str(&build_saved_pgn_position_game(
+            project_name,
+            chapter_name,
+            snapshot,
+        )?);
+    }
+    Ok(content)
+}
+
 const PGN_TEMP_ATTEMPTS: u32 = 32;
 
 fn temporary_pgn_path(destination: &Path, counter: u32) -> Result<PathBuf, String> {
@@ -519,6 +774,18 @@ pub fn write_project_pgn(
         }
     }
 
+    write_pgn_content(path, content.as_bytes())
+        .map_err(|error| format!("Error writing PGN file '{}': {error}", path.display()))
+}
+
+pub fn write_saved_pgn_positions(
+    project_name: &str,
+    chapter_name: &str,
+    snapshots: &[PgnPositionSnapshot],
+    path: &Path,
+) -> Result<(), String> {
+    let content = build_saved_pgn_positions_content(project_name, chapter_name, snapshots)
+        .map_err(|error| format!("Error building saved PGN positions content: {error}"))?;
     write_pgn_content(path, content.as_bytes())
         .map_err(|error| format!("Error writing PGN file '{}': {error}", path.display()))
 }
@@ -1769,9 +2036,45 @@ fn gen_diagram_operations(
 mod tests {
     use super::*;
     use crate::PuzzleTab;
+    use chess_material_studio::pgn_import::{ImportedGameHeaders, parse_pgn};
+    use chess_material_studio::pgn_review::PgnReviewSession;
     use std::collections::VecDeque;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/lichess_puzzles_sample.csv");
+
+    fn saved_snapshot_from_pgn(input: &str, ply_index: usize) -> PgnPositionSnapshot {
+        let games = parse_pgn(input).expect("PGN fixture should parse");
+        let mut session = PgnReviewSession::new(games).expect("PGN fixture should build session");
+        for _ in 0..ply_index {
+            assert!(session.next_ply(), "fixture should contain requested ply");
+        }
+        session.capture_current_snapshot()
+    }
+
+    fn exported_fen_from_content(content: &str) -> &str {
+        content
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("[FEN \"")
+                    .and_then(|line| line.strip_suffix("\"]"))
+            })
+            .expect("export should contain FEN tag")
+    }
+
+    fn saved_position_path(label: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_test_tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.join(format!(
+            "cms025i-saved-position-{label}-{}-{nonce}.pgn",
+            std::process::id()
+        ))
+    }
 
     fn read_fixture_puzzles() -> Vec<config::Puzzle> {
         let mut reader = csv::ReaderBuilder::new()
@@ -2734,6 +3037,285 @@ mod tests {
             2
         );
         assert!(write_project_pgn("Vacío", &[], &path).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saved_pgn_position_exports_selected_fen_remaining_moves_and_tags() {
+        let mut snapshot = saved_snapshot_from_pgn(
+            "[Event \"Ev\\\"ent\"]\n[Site \"Si\\\\te\"]\n[Date \"2026.10.03\"]\n[Round \"7\"]\n[White \"Alice\"]\n[Black \"Bob\"]\n[Result \"1-0\"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 1-0",
+            4,
+        );
+        snapshot.source_game_index = 12;
+        let content =
+            build_saved_pgn_positions_content("Project \"A\"", "Chapter \\B", &[snapshot.clone()])
+                .unwrap();
+
+        assert!(content.contains("[Event \"Ev\\\"ent\"]"));
+        assert!(content.contains("[Site \"Si\\\\te\"]"));
+        assert!(content.contains("[Date \"2026.10.03\"]"));
+        assert!(content.contains("[Round \"7\"]"));
+        assert!(content.contains("[White \"Alice\"]"));
+        assert!(content.contains("[Black \"Bob\"]"));
+        assert!(content.contains("[Project \"Project \\\"A\\\"\"]"));
+        assert!(content.contains("[Chapter \"Chapter \\\\B\"]"));
+        assert!(content.contains("[SourceGameIndex \"12\"]"));
+        assert!(content.contains("[SourcePly \"4\"]"));
+        assert!(content.contains("[SetUp \"1\"]"));
+        let exported_fen = exported_fen_from_content(&content);
+        let exported_fields = exported_fen.split_whitespace().collect::<Vec<_>>();
+        let selected_fields = snapshot.selected_fen.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(&exported_fields[0..5], &selected_fields[0..5]);
+        assert_eq!(exported_fields[5], "3");
+        assert!(content.contains(&format!("[FEN \"{}\"]", exported_fen)));
+        assert!(content.contains("[Result \"1-0\"]"));
+        assert!(content.contains("\n3. Bb5 a6 1-0\n"));
+        assert!(!content.contains("e4"));
+        assert!(!content.contains("Nf3"));
+        assert!(!content.contains("PuzzleRating"));
+        assert!(!content.contains("GameID"));
+
+        let reparsed = parse_pgn(&content).unwrap();
+        assert_eq!(reparsed.len(), 1);
+        assert_eq!(
+            reparsed[0].positions[0],
+            Board::from_str(exported_fen).unwrap()
+        );
+        assert_eq!(reparsed[0].moves.len(), 2);
+        assert_eq!(reparsed[0].headers.result.as_deref(), Some("1-0"));
+        assert_eq!(reparsed[0].headers.event.as_deref(), Some("Ev\"ent"));
+    }
+
+    #[test]
+    fn saved_pgn_position_derives_move_number_for_white_and_black_to_move() {
+        let white = saved_snapshot_from_pgn("[Result \"*\"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *", 4);
+        let black = saved_snapshot_from_pgn("[Result \"*\"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *", 5);
+
+        let white_content = build_saved_pgn_position_game("P", "C", &white).unwrap();
+        let black_content = build_saved_pgn_position_game("P", "C", &black).unwrap();
+
+        assert_eq!(
+            exported_fen_from_content(&white_content)
+                .split_whitespace()
+                .collect::<Vec<_>>()[5],
+            "3"
+        );
+        assert_eq!(
+            exported_fen_from_content(&black_content)
+                .split_whitespace()
+                .collect::<Vec<_>>()[5],
+            "3"
+        );
+        assert!(white_content.contains("\n3. Bb5 a6 *\n"));
+        assert!(black_content.contains("\n3... a6 *\n"));
+    }
+
+    #[test]
+    fn saved_pgn_position_derives_move_number_from_setup_fen_with_black_to_move() {
+        let input = "[SetUp \"1\"]\n[FEN \"r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 12\"]\n[Result \"*\"]\n\n12... a6 13. Ba4 *";
+        let ply_zero = saved_snapshot_from_pgn(input, 0);
+        let ply_one = saved_snapshot_from_pgn(input, 1);
+
+        let ply_zero_content = build_saved_pgn_position_game("P", "C", &ply_zero).unwrap();
+        let ply_one_content = build_saved_pgn_position_game("P", "C", &ply_one).unwrap();
+
+        assert_eq!(
+            exported_fen_from_content(&ply_zero_content)
+                .split_whitespace()
+                .collect::<Vec<_>>()[5],
+            "12"
+        );
+        assert!(ply_zero_content.contains("\n12... a6 13. Ba4 *\n"));
+        assert_eq!(
+            exported_fen_from_content(&ply_one_content)
+                .split_whitespace()
+                .collect::<Vec<_>>()[5],
+            "13"
+        );
+        assert!(ply_one_content.contains("\n13. Ba4 *\n"));
+    }
+
+    #[test]
+    fn saved_pgn_position_rejects_setup_header_fen_that_differs_from_snapshot_initial_board() {
+        let path = saved_position_path("setup-fen-mismatch");
+        std::fs::write(&path, "keep me").unwrap();
+        let mut mismatch = saved_snapshot_from_pgn(
+            "[SetUp \"1\"]\n[FEN \"r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 12\"]\n[Result \"*\"]\n\n12... a6 *",
+            0,
+        );
+        mismatch.headers.fen = Some(Board::default().to_string());
+
+        let error = write_saved_pgn_positions("P", "C", &[mismatch], &path).unwrap_err();
+
+        assert!(error.contains("header FEN does not match snapshot initial FEN"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saved_pgn_position_fullmove_overflow_fails_before_destination_write() {
+        let path = saved_position_path("fullmove-overflow");
+        let sentinel = b"existing sentinel bytes";
+        std::fs::write(&path, sentinel).unwrap();
+
+        let mut snapshot = saved_snapshot_from_pgn("[Result \"*\"]\n\n1. e4 e5 *", 1);
+        let mut fields = snapshot
+            .initial_fen
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        fields[5] = usize::MAX.to_string();
+        snapshot.initial_fen = fields.join(" ");
+
+        let error = write_saved_pgn_positions("P", "C", &[snapshot], &path).unwrap_err();
+
+        assert!(error.contains("fullmove"), "unexpected error: {error}");
+        assert!(error.contains("overflow"), "unexpected error: {error}");
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saved_pgn_position_result_policy_and_destination_safety() {
+        for result in ["1-0", "0-1", "1/2-1/2", "*"] {
+            let snapshot =
+                saved_snapshot_from_pgn(&format!("[Result \"{result}\"]\n\n{result}"), 0);
+            let content = build_saved_pgn_position_game("P", "C", &snapshot).unwrap();
+            assert!(content.contains(&format!("[Result \"{result}\"]")));
+            assert!(content.ends_with(&format!("{result}\n")));
+        }
+
+        let mut missing = saved_snapshot_from_pgn("1. e4 *", 1);
+        missing.headers.result = None;
+        let content = build_saved_pgn_position_game("P", "C", &missing).unwrap();
+        assert!(content.contains("[Result \"*\"]"));
+
+        let path = saved_position_path("unsupported-result");
+        std::fs::write(&path, "existing").unwrap();
+        let mut unsupported = missing.clone();
+        unsupported.headers.result = Some("2-0".into());
+        let error = write_saved_pgn_positions("P", "C", &[unsupported], &path).unwrap_err();
+        assert!(error.contains("Unsupported PGN result"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saved_pgn_position_final_and_zero_move_snapshots_export_result_only() {
+        let final_ply = saved_snapshot_from_pgn("[Result \"0-1\"]\n\n1. e4 e5 0-1", 2);
+        let zero_move = PgnPositionSnapshot {
+            source_game_index: 0,
+            ply_index: 0,
+            selected_fen: Board::default().to_string(),
+            initial_fen: Board::default().to_string(),
+            main_line_uci: Vec::new(),
+            headers: ImportedGameHeaders {
+                result: Some("*".into()),
+                ..ImportedGameHeaders::default()
+            },
+        };
+
+        assert!(
+            build_saved_pgn_position_game("P", "C", &final_ply)
+                .unwrap()
+                .ends_with("0-1\n")
+        );
+        assert!(
+            build_saved_pgn_position_game("P", "C", &zero_move)
+                .unwrap()
+                .ends_with("*\n")
+        );
+    }
+
+    #[test]
+    fn saved_pgn_positions_export_one_game_per_snapshot_in_order_without_dedup() {
+        let mut first = saved_snapshot_from_pgn("[Event \"First\"]\n\n1. e4 e5 *", 1);
+        let duplicate = first.clone();
+        let mut second = saved_snapshot_from_pgn("[Event \"Second\"]\n\n1. d4 d5 *", 1);
+        first.source_game_index = 2;
+        second.source_game_index = 1;
+
+        let content =
+            build_saved_pgn_positions_content("P", "C", &[first, duplicate, second]).unwrap();
+
+        assert_eq!(content.matches("[SetUp \"1\"]").count(), 3);
+        assert!(
+            content.find("[SourceGameIndex \"2\"]").unwrap()
+                < content.find("[SourceGameIndex \"0\"]").unwrap()
+        );
+        assert!(
+            content.find("[Event \"First\"]").unwrap()
+                < content.rfind("[Event \"Second\"]").unwrap()
+        );
+    }
+
+    #[test]
+    fn saved_pgn_positions_empty_snapshot_list_fails_before_destination_write() {
+        let path = saved_position_path("empty-snapshots");
+        let sentinel = b"existing sentinel bytes";
+        std::fs::write(&path, sentinel).unwrap();
+
+        let error = write_saved_pgn_positions("P", "C", &[], &path).unwrap_err();
+
+        assert!(
+            error.contains("active chapter has no saved PGN positions"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        let _ = std::fs::remove_file(&path);
+
+        let missing_path = saved_position_path("empty-snapshots-missing");
+        let _ = std::fs::remove_file(&missing_path);
+
+        let error = write_saved_pgn_positions("P", "C", &[], &missing_path).unwrap_err();
+
+        assert!(
+            error.contains("active chapter has no saved PGN positions"),
+            "unexpected error: {error}"
+        );
+        assert!(!missing_path.exists());
+    }
+
+    #[test]
+    fn saved_pgn_position_corrupt_snapshot_fails_before_destination_write() {
+        let path = saved_position_path("corrupt");
+        std::fs::write(&path, "keep me").unwrap();
+        let mut corrupt = saved_snapshot_from_pgn("[Result \"*\"]\n\n1. e4 e5 *", 1);
+        corrupt.main_line_uci[1] = "a1a8".into();
+
+        let error = write_saved_pgn_positions("P", "C", &[corrupt], &path).unwrap_err();
+
+        assert!(error.contains("invalid") || error.contains("illegal"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+
+        let base_selected_fen_side = saved_snapshot_from_pgn("[Result \"*\"]\n\n1. e4 e5 *", 2);
+        let selected_board = base_selected_fen_side
+            .reconstruct_selected_board()
+            .expect("fixture snapshot should reconstruct");
+        let mut corrupt_selected_fen_side = base_selected_fen_side.clone();
+        let mut fields = corrupt_selected_fen_side
+            .selected_fen
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        fields[1] = "b".into();
+        corrupt_selected_fen_side.selected_fen = fields.join(" ");
+        let error =
+            selected_export_fen_state(&corrupt_selected_fen_side, &selected_board).unwrap_err();
+        assert!(error.contains("selected FEN side does not match source ply"));
+        let error =
+            write_saved_pgn_positions("P", "C", &[corrupt_selected_fen_side], &path).unwrap_err();
+        assert!(error.contains("saved PGN position"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+
+        let mut malformed_selected_fen = saved_snapshot_from_pgn("[Result \"*\"]\n\n1. e4 *", 1);
+        malformed_selected_fen.selected_fen = "not enough fields".into();
+        let error =
+            write_saved_pgn_positions("P", "C", &[malformed_selected_fen], &path).unwrap_err();
+        assert!(
+            error.contains("selected FEN is invalid") || error.contains("must have 6 FEN fields")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
         let _ = std::fs::remove_file(path);
     }
 
