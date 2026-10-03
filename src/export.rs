@@ -533,16 +533,28 @@ pub fn to_pgn(
 
 // ─── PDF figurine spans ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PdfSolutionFont {
     Regular,
     Figurine,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PdfSolutionSpan {
     font: PdfSolutionFont,
     text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PdfSolutionMoveUnit {
+    spans: Vec<PdfSolutionSpan>,
+    width: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PdfSolutionLine {
+    spans: Vec<PdfSolutionSpan>,
+    width: i32,
 }
 
 /// Map a SAN piece letter to its white Unicode chess figurine.
@@ -653,7 +665,10 @@ fn append_pdf_solution_spans(
                 encode_pdf_chess_symbol(symbol)?
             }
         };
-        ops.push(Operation::new("Tf", vec![font_name.into(), 12.into()]));
+        ops.push(Operation::new(
+            "Tf",
+            vec![font_name.into(), PDF_SOLUTION_FONT_SIZE.into()],
+        ));
         ops.push(Operation::new("Ts", vec![rise.into()]));
         ops.push(Operation::new("Tj", vec![text]));
     }
@@ -661,10 +676,36 @@ fn append_pdf_solution_spans(
     Ok(())
 }
 
+fn append_pdf_solution_line(
+    ops: &mut Vec<Operation>,
+    line: &PdfSolutionLine,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    ops.extend([
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["Regular".into(), PDF_SOLUTION_FONT_SIZE.into()]),
+        Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
+        Operation::new("Td", vec![x.into(), y.into()]),
+    ]);
+    append_pdf_solution_spans(ops, &line.spans)?;
+    ops.push(Operation::new("ET", vec![]));
+    Ok(())
+}
+
 // ─── PDF ───────────────────────────────────────────────────────────────────
 
 const PDF_PUZZLES_PER_PAGE: usize = 6;
 const PDF_TEXT_ENCODING: &[u8] = b"WinAnsiEncoding";
+const PDF_PAGE_WIDTH: i32 = 600;
+const PDF_SOLUTION_LEFT_X: i32 = 75;
+const PDF_SOLUTION_RIGHT_MARGIN: i32 = 50;
+const PDF_SOLUTION_MAX_LINE_WIDTH: i32 =
+    PDF_PAGE_WIDTH - PDF_SOLUTION_LEFT_X - PDF_SOLUTION_RIGHT_MARGIN;
+const PDF_SOLUTION_FONT_SIZE: i32 = 12;
+const PDF_SOLUTION_LINE_HEIGHT: i32 = 18;
+const PDF_SOLUTION_START_Y: i32 = 800;
+const PDF_SOLUTION_MIN_Y: i32 = 18;
 static PDF_TEXT_FONT_FACE: LazyLock<Result<ttf_parser::Face<'static>, String>> =
     LazyLock::new(|| {
         ttf_parser::Face::parse(config::PDF_TEXT_FONT_BYTES, 0)
@@ -955,8 +996,6 @@ const PROJECT_PDF_HEADING_WIDTH: i32 = 500;
 const PROJECT_PDF_PROJECT_HEADING_Y: i32 = 830;
 const PROJECT_PDF_CHAPTER_HEADING_Y: i32 = 812;
 const PROJECT_PDF_SOLUTION_START_Y: i32 = 780;
-const PROJECT_PDF_SOLUTION_LINE_HEIGHT: i32 = 18;
-const PROJECT_PDF_SOLUTION_MIN_Y: i32 = 18;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectPdfPagePlan {
@@ -966,9 +1005,21 @@ struct ProjectPdfPagePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectPdfSolutionLine {
+    puzzle_number: usize,
+    line: PdfSolutionLine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectPdfSolutionPagePlan {
+    chapter_index: usize,
+    lines: Vec<ProjectPdfSolutionLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectPdfPlan {
     diagram_pages: Vec<ProjectPdfPagePlan>,
-    solution_pages: Vec<ProjectPdfPagePlan>,
+    solution_pages: Vec<ProjectPdfSolutionPagePlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -978,8 +1029,7 @@ struct FittedProjectPdfHeading {
 }
 
 fn project_pdf_solution_capacity() -> usize {
-    ((PROJECT_PDF_SOLUTION_START_Y - PROJECT_PDF_SOLUTION_MIN_Y) / PROJECT_PDF_SOLUTION_LINE_HEIGHT
-        + 1) as usize
+    ((PROJECT_PDF_SOLUTION_START_Y - PDF_SOLUTION_MIN_Y) / PDF_SOLUTION_LINE_HEIGHT + 1) as usize
 }
 
 fn project_pdf_plan(chapters: &[ProjectPdfChapter]) -> Result<ProjectPdfPlan, String> {
@@ -989,6 +1039,7 @@ fn project_pdf_plan(chapters: &[ProjectPdfChapter]) -> Result<ProjectPdfPlan, St
     let mut diagram_pages = Vec::new();
     let mut solution_pages = Vec::new();
     let mut next_puzzle_number = 1;
+    let solution_capacity = project_pdf_solution_capacity();
     for (chapter_index, chapter) in chapters.iter().enumerate() {
         if chapter.puzzles.is_empty() {
             continue;
@@ -1007,15 +1058,24 @@ fn project_pdf_plan(chapters: &[ProjectPdfChapter]) -> Result<ProjectPdfPlan, St
                 puzzle_indexes,
             });
         }
-        for indexes in puzzle_indexes.chunks(project_pdf_solution_capacity()) {
-            let puzzle_indexes = indexes.to_vec();
-            solution_pages.push(ProjectPdfPagePlan {
+
+        let mut chapter_solution_lines = Vec::new();
+        for (puzzle_index, &puzzle_number) in puzzle_indexes.iter().zip(&chapter_numbers) {
+            for line in wrap_solution_lines_for_puzzle(
+                puzzle_number,
+                &chapter.puzzles[*puzzle_index],
+                PDF_SOLUTION_MAX_LINE_WIDTH,
+            )? {
+                chapter_solution_lines.push(ProjectPdfSolutionLine {
+                    puzzle_number,
+                    line,
+                });
+            }
+        }
+        for lines in chapter_solution_lines.chunks(solution_capacity) {
+            solution_pages.push(ProjectPdfSolutionPagePlan {
                 chapter_index,
-                puzzle_numbers: puzzle_indexes
-                    .iter()
-                    .map(|index| chapter_numbers[*index])
-                    .collect(),
-                puzzle_indexes,
+                lines: lines.to_vec(),
             });
         }
         next_puzzle_number += chapter.puzzles.len();
@@ -1046,6 +1106,79 @@ fn regular_pdf_text_width(text: &str, font_size: i32) -> Result<i32, String> {
         Ok::<_, String>(total + i64::from(advance))
     })?;
     Ok(((units * i64::from(font_size) + units_per_em - 1) / units_per_em) as i32)
+}
+
+fn chess_symbol_pdf_text_width(text: &str, font_size: i32) -> Result<i32, String> {
+    let font = pdf_chess_symbol_font()?;
+    let units_per_em = i64::from(font.units_per_em());
+    let units = text.chars().try_fold(0_i64, |total, character| {
+        let glyph = font.glyph_index(character).ok_or_else(|| {
+            format!(
+                "Embedded PDF chess symbol font has no glyph for U+{:04X}",
+                character as u32
+            )
+        })?;
+        let advance = font.glyph_hor_advance(glyph).ok_or_else(|| {
+            format!(
+                "Embedded PDF chess symbol font has no advance for U+{:04X}",
+                character as u32
+            )
+        })?;
+        Ok::<_, String>(total + i64::from(advance))
+    })?;
+    Ok(((units * i64::from(font_size) + units_per_em - 1) / units_per_em) as i32)
+}
+
+fn pdf_solution_span_width(span: &PdfSolutionSpan, font_size: i32) -> Result<i32, String> {
+    match span.font {
+        PdfSolutionFont::Regular => regular_pdf_text_width(&span.text, font_size),
+        PdfSolutionFont::Figurine => chess_symbol_pdf_text_width(&span.text, font_size),
+    }
+}
+
+fn pdf_solution_spans_width(spans: &[PdfSolutionSpan], font_size: i32) -> Result<i32, String> {
+    spans.iter().try_fold(0_i32, |total, span| {
+        let width = pdf_solution_span_width(span, font_size)?;
+        total
+            .checked_add(width)
+            .ok_or_else(|| "PDF solution line width overflowed".to_string())
+    })
+}
+
+fn wrap_pdf_solution_move_units(
+    move_units: Vec<PdfSolutionMoveUnit>,
+    max_line_width: i32,
+) -> Result<Vec<PdfSolutionLine>, String> {
+    let mut lines = Vec::new();
+    let mut current_spans = Vec::new();
+    let mut current_width = 0_i32;
+
+    for unit in move_units {
+        if unit.width > max_line_width {
+            return Err(format!(
+                "PDF solution move unit is too wide to fit within {max_line_width} points"
+            ));
+        }
+        if !current_spans.is_empty() && current_width + unit.width > max_line_width {
+            lines.push(PdfSolutionLine {
+                spans: current_spans,
+                width: current_width,
+            });
+            current_spans = Vec::new();
+            current_width = 0;
+        }
+        current_width += unit.width;
+        current_spans.extend(unit.spans);
+    }
+
+    if !current_spans.is_empty() {
+        lines.push(PdfSolutionLine {
+            spans: current_spans,
+            width: current_width,
+        });
+    }
+
+    Ok(lines)
 }
 
 fn fit_project_pdf_heading(
@@ -1113,7 +1246,7 @@ fn save_pdf_document(
     page_ids: Vec<Object>,
     path: &Path,
 ) -> Result<(), String> {
-    let pages = dictionary! { "Type" => "Pages", "Count" => Object::Integer(page_ids.len() as i64), "Kids" => page_ids, "Resources" => resources_id, "MediaBox" => vec![0.into(), 0.into(), 600.into(), 850.into()] };
+    let pages = dictionary! { "Type" => "Pages", "Count" => Object::Integer(page_ids.len() as i64), "Kids" => page_ids, "Resources" => resources_id, "MediaBox" => vec![0.into(), 0.into(), PDF_PAGE_WIDTH.into(), 850.into()] };
     doc.objects.insert(pages_id, Object::Dictionary(pages));
     let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     doc.trailer.set("Root", catalog_id);
@@ -1191,7 +1324,6 @@ pub fn write_project_pdf(
         add_pdf_page(&mut doc, &mut page_ids, pages_id, Some(resources_id), ops)?;
     }
     for page in &plan.solution_pages {
-        let chapter = &chapters[page.chapter_index];
         let mut ops = vec![];
         append_project_pdf_headings(
             &mut ops,
@@ -1199,19 +1331,10 @@ pub fn write_project_pdf(
             &chapter_headings[page.chapter_index],
         )?;
         let mut y = PROJECT_PDF_SOLUTION_START_Y;
-        for (&puzzle_index, &puzzle_number) in page.puzzle_indexes.iter().zip(&page.puzzle_numbers)
-        {
-            let move_spans =
-                solution_spans_for_puzzle(puzzle_number, &chapter.puzzles[puzzle_index])?;
-            ops.extend([
-                Operation::new("BT", vec![]),
-                Operation::new("Tf", vec!["Regular".into(), 12.into()]),
-                Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
-                Operation::new("Td", vec![75.into(), y.into()]),
-            ]);
-            append_pdf_solution_spans(&mut ops, &move_spans)?;
-            ops.push(Operation::new("ET", vec![]));
-            y -= PROJECT_PDF_SOLUTION_LINE_HEIGHT;
+        for solution_line in &page.lines {
+            let _ = solution_line.puzzle_number;
+            append_pdf_solution_line(&mut ops, &solution_line.line, PDF_SOLUTION_LEFT_X, y)?;
+            y -= PDF_SOLUTION_LINE_HEIGHT;
         }
         add_pdf_page(&mut doc, &mut page_ids, pages_id, Some(resources_id), ops)?;
     }
@@ -1255,22 +1378,22 @@ fn puzzle_board_after_trigger(puzzle: &config::Puzzle) -> Result<Board, String> 
     Ok(board.make_move_new(trigger))
 }
 
-fn solution_spans_for_puzzle(
+fn solution_move_units_for_puzzle(
     puzzle_number: usize,
     puzzle: &config::Puzzle,
-) -> Result<Vec<PdfSolutionSpan>, String> {
+) -> Result<Vec<PdfSolutionMoveUnit>, String> {
     let mut board = puzzle_board_after_trigger(puzzle)?;
     let mut puzzle_moves = puzzle.moves.split_whitespace();
     puzzle_moves.next();
 
-    let mut move_spans = vec![PdfSolutionSpan {
+    let mut pending_prefix = vec![PdfSolutionSpan {
         font: PdfSolutionFont::Regular,
         text: format!("{})", puzzle_number),
     }];
     let mut half_move_number = 1;
     let mut move_label = 1;
     if board.side_to_move() == Color::Black {
-        move_spans.push(PdfSolutionSpan {
+        pending_prefix.push(PdfSolutionSpan {
             font: PdfSolutionFont::Regular,
             text: " 1. ... ".to_string(),
         });
@@ -1278,14 +1401,16 @@ fn solution_spans_for_puzzle(
         move_label = 2;
     }
 
+    let mut move_units = Vec::new();
     for uci_move in puzzle_moves {
+        let mut unit_spans = std::mem::take(&mut pending_prefix);
         if half_move_number % 2 == 0 {
-            move_spans.push(PdfSolutionSpan {
+            unit_spans.push(PdfSolutionSpan {
                 font: PdfSolutionFont::Regular,
                 text: " ".to_string(),
             });
         } else {
-            move_spans.push(PdfSolutionSpan {
+            unit_spans.push(PdfSolutionSpan {
                 font: PdfSolutionFont::Regular,
                 text: format!(" {}. ", move_label),
             });
@@ -1293,13 +1418,49 @@ fn solution_spans_for_puzzle(
         }
         let spans = uci_move_to_pdf_spans(&board, uci_move)
             .map_err(|error| format!("Solution move error: {error}"))?;
-        move_spans.extend(spans);
+        unit_spans.extend(spans);
+        let width = pdf_solution_spans_width(&unit_spans, PDF_SOLUTION_FONT_SIZE)?;
+        move_units.push(PdfSolutionMoveUnit {
+            spans: unit_spans,
+            width,
+        });
         let movement = parse_legal_uci_move(&board, uci_move)
             .map_err(|error| format!("Solution move error: {error}"))?;
         board = board.make_move_new(movement);
         half_move_number += 1;
     }
-    Ok(move_spans)
+
+    if !pending_prefix.is_empty() {
+        let width = pdf_solution_spans_width(&pending_prefix, PDF_SOLUTION_FONT_SIZE)?;
+        move_units.push(PdfSolutionMoveUnit {
+            spans: pending_prefix,
+            width,
+        });
+    }
+
+    Ok(move_units)
+}
+
+fn wrap_solution_lines_for_puzzle(
+    puzzle_number: usize,
+    puzzle: &config::Puzzle,
+    max_line_width: i32,
+) -> Result<Vec<PdfSolutionLine>, String> {
+    wrap_pdf_solution_move_units(
+        solution_move_units_for_puzzle(puzzle_number, puzzle)?,
+        max_line_width,
+    )
+}
+
+#[cfg(test)]
+fn solution_spans_for_puzzle(
+    puzzle_number: usize,
+    puzzle: &config::Puzzle,
+) -> Result<Vec<PdfSolutionSpan>, String> {
+    Ok(solution_move_units_for_puzzle(puzzle_number, puzzle)?
+        .into_iter()
+        .flat_map(|unit| unit.spans)
+        .collect())
 }
 
 fn write_pdf(
@@ -1337,27 +1498,24 @@ fn write_pdf(
         add_pdf_page(&mut doc, &mut page_ids, pages_id, Some(resources_id), ops)?;
     }
 
-    let mut ops = vec![];
-    let mut pos_x = 800;
-    let pos_y = 75;
+    let mut ops = Vec::new();
+    let mut y = PDF_SOLUTION_START_Y;
     for (puzzle_number, puzzle) in puzzles.iter().enumerate() {
-        let move_spans = solution_spans_for_puzzle(puzzle_number + 1, puzzle)?;
-        ops.extend([
-            Operation::new("BT", vec![]),
-            Operation::new("Tf", vec!["Regular".into(), 12.into()]),
-            Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
-            Operation::new("Td", vec![pos_y.into(), pos_x.into()]),
-        ]);
-        append_pdf_solution_spans(&mut ops, &move_spans)?;
-        ops.push(Operation::new("ET", vec![]));
-        pos_x -= 18;
-        if pos_x < 18 {
-            pos_x = 800;
-            add_pdf_page(&mut doc, &mut page_ids, pages_id, None, ops)?;
-            ops = vec![];
+        for line in
+            wrap_solution_lines_for_puzzle(puzzle_number + 1, puzzle, PDF_SOLUTION_MAX_LINE_WIDTH)?
+        {
+            if y < PDF_SOLUTION_MIN_Y && !ops.is_empty() {
+                add_pdf_page(&mut doc, &mut page_ids, pages_id, None, ops)?;
+                ops = Vec::new();
+                y = PDF_SOLUTION_START_Y;
+            }
+            append_pdf_solution_line(&mut ops, &line, PDF_SOLUTION_LEFT_X, y)?;
+            y -= PDF_SOLUTION_LINE_HEIGHT;
         }
     }
-    add_pdf_page(&mut doc, &mut page_ids, pages_id, None, ops)?;
+    if !ops.is_empty() {
+        add_pdf_page(&mut doc, &mut page_ids, pages_id, None, ops)?;
+    }
 
     save_pdf_document(doc, pages_id, resources_id, page_ids, path)
 }
@@ -3673,6 +3831,97 @@ mod tests {
         })
     }
 
+    fn long_knight_cycle_puzzle(solution_plies: usize) -> config::Puzzle {
+        let cycle = ["g8f6", "b1c3", "f6g8", "c3b1"];
+        let mut moves = vec!["e1e2".to_string()];
+        moves.extend(
+            (0..solution_plies)
+                .map(|index| cycle[index % cycle.len()].to_string())
+                .collect::<Vec<_>>(),
+        );
+        config::Puzzle {
+            puzzle_id: format!("long-knight-cycle-{solution_plies}"),
+            fen: "4k1n1/8/8/8/8/8/8/1N2K3 w - - 0 1".into(),
+            moves: moves.join(" "),
+            rating: 1500,
+            rating_deviation: 75,
+            popularity: 0,
+            nb_plays: 0,
+            themes: "longSolution".into(),
+            game_url: "https://example.invalid/long-knight-cycle".into(),
+            opening: String::new(),
+        }
+    }
+
+    fn flatten_solution_lines(lines: &[PdfSolutionLine]) -> Vec<PdfSolutionSpan> {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.clone())
+            .collect::<Vec<_>>()
+    }
+
+    fn solution_page_capacity(start_y: i32) -> usize {
+        ((start_y - PDF_SOLUTION_MIN_Y) / PDF_SOLUTION_LINE_HEIGHT + 1) as usize
+    }
+
+    fn decode_chess_symbol_gid(gid: u16) -> char {
+        let font = pdf_chess_symbol_font().unwrap();
+        ('\u{2654}'..='\u{265F}')
+            .find(|symbol| font.glyph_index(*symbol).map(|glyph| glyph.0) == Some(gid))
+            .unwrap_or('\u{FFFD}')
+    }
+
+    fn decode_pdf_text_lines_by_page(path: &Path) -> Vec<Vec<String>> {
+        let document = Document::load(path).expect("PDF should reopen");
+        let encoding = lopdf::Encoding::SimpleEncoding(PDF_TEXT_ENCODING);
+        document
+            .get_pages()
+            .into_values()
+            .map(|page_id| {
+                let content = Content::decode(&document.get_page_content(page_id))
+                    .expect("page content should decode");
+                let mut lines = Vec::new();
+                let mut current_font = "Regular".to_string();
+                let mut active_text: Option<String> = None;
+                for operation in content.operations {
+                    match operation.operator.as_str() {
+                        "BT" => active_text = Some(String::new()),
+                        "ET" => {
+                            if let Some(text) = active_text.take() {
+                                lines.push(text);
+                            }
+                        }
+                        "Tf" => {
+                            if let Some(Object::Name(name)) = operation.operands.first() {
+                                current_font = String::from_utf8_lossy(name).to_string();
+                            }
+                        }
+                        "Tj" => {
+                            let Some(text) = active_text.as_mut() else {
+                                continue;
+                            };
+                            let Some(Object::String(bytes, _)) = operation.operands.first() else {
+                                continue;
+                            };
+                            if current_font == "ChessSymbols" {
+                                let (gid_chunks, remainder) = bytes.as_chunks::<2>();
+                                assert!(remainder.is_empty(), "truncated chess-symbol GID bytes");
+                                for [high, low] in gid_chunks {
+                                    let gid = u16::from_be_bytes([*high, *low]);
+                                    text.push(decode_chess_symbol_gid(gid));
+                                }
+                            } else {
+                                text.push_str(&encoding.bytes_to_string(bytes).unwrap());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                lines
+            })
+            .collect()
+    }
+
     #[test]
     fn pdf_regular_text_encodes_supported_western_text_without_loss() {
         let encoding = lopdf::Encoding::SimpleEncoding(PDF_TEXT_ENCODING);
@@ -3783,6 +4032,203 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(decoded_text, texts);
+    }
+
+    #[test]
+    fn solution_width_measurement_composes_regular_and_figurine_font_metrics() {
+        let spans = vec![
+            PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "1) 1. ".into(),
+            },
+            PdfSolutionSpan {
+                font: PdfSolutionFont::Figurine,
+                text: "\u{2658}".into(),
+            },
+            PdfSolutionSpan {
+                font: PdfSolutionFont::Regular,
+                text: "f6+".into(),
+            },
+        ];
+        let measured = pdf_solution_spans_width(&spans, PDF_SOLUTION_FONT_SIZE).unwrap();
+        let expected = regular_pdf_text_width("1) 1. ", PDF_SOLUTION_FONT_SIZE).unwrap()
+            + chess_symbol_pdf_text_width("\u{2658}", PDF_SOLUTION_FONT_SIZE).unwrap()
+            + regular_pdf_text_width("f6+", PDF_SOLUTION_FONT_SIZE).unwrap();
+        assert_eq!(measured, expected);
+    }
+
+    #[test]
+    fn short_solution_wraps_to_one_line_and_preserves_legacy_spans() {
+        let puzzle = fixture_puzzle_00010();
+        let legacy = solution_spans_for_puzzle(1, &puzzle).unwrap();
+        let lines =
+            wrap_solution_lines_for_puzzle(1, &puzzle, PDF_SOLUTION_MAX_LINE_WIDTH).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(flatten_solution_lines(&lines), legacy);
+    }
+
+    #[test]
+    fn long_solution_wraps_by_move_units_within_max_width() {
+        let puzzle = long_knight_cycle_puzzle(100);
+        let lines =
+            wrap_solution_lines_for_puzzle(1, &puzzle, PDF_SOLUTION_MAX_LINE_WIDTH).unwrap();
+        assert!(lines.len() > 1, "100-ply solution should wrap");
+        for line in &lines {
+            assert!(
+                line.width <= PDF_SOLUTION_MAX_LINE_WIDTH,
+                "line width {} exceeded {}",
+                line.width,
+                PDF_SOLUTION_MAX_LINE_WIDTH
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_lines_preserve_solution_content_order_and_figurines() {
+        let puzzle = long_knight_cycle_puzzle(100);
+        let legacy = solution_spans_for_puzzle(1, &puzzle).unwrap();
+        let lines =
+            wrap_solution_lines_for_puzzle(1, &puzzle, PDF_SOLUTION_MAX_LINE_WIDTH).unwrap();
+        let flattened = flatten_solution_lines(&lines);
+        assert_eq!(flattened, legacy);
+        assert_eq!(
+            flattened
+                .iter()
+                .filter(|span| span.font == PdfSolutionFont::Figurine)
+                .count(),
+            100,
+            "every knight move should retain its figurine span"
+        );
+    }
+
+    #[test]
+    fn normal_pdf_continues_one_long_solution_without_lost_or_empty_pages() {
+        let puzzle = long_knight_cycle_puzzle(520);
+        let lines =
+            wrap_solution_lines_for_puzzle(1, &puzzle, PDF_SOLUTION_MAX_LINE_WIDTH).unwrap();
+        let solution_capacity = solution_page_capacity(PDF_SOLUTION_START_Y);
+        let expected_solution_pages = lines.len().div_ceil(solution_capacity);
+        assert!(
+            expected_solution_pages > 1,
+            "fixture must force a solution continuation page"
+        );
+
+        let path = pdf_test_path("cms-025h-normal-continuation");
+        write_pdf_all(&[puzzle], &lang::Language::English, &path).unwrap();
+        let document = Document::load(&path).unwrap();
+        assert_eq!(document.get_pages().len(), 1 + expected_solution_pages);
+
+        let pages = decode_pdf_text_lines_by_page(&path);
+        let solution_pages = &pages[1..];
+        let expected_pages = lines
+            .chunks(solution_capacity)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+                    .collect::<Vec<String>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(solution_pages, expected_pages.as_slice());
+        assert!(
+            solution_pages.last().is_some_and(|page| !page.is_empty()),
+            "must not create an empty trailing solution page"
+        );
+    }
+
+    #[test]
+    fn project_pdf_continues_long_solution_with_repeated_headings_and_order() {
+        let chapters = [ProjectPdfChapter {
+            name: "Chapter A".into(),
+            puzzles: vec![long_knight_cycle_puzzle(520), fixture_puzzle_00010()],
+        }];
+        let plan = project_pdf_plan(&chapters).unwrap();
+        assert!(plan.solution_pages.len() > 1);
+        let planned_numbers = plan
+            .solution_pages
+            .iter()
+            .flat_map(|page| page.lines.iter().map(|line| line.puzzle_number))
+            .collect::<Vec<_>>();
+        assert_eq!(planned_numbers.first(), Some(&1));
+        assert_eq!(planned_numbers.last(), Some(&2));
+
+        let path = pdf_test_path("cms-025h-project-continuation");
+        write_project_pdf("Project", &chapters, &lang::Language::English, &path).unwrap();
+        let pages = decode_pdf_text_lines_by_page(&path);
+        let diagram_pages = project_pdf_plan(&chapters).unwrap().diagram_pages.len();
+        let solution_pages = &pages[diagram_pages..];
+        for page in solution_pages {
+            assert!(page.contains(&"Project".to_string()));
+            assert!(page.contains(&"Chapter A".to_string()));
+        }
+        let solution_text = solution_pages
+            .iter()
+            .flat_map(|page| page.iter())
+            .filter(|line| !matches!(line.as_str(), "Project" | "Chapter A"))
+            .cloned()
+            .collect::<String>();
+        let first = solution_text.find("1)").expect("first puzzle number");
+        let second = solution_text.find("2)").expect("second puzzle number");
+        assert!(first < second);
+        assert_eq!(solution_text.matches("1)").count(), 1);
+        assert_eq!(solution_text.matches("2)").count(), 1);
+    }
+
+    #[test]
+    fn long_solution_pdf_reopens_with_all_solution_moves_in_content_streams() {
+        let puzzle = long_knight_cycle_puzzle(100);
+        let expected_lines =
+            wrap_solution_lines_for_puzzle(1, &puzzle, PDF_SOLUTION_MAX_LINE_WIDTH).unwrap();
+        let expected_text = expected_lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+
+        let path = pdf_test_path("cms-025h-long-reopen");
+        write_pdf_all(&[puzzle], &lang::Language::English, &path).unwrap();
+        let pages = decode_pdf_text_lines_by_page(&path);
+        let solution_text = pages[1..]
+            .iter()
+            .flat_map(|page| page.iter())
+            .cloned()
+            .collect::<String>();
+        assert_eq!(solution_text, expected_text);
+        for move_text in ["\u{2658}f6", "\u{2658}c3", "\u{2658}g8", "\u{2658}b1"] {
+            assert!(solution_text.contains(move_text));
+        }
+    }
+
+    #[test]
+    fn wrapping_accepts_exact_width_and_rejects_too_wide_move_unit() {
+        let spans = vec![PdfSolutionSpan {
+            font: PdfSolutionFont::Regular,
+            text: "1) 1. e4".into(),
+        }];
+        let width = pdf_solution_spans_width(&spans, PDF_SOLUTION_FONT_SIZE).unwrap();
+        let unit = PdfSolutionMoveUnit { spans, width };
+        let exact = wrap_pdf_solution_move_units(vec![unit.clone()], width).unwrap();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].width, width);
+        let too_wide = wrap_pdf_solution_move_units(vec![unit], width - 1).unwrap_err();
+        assert!(too_wide.contains("too wide"));
+    }
+
+    #[test]
+    #[ignore = "manual CMS-025H visual probe"]
+    fn generate_cms_025h_visual_probe_pdf() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms-025h-visual-probe-long-solution.pdf");
+        let puzzle = long_knight_cycle_puzzle(100);
+        write_pdf_all(&[puzzle], &lang::Language::English, &path).unwrap();
+        let page_count = Document::load(&path).unwrap().get_pages().len();
+        println!(
+            "CMS-025H visual probe: {} pages at {}",
+            page_count,
+            path.display()
+        );
+        assert!(page_count >= 2);
     }
 
     #[test]
@@ -4038,7 +4484,14 @@ mod tests {
         assert_eq!(plan.solution_pages.len(), 3);
         assert_eq!(plan.solution_pages[0].chapter_index, 0);
         assert_eq!(plan.solution_pages[1].chapter_index, 1);
-        assert_eq!(plan.solution_pages[2].puzzle_numbers, vec![46]);
+        assert_eq!(
+            plan.solution_pages[2]
+                .lines
+                .iter()
+                .map(|line| line.puzzle_number)
+                .collect::<Vec<_>>(),
+            vec![46]
+        );
     }
 
     #[test]
