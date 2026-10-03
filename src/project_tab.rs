@@ -104,7 +104,20 @@ struct ProjectPdfExportSnapshot {
 }
 
 #[derive(Debug, Clone)]
+struct SavedPgnPositionsExportSnapshot {
+    project_name: String,
+    chapter_name: String,
+    snapshots: Vec<PgnPositionSnapshot>,
+}
+
+#[derive(Debug, Clone)]
 pub enum SelectedPuzzlesPgnExportResult {
+    Cancelled,
+    Finished(Result<(), String>),
+}
+
+#[derive(Debug, Clone)]
+pub enum SavedPgnPositionsPgnExportResult {
     Cancelled,
     Finished(Result<(), String>),
 }
@@ -178,6 +191,8 @@ pub enum ProjectMessage {
     SelectedChaptersPgnExportFinished(SelectedChaptersPgnExportResult),
     ExportSelectedPuzzlesPgn,
     SelectedPuzzlesPgnExportFinished(SelectedPuzzlesPgnExportResult),
+    ExportSavedPgnPositionsPgn,
+    SavedPgnPositionsPgnExportFinished(SavedPgnPositionsPgnExportResult),
     ExportSelectedPuzzlesPdf,
     SelectedPuzzlesPdfExportFinished(SelectedPuzzlesPdfExportResult),
     OpenPgnPosition(usize),
@@ -450,6 +465,32 @@ impl ProjectTab {
                 .unwrap_or_else(Task::none),
             ProjectMessage::SelectedPuzzlesPgnExportFinished(result) => {
                 self.apply_selected_puzzles_pgn_export_result(result);
+                Task::none()
+            }
+            ProjectMessage::ExportSavedPgnPositionsPgn => {
+                match self.saved_pgn_positions_export_snapshot() {
+                    Ok(Some(snapshot)) => {
+                        Task::perform(Self::export_saved_pgn_positions_pgn(snapshot), |result| {
+                            Message::Project(ProjectMessage::SavedPgnPositionsPgnExportFinished(
+                                result,
+                            ))
+                        })
+                    }
+                    Ok(None) => {
+                        self.status = lang::tr(&self.lang, "no_saved_pgn_positions");
+                        Task::none()
+                    }
+                    Err(error) => {
+                        self.status = format!(
+                            "{}: {error}",
+                            lang::tr(&self.lang, "saved_pgn_positions_pgn_export_failed")
+                        );
+                        Task::none()
+                    }
+                }
+            }
+            ProjectMessage::SavedPgnPositionsPgnExportFinished(result) => {
+                self.apply_saved_pgn_positions_pgn_export_result(result);
                 Task::none()
             }
             ProjectMessage::ExportSelectedPuzzlesPdf => self
@@ -770,6 +811,27 @@ impl ProjectTab {
         ))
     }
 
+    async fn export_saved_pgn_positions_pgn(
+        snapshot: SavedPgnPositionsExportSnapshot,
+    ) -> SavedPgnPositionsPgnExportResult {
+        let Some(path) = AsyncFileDialog::new()
+            .add_filter("PGN", &["pgn"])
+            .set_file_name("saved-pgn-positions.pgn")
+            .save_file()
+            .await
+            .map(|file| file.path().to_path_buf())
+        else {
+            return SavedPgnPositionsPgnExportResult::Cancelled;
+        };
+
+        SavedPgnPositionsPgnExportResult::Finished(crate::export::write_saved_pgn_positions(
+            &snapshot.project_name,
+            &snapshot.chapter_name,
+            &snapshot.snapshots,
+            &path,
+        ))
+    }
+
     async fn export_selected_puzzles_pdf(
         puzzles: Vec<crate::config::Puzzle>,
         lang: lang::Language,
@@ -1073,6 +1135,61 @@ impl ProjectTab {
         match &cache.state {
             CachedPgnPositions::Loaded(_) => None,
             CachedPgnPositions::Failed { status } => Some(status),
+        }
+    }
+
+    fn saved_pgn_positions_export_snapshot(
+        &self,
+    ) -> Result<Option<SavedPgnPositionsExportSnapshot>, String> {
+        let active_project = self
+            .active_project
+            .as_ref()
+            .ok_or_else(|| lang::tr(&self.lang, "no_project_open"))?;
+        let chapter = self
+            .active_chapter()
+            .ok_or_else(|| lang::tr(&self.lang, "no_active_chapter"))?;
+        let context = self
+            .pgn_positions_context()
+            .ok_or_else(|| lang::tr(&self.lang, "saved_pgn_positions_error"))?;
+        let cache = self
+            .pgn_positions_cache
+            .as_ref()
+            .ok_or_else(|| lang::tr(&self.lang, "saved_pgn_positions_error"))?;
+        if cache.context != context {
+            return Err(lang::tr(&self.lang, "saved_pgn_positions_error"));
+        }
+
+        match &cache.state {
+            CachedPgnPositions::Loaded(snapshots) if snapshots.is_empty() => Ok(None),
+            CachedPgnPositions::Loaded(snapshots) => Ok(Some(SavedPgnPositionsExportSnapshot {
+                project_name: active_project.metadata.project_name.clone(),
+                chapter_name: chapter.name.clone(),
+                snapshots: snapshots.clone(),
+            })),
+            CachedPgnPositions::Failed { status } => Err(status.clone()),
+        }
+    }
+
+    fn has_saved_pgn_positions_export_action(&self) -> bool {
+        self.pgn_positions()
+            .is_some_and(|snapshots| !snapshots.is_empty())
+    }
+
+    fn apply_saved_pgn_positions_pgn_export_result(
+        &mut self,
+        result: SavedPgnPositionsPgnExportResult,
+    ) {
+        match result {
+            SavedPgnPositionsPgnExportResult::Cancelled => {}
+            SavedPgnPositionsPgnExportResult::Finished(Ok(())) => {
+                self.status = lang::tr(&self.lang, "saved_pgn_positions_pgn_exported");
+            }
+            SavedPgnPositionsPgnExportResult::Finished(Err(error)) => {
+                self.status = format!(
+                    "{}: {error}",
+                    lang::tr(&self.lang, "saved_pgn_positions_pgn_export_failed")
+                );
+            }
         }
     }
 
@@ -1653,6 +1770,16 @@ impl ProjectTab {
                     content.push(Text::new(lang::tr(&self.lang, "no_saved_pgn_positions"))),
                 );
             }
+
+            debug_assert!(self.has_saved_pgn_positions_export_action());
+            content = content.push(
+                Button::new(Text::new(lang::tr(
+                    &self.lang,
+                    "export_saved_pgn_positions_to_pgn",
+                )))
+                .on_press(ProjectMessage::ExportSavedPgnPositionsPgn)
+                .style(btn_style_simple),
+            );
 
             for (index, snapshot) in snapshots.iter().enumerate() {
                 let white = snapshot.headers.white.as_deref().unwrap_or("-");
@@ -3948,8 +4075,142 @@ mod tests {
     }
 
     #[test]
+    fn saved_pgn_export_snapshot_comes_from_active_loaded_contextual_cache_in_order() {
+        let project = TempProjectDb::new("pgn-export-active-cache");
+        create_project(&project.path, "Proyecto").unwrap();
+        let first_chapter = create_chapter(&project.path, "First", None).unwrap();
+        let second_chapter = create_chapter(&project.path, "Second", None).unwrap();
+        let first = sample_pgn_snapshot();
+        let mut first_later = another_sample_pgn_snapshot();
+        first_later.headers.event = Some("First later".into());
+        let second = another_sample_pgn_snapshot();
+        add_pgn_position_snapshot(&project.path, first_chapter.id, &first).unwrap();
+        add_pgn_position_snapshot(&project.path, first_chapter.id, &first_later).unwrap();
+        add_pgn_position_snapshot(&project.path, second_chapter.id, &second).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        let snapshot = tab.saved_pgn_positions_export_snapshot().unwrap().unwrap();
+        assert_eq!(snapshot.project_name, "Proyecto");
+        assert_eq!(snapshot.chapter_name, "First");
+        assert_eq!(snapshot.snapshots, vec![first.clone(), first_later.clone()]);
+
+        tab.select_chapter(second_chapter.id);
+        let snapshot = tab.saved_pgn_positions_export_snapshot().unwrap().unwrap();
+        assert_eq!(snapshot.chapter_name, "Second");
+        assert_eq!(snapshot.snapshots, vec![second]);
+
+        tab.select_chapter(first_chapter.id);
+        std::fs::remove_file(&project.path).unwrap();
+        let cached_snapshot = tab.saved_pgn_positions_export_snapshot().unwrap().unwrap();
+        assert_eq!(cached_snapshot.snapshots, vec![first, first_later]);
+
+        tab.select_chapter(second_chapter.id);
+        assert!(tab.saved_pgn_positions_export_snapshot().is_err());
+    }
+
+    #[test]
+    fn saved_pgn_export_empty_missing_stale_and_failed_cache_fail_closed() {
+        let project = TempProjectDb::new("pgn-export-fail-closed");
+        create_project(&project.path, "Proyecto").unwrap();
+        create_chapter(&project.path, "Empty", None).unwrap();
+        let mut tab = ProjectTab::new();
+        tab.open_project_path(&project.path);
+
+        assert!(tab.saved_pgn_positions_export_snapshot().unwrap().is_none());
+        let _ = tab.update(ProjectMessage::ExportSavedPgnPositionsPgn);
+        assert_eq!(tab.status, lang::tr(&tab.lang, "no_saved_pgn_positions"));
+        assert!(!tab.has_saved_pgn_positions_export_action());
+
+        tab.pgn_positions_cache = None;
+        assert!(tab.saved_pgn_positions_export_snapshot().is_err());
+
+        tab.refresh_pgn_positions();
+        tab.pgn_positions_cache.as_mut().unwrap().context.chapter_id += 1;
+        assert!(tab.saved_pgn_positions_export_snapshot().is_err());
+
+        tab.pgn_positions_cache = Some(PgnPositionsCache {
+            context: tab.pgn_positions_context().unwrap(),
+            state: CachedPgnPositions::Failed {
+                status: "failed read".into(),
+            },
+        });
+        assert_eq!(
+            tab.saved_pgn_positions_export_snapshot().unwrap_err(),
+            "failed read"
+        );
+    }
+
+    #[test]
+    fn saved_pgn_export_snapshot_is_owned_and_survives_later_switches() {
+        let (project, mut tab, _, snapshot) =
+            tab_with_saved_pgn_position("pgn-export-owned-snapshot");
+        let export = tab.saved_pgn_positions_export_snapshot().unwrap().unwrap();
+
+        let other_project = TempProjectDb::new("pgn-export-owned-other");
+        create_project(&other_project.path, "Other").unwrap();
+        create_chapter(&other_project.path, "Other chapter", None).unwrap();
+        tab.open_project_path(&other_project.path);
+        std::fs::remove_file(&project.path).unwrap();
+
+        assert_eq!(export.project_name, "PGN");
+        assert_eq!(export.chapter_name, "Saved");
+        assert_eq!(export.snapshots, vec![snapshot]);
+    }
+
+    #[test]
+    fn saved_pgn_export_result_statuses_are_localized_and_cancellation_is_neutral() {
+        let (_, mut tab, _, _) = tab_with_saved_pgn_position("pgn-export-statuses");
+        tab.status = "unchanged".into();
+        tab.apply_saved_pgn_positions_pgn_export_result(
+            SavedPgnPositionsPgnExportResult::Cancelled,
+        );
+        assert_eq!(tab.status, "unchanged");
+
+        tab.apply_saved_pgn_positions_pgn_export_result(
+            SavedPgnPositionsPgnExportResult::Finished(Ok(())),
+        );
+        assert_eq!(
+            tab.status,
+            lang::tr(&tab.lang, "saved_pgn_positions_pgn_exported")
+        );
+
+        tab.apply_saved_pgn_positions_pgn_export_result(
+            SavedPgnPositionsPgnExportResult::Finished(Err("disk full".into())),
+        );
+        assert!(tab.status.contains(&lang::tr(
+            &tab.lang,
+            "saved_pgn_positions_pgn_export_failed"
+        )));
+        assert!(tab.status.contains("disk full"));
+    }
+
+    #[test]
+    fn saved_pgn_export_action_is_visible_only_for_loaded_nonempty_snapshots() {
+        let (_, tab, _, _) = tab_with_saved_pgn_position("pgn-export-visible");
+        assert!(tab.has_saved_pgn_positions_export_action());
+
+        let project = TempProjectDb::new("pgn-export-not-visible-empty");
+        create_project(&project.path, "Empty").unwrap();
+        create_chapter(&project.path, "Chapter", None).unwrap();
+        let mut empty = ProjectTab::new();
+        empty.open_project_path(&project.path);
+        assert!(!empty.has_saved_pgn_positions_export_action());
+
+        empty.pgn_positions_cache = None;
+        assert!(!empty.has_saved_pgn_positions_export_action());
+        empty.pgn_positions_cache = Some(PgnPositionsCache {
+            context: empty.pgn_positions_context().unwrap(),
+            state: CachedPgnPositions::Failed {
+                status: "failed".into(),
+            },
+        });
+        assert!(!empty.has_saved_pgn_positions_export_action());
+    }
+
+    #[test]
     fn pgn_position_translation_keys_exist_for_every_supported_language() {
-        const PGN_POSITION_KEYS: [&str; 10] = [
+        const PGN_POSITION_KEYS: [&str; 13] = [
             "saved_pgn_positions",
             "no_saved_pgn_positions",
             "saved_pgn_positions_error",
@@ -3960,6 +4221,9 @@ mod tests {
             "saved_pgn_position_deleted",
             "saved_pgn_position_not_found",
             "saved_pgn_position_delete_failed",
+            "export_saved_pgn_positions_to_pgn",
+            "saved_pgn_positions_pgn_exported",
+            "saved_pgn_positions_pgn_export_failed",
         ];
 
         for language in lang::Language::ALL {

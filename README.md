@@ -39,10 +39,13 @@ The Projects tab exports selected material through these routes:
 
 - Active Chapter to PGN.
 - Active Chapter to PDF.
+- Active Chapter saved PGN positions to PGN.
 - Chapters marked for export to PGN.
 - Chapters marked for export to PDF.
 - Complete project to PGN.
 - Complete project to PDF.
+
+Saved PGN position export is separate from the selected-puzzle PGN/PDF routes. Each exported saved-position game starts at the saved selected position and continues the remaining stored main line from that point. Saved PGN position snapshots are not converted to puzzles, and this export does not provide selected-Chapters, project-wide, or PDF routes for saved positions.
 
 The multiple-Chapter export selection is temporary interface state, not project data stored in the `.cms.sqlite` file. It is cleared when a project is created, opened, or closed.
 
