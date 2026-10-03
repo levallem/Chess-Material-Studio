@@ -17,10 +17,16 @@ use crate::{Message, Tab, config, lang};
 pub enum PgnMessage {
     ChooseFile,
     FileSelected(Option<PathBuf>),
+    #[cfg(test)]
     FileRead {
         generation: u64,
         path: PathBuf,
         content: Result<String, String>,
+    },
+    FileLoaded {
+        generation: u64,
+        path: PathBuf,
+        session: Result<PgnReviewSession, String>,
     },
     PreviousGame,
     NextGame,
@@ -109,15 +115,16 @@ impl PgnTab {
             }),
             PgnMessage::FileSelected(Some(path)) => {
                 let generation = self.next_load_generation();
-                Task::perform(Self::read_pgn_file(path), move |(path, content)| {
-                    Message::Pgn(PgnMessage::FileRead {
+                Task::perform(Self::load_pgn_file(path), move |(path, session)| {
+                    Message::Pgn(PgnMessage::FileLoaded {
                         generation,
                         path,
-                        content,
+                        session,
                     })
                 })
             }
             PgnMessage::FileSelected(None) => Task::none(),
+            #[cfg(test)]
             PgnMessage::FileRead {
                 generation,
                 path,
@@ -126,8 +133,33 @@ impl PgnTab {
                 if generation != self.load_generation {
                     return Task::none();
                 }
-                match content.and_then(|content| self.load_from_text(path, &content)) {
-                    Ok(()) => self.status = None,
+                match content.and_then(|content| Self::build_session_from_text(&content)) {
+                    Ok(session) => {
+                        self.commit_loaded_session(path, session);
+                        self.status = None;
+                    }
+                    Err(error) => {
+                        self.status = Some(format!(
+                            "{}: {error}",
+                            lang::tr(&self.lang, "pgn_load_error")
+                        ));
+                    }
+                }
+                Task::none()
+            }
+            PgnMessage::FileLoaded {
+                generation,
+                path,
+                session,
+            } => {
+                if generation != self.load_generation {
+                    return Task::none();
+                }
+                match session {
+                    Ok(session) => {
+                        self.commit_loaded_session(path, session);
+                        self.status = None;
+                    }
                     Err(error) => {
                         self.status = Some(format!(
                             "{}: {error}",
@@ -187,19 +219,31 @@ impl PgnTab {
             .map(|file| file.path().to_path_buf())
     }
 
-    async fn read_pgn_file(path: PathBuf) -> (PathBuf, Result<String, String>) {
-        let content = std::fs::read_to_string(&path)
+    async fn load_pgn_file(path: PathBuf) -> (PathBuf, Result<PgnReviewSession, String>) {
+        let session = std::fs::read_to_string(&path)
             .map_err(|error| format!("could not read '{}': {error}", path.display()));
-        (path, content)
+        (
+            path,
+            session.and_then(|content| Self::build_session_from_text(&content)),
+        )
     }
 
+    #[cfg(test)]
     fn load_from_text(&mut self, source: PathBuf, content: &str) -> Result<(), String> {
-        let session = PgnReviewSession::new(parse_pgn(content)?)?;
+        let session = Self::build_session_from_text(content)?;
+        self.commit_loaded_session(source, session);
+        Ok(())
+    }
+
+    fn build_session_from_text(content: &str) -> Result<PgnReviewSession, String> {
+        PgnReviewSession::new(parse_pgn(content)?)
+    }
+
+    fn commit_loaded_session(&mut self, source: PathBuf, session: PgnReviewSession) {
         self.session = Some(session);
         self.source = Some(source);
         self.captured_candidate = None;
         self.captured_snapshot = None;
-        Ok(())
     }
 
     fn next_load_generation(&mut self) -> u64 {
@@ -392,9 +436,26 @@ impl Tab for PgnTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     fn first_game() -> &'static str {
         "[Event \"First\"]\n[Date \"2026.09.19\"]\n[White \"Alice\"]\n[Black \"Bob\"]\n[Result \"1-0\"]\n\n1. e4 e5 2. Nf3 1-0"
+    }
+
+    fn session_from_text(content: &str) -> Result<PgnReviewSession, String> {
+        PgnTab::build_session_from_text(content)
+    }
+
+    fn block_ready<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("test future unexpectedly pending"),
+        }
     }
 
     #[test]
@@ -415,6 +476,35 @@ mod tests {
     #[test]
     fn current_board_is_none_without_a_loaded_session() {
         assert_eq!(PgnTab::new().current_board(), None);
+    }
+
+    #[test]
+    fn async_load_helper_builds_a_session_for_a_valid_file() {
+        let path =
+            std::env::temp_dir().join(format!("cms-025g-valid-{}-{}.pgn", std::process::id(), 1));
+        std::fs::write(&path, first_game()).expect("fixture file must be written");
+
+        let (loaded_path, session) = block_ready(PgnTab::load_pgn_file(path.clone()));
+
+        std::fs::remove_file(&path).expect("fixture file must be removed");
+        let session = session.expect("valid PGN file must build a review session");
+        assert_eq!(loaded_path, path);
+        assert_eq!(session.game_count(), 1);
+        assert_eq!(session.current_game_index(), 0);
+        assert_eq!(session.current_ply_index(), 0);
+    }
+
+    #[test]
+    fn async_load_helper_returns_parse_error_before_result_handling() {
+        let path =
+            std::env::temp_dir().join(format!("cms-025g-invalid-{}-{}.pgn", std::process::id(), 1));
+        std::fs::write(&path, "1. not-a-move 1-0").expect("fixture file must be written");
+
+        let (loaded_path, session) = block_ready(PgnTab::load_pgn_file(path.clone()));
+
+        std::fs::remove_file(&path).expect("fixture file must be removed");
+        assert_eq!(loaded_path, path);
+        assert!(session.is_err());
     }
 
     #[test]
@@ -485,10 +575,10 @@ mod tests {
         let previous_session = tab.session.clone();
         let previous_source = tab.source.clone();
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: tab.load_generation,
             path: PathBuf::from("invalid.pgn"),
-            content: Ok("1. not-a-move 1-0".to_string()),
+            session: session_from_text("1. not-a-move 1-0"),
         });
 
         assert_eq!(tab.session, previous_session);
@@ -538,6 +628,30 @@ mod tests {
     }
 
     #[test]
+    fn current_generation_applies_prebuilt_session_and_source() {
+        let mut tab = PgnTab::new();
+        let generation = tab.next_load_generation();
+        let session = session_from_text("[White \"Carol\"]\n[Black \"Dave\"]\n\n1. d4 0-1")
+            .expect("test PGN must build before result handling");
+
+        let _ = tab.update(PgnMessage::FileLoaded {
+            generation,
+            path: PathBuf::from("prebuilt.pgn"),
+            session: Ok(session),
+        });
+
+        let session = tab.session.as_ref().expect("session must be retained");
+        assert_eq!(
+            session.current_game().headers.white.as_deref(),
+            Some("Carol")
+        );
+        assert_eq!(session.current_game_index(), 0);
+        assert_eq!(session.current_ply_index(), 0);
+        assert_eq!(tab.source, Some(PathBuf::from("prebuilt.pgn")));
+        assert_eq!(tab.status, None);
+    }
+
+    #[test]
     fn stale_valid_file_result_cannot_replace_a_newer_loaded_session() {
         let mut tab = PgnTab::new();
         let _ = tab.update(PgnMessage::FileSelected(Some(PathBuf::from("first.pgn"))));
@@ -545,18 +659,18 @@ mod tests {
         let _ = tab.update(PgnMessage::FileSelected(Some(PathBuf::from("second.pgn"))));
         let second_generation = tab.load_generation;
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: second_generation,
             path: PathBuf::from("second.pgn"),
-            content: Ok("[White \"Carol\"]\n\n1. d4 0-1".to_string()),
+            session: session_from_text("[White \"Carol\"]\n\n1. d4 0-1"),
         });
         let session_after_newer_load = tab.session.clone();
         let source_after_newer_load = tab.source.clone();
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: first_generation,
             path: PathBuf::from("first.pgn"),
-            content: Ok("[White \"Alice\"]\n\n1. e4 1-0".to_string()),
+            session: session_from_text("[White \"Alice\"]\n\n1. e4 1-0"),
         });
 
         assert_eq!(tab.session, session_after_newer_load);
@@ -572,19 +686,19 @@ mod tests {
         let _ = tab.update(PgnMessage::FileSelected(Some(PathBuf::from("second.pgn"))));
         let second_generation = tab.load_generation;
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: second_generation,
             path: PathBuf::from("second.pgn"),
-            content: Ok("[White \"Carol\"]\n\n1. d4 0-1".to_string()),
+            session: session_from_text("[White \"Carol\"]\n\n1. d4 0-1"),
         });
         let session_after_newer_load = tab.session.clone();
         let source_after_newer_load = tab.source.clone();
         assert_eq!(tab.status, None);
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: first_generation,
             path: PathBuf::from("first.pgn"),
-            content: Err("stale read failure".to_string()),
+            session: Err("stale read failure".to_string()),
         });
 
         assert_eq!(tab.session, session_after_newer_load);
@@ -777,10 +891,10 @@ mod tests {
         let candidate = tab.captured_candidate.clone();
         let snapshot = tab.captured_snapshot.clone();
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: tab.load_generation,
             path: PathBuf::from("invalid.pgn"),
-            content: Ok("1. not-a-move 1-0".to_string()),
+            session: session_from_text("1. not-a-move 1-0"),
         });
         assert_eq!(tab.captured_candidate, candidate);
         assert_eq!(tab.captured_snapshot, snapshot);
@@ -801,10 +915,10 @@ mod tests {
         let candidate = tab.captured_candidate.clone();
         let snapshot = tab.captured_snapshot.clone();
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: tab.load_generation,
             path: PathBuf::from("unreadable.pgn"),
-            content: Err("read failure".to_string()),
+            session: Err("read failure".to_string()),
         });
 
         assert_eq!(tab.session, session);
@@ -827,10 +941,10 @@ mod tests {
         let stale_generation = tab.load_generation;
         let _ = tab.update(PgnMessage::FileSelected(Some(PathBuf::from("newer.pgn"))));
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: stale_generation,
             path: PathBuf::from("stale.pgn"),
-            content: Ok("1. d4 0-1".to_string()),
+            session: session_from_text("1. d4 0-1"),
         });
 
         assert_eq!(tab.captured_candidate, candidate);
@@ -909,10 +1023,10 @@ mod tests {
             .expect("saved snapshot must reconstruct");
         let saved_session = tab.session.clone();
 
-        let _ = tab.update(PgnMessage::FileRead {
+        let _ = tab.update(PgnMessage::FileLoaded {
             generation: pending_generation,
             path: PathBuf::from("pending.pgn"),
-            content: Ok("1. d4 0-1".into()),
+            session: session_from_text("1. d4 0-1"),
         });
 
         assert_eq!(tab.session, saved_session);
