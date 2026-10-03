@@ -1,7 +1,7 @@
 #![windows_subsystem = "windows"]
 
 use download_db::download_lichess_db;
-use eval::{Engine, EngineStatus};
+use eval::{Engine, EngineCommand, EngineRequest, EngineStatus, EngineUpdate};
 use iced::advanced::widget::Id as GenericId;
 use iced::event::{self, Event};
 use iced::widget::svg::Handle;
@@ -156,8 +156,11 @@ pub enum Message {
         reason: String,
         exit_requested: bool,
     },
-    UpdateEval((Option<String>, Option<String>)),
-    EngineReady(mpsc::Sender<String>),
+    UpdateEval(EngineUpdate),
+    EngineReady {
+        generation: u64,
+        sender: mpsc::Sender<EngineCommand>,
+    },
     EngineFileChosen(Option<String>),
     FavoritePuzzle,
     MinimizeUI,
@@ -371,8 +374,11 @@ struct OfflinePuzzles {
     engine_state: EngineStatus,
     engine_eval: String,
     engine: Engine,
-    engine_sender: Option<Sender<String>>,
+    engine_sender: Option<Sender<EngineCommand>>,
     engine_move: String,
+    engine_generation: u64,
+    current_engine_generation: Option<u64>,
+    pending_engine_stop: Option<bool>,
 
     downloading_db: bool,
     download_progress: String,
@@ -419,6 +425,9 @@ impl OfflinePuzzles {
             ),
             engine_sender: None,
             engine_move: String::new(),
+            engine_generation: 0,
+            current_engine_generation: None,
+            pending_engine_stop: None,
 
             downloading_db: false,
             download_progress: String::new(),
@@ -503,10 +512,9 @@ impl OfflinePuzzles {
 
             if self.analysis.make_move(move_made) {
                 self.analysis_history.push(self.analysis.current_position());
-                self.engine.position = self.analysis.current_position().to_string();
-                if let Some(sender) = &self.engine_sender
-                    && let Err(e) = sender
-                        .blocking_send(san_correct_ep(self.analysis.current_position().to_string()))
+                let request = self.begin_engine_search_for_current_analysis();
+                if let Some(sender) = self.engine_sender.clone()
+                    && let Err(e) = sender.blocking_send(EngineCommand::Search(request))
                 {
                     self.record_engine_failure(format!("lost contact with engine: {e}"));
                 }
@@ -754,6 +762,25 @@ impl OfflinePuzzles {
         self.engine_sender = None;
         self.engine_eval = String::new();
         self.engine_move = String::new();
+        self.current_engine_generation = None;
+        self.pending_engine_stop = None;
+    }
+
+    fn begin_engine_search_for_current_analysis(&mut self) -> EngineRequest {
+        self.engine_generation = self.engine_generation.wrapping_add(1);
+        let fen = san_correct_ep(self.analysis.current_position().to_string());
+        let request = EngineRequest::new(self.engine_generation, fen);
+        self.current_engine_generation = Some(request.generation);
+        self.engine.current_request = request.clone();
+        self.engine_eval = String::new();
+        self.engine_move = String::new();
+        request
+    }
+
+    fn invalidate_engine_search_identity(&mut self) {
+        self.current_engine_generation = None;
+        self.engine_eval = String::new();
+        self.engine_move = String::new();
     }
 
     fn record_engine_failure(&mut self, reason: impl std::fmt::Display) {
@@ -873,14 +900,80 @@ impl OfflinePuzzles {
         }
     }
 
-    fn send_engine_command(&self, command: &str) -> Result<(), String> {
-        let sender = self
-            .engine_sender
-            .as_ref()
-            .ok_or_else(|| String::from("engine control channel is unavailable"))?;
+    fn send_engine_command(
+        sender: &Sender<EngineCommand>,
+        command: EngineCommand,
+    ) -> Result<(), String> {
         sender
-            .blocking_send(command.to_string())
+            .blocking_send(command)
             .map_err(|error| format!("lost contact with engine: {error}"))
+    }
+
+    fn request_engine_stop(&mut self, exit_requested: bool) -> Result<(), String> {
+        let exit_requested = exit_requested || self.pending_engine_stop.unwrap_or(false);
+        let command = if exit_requested {
+            EngineCommand::Exit
+        } else {
+            EngineCommand::Stop
+        };
+        self.pending_engine_stop = Some(exit_requested);
+        self.invalidate_engine_search_identity();
+        if let Some(sender) = self.engine_sender.take() {
+            Self::send_engine_command(&sender, command)?;
+        }
+        Ok(())
+    }
+
+    fn request_engine_stop_if_running(&mut self, exit_requested: bool) -> Result<(), String> {
+        if self.engine_state != EngineStatus::TurnedOff {
+            self.request_engine_stop(exit_requested)?;
+        }
+        Ok(())
+    }
+
+    fn handle_engine_ready(
+        &mut self,
+        generation: u64,
+        sender: mpsc::Sender<EngineCommand>,
+    ) -> Task<Message> {
+        if self.engine_state == EngineStatus::TurnedOff {
+            let _ = Self::send_engine_command(&sender, EngineCommand::Stop);
+            return Task::none();
+        }
+
+        if let Some(exit_requested) = self.pending_engine_stop {
+            let command = if exit_requested {
+                EngineCommand::Exit
+            } else {
+                EngineCommand::Stop
+            };
+            if let Err(error) = Self::send_engine_command(&sender, command) {
+                return self.handle_engine_failure(error, exit_requested);
+            }
+            return Task::none();
+        }
+
+        self.engine_sender = Some(sender.clone());
+        if self.current_engine_generation == Some(generation) {
+            return Task::none();
+        }
+
+        let Some(current_generation) = self.current_engine_generation else {
+            let _ = Self::send_engine_command(&sender, EngineCommand::Stop);
+            self.engine_sender = None;
+            return Task::none();
+        };
+        let request = self.engine.current_request.clone();
+        if request.generation != current_generation {
+            let _ = Self::send_engine_command(&sender, EngineCommand::Stop);
+            self.engine_sender = None;
+            return Task::none();
+        }
+
+        if let Err(error) = Self::send_engine_command(&sender, EngineCommand::Search(request)) {
+            return self.handle_engine_failure(error, false);
+        }
+        Task::none()
     }
     // Old Iced application trait stuff
     fn init() -> (Self, Task<Message>) {
@@ -955,6 +1048,9 @@ impl OfflinePuzzles {
             }
             (_, Message::PuzzleSqliteSourceSelected) => {
                 self.has_db = config::puzzle_source_exists(&self.settings_tab.saved_configs);
+                if let Err(error) = self.request_engine_stop_if_running(false) {
+                    return self.handle_engine_failure(error, false);
+                }
                 Task::none()
             }
             (_, Message::SelectMode(message)) => {
@@ -962,10 +1058,7 @@ impl OfflinePuzzles {
                 if message == config::GameMode::Analysis {
                     self.analysis = Game::new_with_board(self.board);
                 } else {
-                    if self.engine_state != EngineStatus::TurnedOff
-                        && self.engine_sender.is_some()
-                        && let Err(error) = self.send_engine_command(eval::STOP_COMMAND)
-                    {
+                    if let Err(error) = self.request_engine_stop_if_running(false) {
                         return self.handle_engine_failure(error, false);
                     }
                     self.analysis_history
@@ -1009,10 +1102,9 @@ impl OfflinePuzzles {
                 {
                     self.analysis_history.pop();
                     self.analysis = Game::new_with_board(*self.analysis_history.last().unwrap());
-                    if let Some(sender) = &self.engine_sender
-                        && let Err(e) = sender.blocking_send(san_correct_ep(
-                            self.analysis.current_position().to_string(),
-                        ))
+                    let request = self.begin_engine_search_for_current_analysis();
+                    if let Some(sender) = self.engine_sender.clone()
+                        && let Err(e) = sender.blocking_send(EngineCommand::Search(request))
                     {
                         self.record_engine_failure(format!("lost contact with engine: {e}"));
                     }
@@ -1034,10 +1126,7 @@ impl OfflinePuzzles {
                 self.next_search_generation();
                 self.search_tab.show_searching_msg = false;
                 self.from_square = None;
-                if self.engine_state != EngineStatus::TurnedOff
-                    && self.engine_sender.is_some()
-                    && let Err(error) = self.send_engine_command(eval::STOP_COMMAND)
-                {
+                if let Err(error) = self.request_engine_stop_if_running(false) {
                     return self.handle_engine_failure(error, false);
                 }
                 self.refresh_current_favorite_status()
@@ -1060,15 +1149,15 @@ impl OfflinePuzzles {
                         return Task::none();
                     }
                     self.from_square = None;
-                    if self.engine_state != EngineStatus::TurnedOff
-                        && self.engine_sender.is_some()
-                        && let Err(error) = self.send_engine_command(eval::STOP_COMMAND)
-                    {
+                    if let Err(error) = self.request_engine_stop_if_running(false) {
                         return self.handle_engine_failure(error, false);
                     }
                     return self.refresh_current_favorite_status();
                 } else {
                     self.from_square = None;
+                    if let Err(error) = self.request_engine_stop_if_running(false) {
+                        return self.handle_engine_failure(error, false);
+                    }
                     self.game_mode = config::GameMode::Puzzle;
                     // Just putting the default position to make it obvious the search ended.
                     self.board = Board::default();
@@ -1094,15 +1183,15 @@ impl OfflinePuzzles {
                                 return Task::none();
                             }
                             self.from_square = None;
-                            if self.engine_state != EngineStatus::TurnedOff
-                                && self.engine_sender.is_some()
-                                && let Err(error) = self.send_engine_command(eval::STOP_COMMAND)
-                            {
+                            if let Err(error) = self.request_engine_stop_if_running(false) {
                                 return self.handle_engine_failure(error, false);
                             }
                             self.refresh_current_favorite_status()
                         } else {
                             self.from_square = None;
+                            if let Err(error) = self.request_engine_stop_if_running(false) {
+                                return self.handle_engine_failure(error, false);
+                            }
                             self.game_mode = config::GameMode::Puzzle;
                             self.board = Board::default();
                             self.last_move_from = None;
@@ -1345,7 +1434,7 @@ impl OfflinePuzzles {
                     match self.engine_state {
                         EngineStatus::TurnedOff => self.final_exit_task(true),
                         _ => {
-                            if let Err(error) = self.send_engine_command(eval::EXIT_APP_COMMAND) {
+                            if let Err(error) = self.request_engine_stop(true) {
                                 return self.handle_engine_failure(error, true);
                             }
                             Task::none()
@@ -1399,21 +1488,21 @@ impl OfflinePuzzles {
                         } else if !Path::new(&self.engine.engine_path).exists() {
                             self.record_engine_failure("engine executable does not exist");
                         } else {
-                            self.engine.position =
-                                san_correct_ep(self.analysis.current_position().to_string());
+                            self.pending_engine_stop = None;
+                            self.begin_engine_search_for_current_analysis();
                             self.engine_state = EngineStatus::Started;
                         }
                     }
                     _ => {
-                        if let Err(error) = self.send_engine_command(eval::STOP_COMMAND) {
+                        if let Err(error) = self.request_engine_stop(false) {
                             return self.handle_engine_failure(error, false);
                         }
-                        self.engine_sender = None;
                     }
                 }
                 Task::none()
             }
             (_, Message::EngineStopped(exit)) => {
+                let exit = exit || self.pending_engine_stop.unwrap_or(false);
                 self.clear_engine_state();
                 self.final_exit_task(exit)
             }
@@ -1423,18 +1512,23 @@ impl OfflinePuzzles {
                     reason,
                     exit_requested,
                 },
-            ) => self.handle_engine_failure(reason, exit_requested),
-            (_, Message::EngineReady(sender)) => {
-                if self.engine_state != EngineStatus::TurnedOff {
-                    self.engine_sender = Some(sender);
-                }
-                Task::none()
+            ) => self.handle_engine_failure(
+                reason,
+                exit_requested || self.pending_engine_stop.unwrap_or(false),
+            ),
+            (_, Message::EngineReady { generation, sender }) => {
+                self.handle_engine_ready(generation, sender)
             }
-            (_, Message::UpdateEval(eval)) => {
+            (_, Message::UpdateEval(update)) => {
                 match self.engine_state {
                     EngineStatus::TurnedOff => Task::none(),
                     _ => {
-                        let (eval, best_move) = eval;
+                        if self.current_engine_generation != Some(update.generation) {
+                            return Task::none();
+                        }
+                        let EngineUpdate {
+                            eval, best_move, ..
+                        } = update;
                         if let Some(eval_str) = eval {
                             if eval_str.contains("Mate") {
                                 let tokens: Vec<&str> = eval_str.split_whitespace().collect();
@@ -1909,6 +2003,339 @@ mod tests {
             game_url: "https://lichess.org/game".into(),
             opening: String::new(),
         }
+    }
+
+    fn set_analysis_position(app: &mut OfflinePuzzles, fen: &str) {
+        let board = Board::from_str(fen).expect("test FEN should be valid");
+        app.game_mode = config::GameMode::Analysis;
+        app.analysis = Game::new_with_board(board);
+        app.analysis_history = vec![board];
+    }
+
+    fn mark_engine_search_current(app: &mut OfflinePuzzles) -> u64 {
+        app.engine_state = EngineStatus::Started;
+        app.engine_generation = app.engine_generation.wrapping_add(1);
+        app.current_engine_generation = Some(app.engine_generation);
+        app.engine_generation
+    }
+
+    fn engine_update(generation: u64, eval: Option<&str>, best_move: Option<&str>) -> Message {
+        Message::UpdateEval(eval::EngineUpdate {
+            generation,
+            eval: eval.map(str::to_string),
+            best_move: best_move.map(str::to_string),
+        })
+    }
+
+    #[test]
+    fn stale_analysis_score_after_position_change_is_ignored_before_black_turn_sign_flip() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(
+            &mut app,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        );
+        let stale_generation = mark_engine_search_current(&mut app);
+        app.engine_eval = "0.10".into();
+        app.engine_move = "e4".into();
+        app.analysis
+            .make_move(ChessMove::new(Square::E2, Square::E4, None));
+        app.analysis_history.push(app.analysis.current_position());
+        let current_generation = app.begin_engine_search_for_current_analysis().generation;
+
+        let _ = app.update(engine_update(stale_generation, Some("1.25"), Some("e2e4")));
+
+        assert_eq!(app.current_engine_generation, Some(current_generation));
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn stale_analysis_bestmove_illegal_on_current_board_is_ignored() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(
+            &mut app,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        );
+        let stale_generation = mark_engine_search_current(&mut app);
+        app.analysis
+            .make_move(ChessMove::new(Square::E2, Square::E4, None));
+        app.analysis_history.push(app.analysis.current_position());
+        let current_generation = app.begin_engine_search_for_current_analysis().generation;
+
+        let _ = app.update(engine_update(stale_generation, None, Some("e2e4")));
+
+        assert_eq!(app.current_engine_generation, Some(current_generation));
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn stale_analysis_bestmove_legal_on_current_board_is_still_ignored_by_identity() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        let stale_generation = mark_engine_search_current(&mut app);
+        let current_generation = app.begin_engine_search_for_current_analysis().generation;
+
+        let _ = app.update(engine_update(stale_generation, None, Some("a2a3")));
+
+        assert_eq!(app.current_engine_generation, Some(current_generation));
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn current_analysis_result_is_accepted_with_white_relative_score_and_san() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(
+            &mut app,
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        );
+        let generation = mark_engine_search_current(&mut app);
+
+        let _ = app.update(engine_update(generation, Some("0.35"), Some("g1f3")));
+
+        assert_eq!(app.engine_eval, "0.35");
+        assert_eq!(app.engine_move, "Nf3");
+    }
+
+    #[test]
+    fn current_black_to_move_result_preserves_existing_white_relative_score_behavior() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(
+            &mut app,
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        );
+        let generation = mark_engine_search_current(&mut app);
+
+        let _ = app.update(engine_update(generation, Some("1.25"), Some("e7e5")));
+
+        assert_eq!(app.engine_eval, "-1.25");
+        assert_eq!(app.engine_move, "e5");
+    }
+
+    #[test]
+    fn rapid_analysis_requests_accept_only_latest_generation() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        let generation_a = mark_engine_search_current(&mut app);
+        let generation_b = app.begin_engine_search_for_current_analysis().generation;
+        let generation_c = app.begin_engine_search_for_current_analysis().generation;
+
+        let _ = app.update(engine_update(generation_a, Some("0.10"), Some("a2a3")));
+        let _ = app.update(engine_update(generation_b, Some("0.20"), Some("a2a3")));
+        let _ = app.update(engine_update(generation_c, Some("0.30"), Some("a2a3")));
+
+        assert_eq!(app.engine_eval, "0.30");
+        assert_eq!(app.engine_move, "a3");
+    }
+
+    #[test]
+    fn new_analysis_request_clears_displayed_engine_output() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        mark_engine_search_current(&mut app);
+        app.engine_eval = "0.42".into();
+        app.engine_move = "a3".into();
+
+        let _ = app.begin_engine_search_for_current_analysis();
+
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn engine_request_generation_wraps_instead_of_sticking_at_max() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        app.engine_generation = u64::MAX;
+
+        let wrapped = app.begin_engine_search_for_current_analysis();
+        let next = app.begin_engine_search_for_current_analysis();
+
+        assert_eq!(wrapped.generation, 0);
+        assert_eq!(next.generation, 1);
+        assert_eq!(app.current_engine_generation, Some(1));
+    }
+
+    #[test]
+    fn ready_for_old_request_before_startup_finishes_searches_latest_request() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        app.engine_state = EngineStatus::Started;
+        let generation_a = app.begin_engine_search_for_current_analysis().generation;
+        app.analysis
+            .make_move(ChessMove::new(Square::A2, Square::A3, None));
+        app.analysis_history.push(app.analysis.current_position());
+        let latest_request = app.begin_engine_search_for_current_analysis();
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        let _ = app.update(Message::EngineReady {
+            generation: generation_a,
+            sender,
+        });
+
+        assert_eq!(
+            app.current_engine_generation,
+            Some(latest_request.generation)
+        );
+        assert!(app.engine_sender.is_some());
+        assert_eq!(
+            receiver.try_recv().expect("latest search should be sent"),
+            EngineCommand::Search(latest_request)
+        );
+
+        let _ = app.update(engine_update(generation_a, Some("0.10"), Some("a2a3")));
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn leaving_analysis_without_ready_sender_neutralizes_identity_and_display() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        app.engine_state = EngineStatus::Started;
+        let generation = app.begin_engine_search_for_current_analysis().generation;
+        app.engine_eval = "0.42".into();
+        app.engine_move = "a3".into();
+
+        let _ = app.update(Message::SelectMode(config::GameMode::Puzzle));
+
+        assert_eq!(app.current_engine_generation, None);
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+        assert_eq!(app.pending_engine_stop, Some(false));
+
+        let _ = app.update(engine_update(generation, Some("0.10"), Some("a2a3")));
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn loading_normal_search_result_without_ready_sender_neutralizes_identity_and_display() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        app.engine_state = EngineStatus::Started;
+        let generation = app.begin_engine_search_for_current_analysis().generation;
+        app.engine_eval = "0.42".into();
+        app.engine_move = "a3".into();
+
+        let _ = app.update(Message::LoadPuzzle {
+            generation: app.search_generation,
+            result: Ok(vec![navigation_puzzle("new-normal-source")]),
+        });
+
+        assert_eq!(app.current_engine_generation, None);
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+        assert_eq!(app.pending_engine_stop, Some(false));
+
+        let _ = app.update(engine_update(generation, Some("0.10"), Some("a2a3")));
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn loading_project_result_without_ready_sender_neutralizes_identity_and_display() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        app.engine_state = EngineStatus::Started;
+        let generation = app.begin_engine_search_for_current_analysis().generation;
+        app.engine_eval = "0.42".into();
+        app.engine_move = "a3".into();
+
+        let _ = app.update(Message::LoadProjectPuzzles(vec![navigation_puzzle(
+            "new-project-source",
+        )]));
+
+        assert_eq!(app.current_engine_generation, None);
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+        assert_eq!(app.pending_engine_stop, Some(false));
+
+        let _ = app.update(engine_update(generation, Some("0.10"), Some("a2a3")));
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn stale_ready_after_pending_stop_sends_stop_and_cannot_restore_analysis() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        app.engine_state = EngineStatus::Started;
+        let generation = app.begin_engine_search_for_current_analysis().generation;
+        let _ = app.update(Message::SelectMode(config::GameMode::Puzzle));
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        let _ = app.update(Message::EngineReady { generation, sender });
+
+        assert_eq!(
+            receiver.try_recv().expect("pending stop should be sent"),
+            EngineCommand::Stop
+        );
+        assert!(app.engine_sender.is_none());
+        assert_eq!(app.current_engine_generation, None);
+        let _ = app.update(engine_update(generation, Some("0.10"), Some("a2a3")));
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+    }
+
+    #[test]
+    fn exit_before_engine_ready_sends_exit_and_preserves_exit_intent_until_stopped() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        app.engine_state = EngineStatus::Started;
+        let generation = app.begin_engine_search_for_current_analysis().generation;
+
+        app.request_engine_stop(true)
+            .expect("pending exit before ready should be recorded");
+        let (sender, mut receiver) = mpsc::channel(1);
+        let _ = app.update(Message::EngineReady { generation, sender });
+
+        assert_eq!(
+            receiver.try_recv().expect("pending exit should be sent"),
+            EngineCommand::Exit
+        );
+        assert_eq!(app.pending_engine_stop, Some(true));
+        let _ = app.update(Message::EngineStopped(false));
+        assert!(app.engine_state == EngineStatus::TurnedOff);
+        assert_eq!(app.pending_engine_stop, None);
+    }
+
+    #[test]
+    fn engine_stop_failure_and_restart_invalidate_stale_update_identity() {
+        let mut app = OfflinePuzzles::new(false);
+        set_analysis_position(&mut app, "8/8/8/8/8/8/P7/K6k w - - 0 1");
+        let stopped_generation = mark_engine_search_current(&mut app);
+        app.clear_engine_state();
+        app.engine_state = EngineStatus::Started;
+        let restarted_generation = app.begin_engine_search_for_current_analysis().generation;
+
+        let _ = app.update(engine_update(
+            stopped_generation,
+            Some("0.10"),
+            Some("a2a3"),
+        ));
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+
+        let _ = app.update(engine_update(
+            restarted_generation,
+            Some("0.50"),
+            Some("a2a3"),
+        ));
+        assert_eq!(app.engine_eval, "0.50");
+        assert_eq!(app.engine_move, "a3");
+
+        app.record_engine_failure("synthetic failure");
+        let failed_generation = restarted_generation;
+        app.engine_state = EngineStatus::Started;
+        let next_generation = app.begin_engine_search_for_current_analysis().generation;
+
+        let _ = app.update(engine_update(failed_generation, Some("0.60"), Some("a2a3")));
+        assert!(app.engine_eval.is_empty());
+        assert!(app.engine_move.is_empty());
+
+        let _ = app.update(engine_update(next_generation, Some("0.70"), Some("a2a3")));
+        assert_eq!(app.engine_eval, "0.70");
+        assert_eq!(app.engine_move, "a3");
     }
 
     #[test]
