@@ -4,6 +4,7 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 
+use chess_material_studio::project::PROJECT_APPLICATION_ID;
 use chess_material_studio::puzzle_import::{self, MIGRATIONS, PuzzleFileImportResult};
 
 const DEFAULT_CHUNK_SIZE: usize = 50_000;
@@ -184,6 +185,84 @@ fn is_ocp_db(path: &Path) -> Result<bool, String> {
     Ok(target == protected)
 }
 
+fn has_cms_project_extension(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|name| name.ends_with(".cms.sqlite"))
+}
+
+#[derive(QueryableByName)]
+struct SqliteTableCount {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
+}
+
+#[derive(QueryableByName)]
+struct ProjectApplicationIdRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    application_id: String,
+}
+
+fn has_sqlite_header(path: &Path) -> Result<bool, String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot inspect {}: {}", path.display(), e))?;
+    let mut header = [0_u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(&header == b"SQLite format 3\0"),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(format!("cannot inspect {}: {}", path.display(), error)),
+    }
+}
+
+fn is_cms_project_database(path: &Path) -> Result<bool, String> {
+    if !path.is_file() || !has_sqlite_header(path)? {
+        return Ok(false);
+    }
+
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| format!("cannot inspect non-UTF-8 SQLite path: {}", path.display()))?;
+    let mut conn = SqliteConnection::establish(path_str).map_err(|e| {
+        format!(
+            "cannot inspect existing SQLite database {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+
+    diesel::sql_query("PRAGMA query_only = ON")
+        .execute(&mut conn)
+        .map_err(|e| {
+            format!(
+                "cannot enable read-only inspection for {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+
+    let table_count = diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM sqlite_master \
+         WHERE type = 'table' AND name = 'project_metadata'",
+    )
+    .get_result::<SqliteTableCount>(&mut conn)
+    .map_err(|e| format!("cannot inspect SQLite schema {}: {}", path.display(), e))?
+    .count;
+
+    if table_count == 0 {
+        return Ok(false);
+    }
+
+    let rows = diesel::sql_query("SELECT application_id FROM project_metadata WHERE id = 1")
+        .load::<ProjectApplicationIdRow>(&mut conn)
+        .map_err(|e| format!("cannot inspect project metadata {}: {}", path.display(), e))?;
+
+    Ok(rows
+        .iter()
+        .any(|row| row.application_id == PROJECT_APPLICATION_ID))
+}
+
 /// Normalize a path by resolving existing components with `canonicalize` and
 /// lexically resolving any remaining components.
 ///
@@ -270,6 +349,14 @@ fn validate_args(args: &Args) -> Result<(), String> {
 
     if is_ocp_db(&args.db)? {
         return Err("Refusing to use protected database: ocp.db".into());
+    }
+
+    if has_cms_project_extension(&args.db) {
+        return Err("Refusing to use protected editorial project database: *.cms.sqlite".into());
+    }
+
+    if is_cms_project_database(&args.db)? {
+        return Err("Refusing to use protected Chess Material Studio project database".into());
     }
 
     // Full mode: DB must be within target/cms_full_import/
@@ -864,6 +951,69 @@ mod tests {
         dir.join(format!("cli_{}_{}_{}", name, std::process::id(), id))
     }
 
+    fn project_path(name: &str) -> PathBuf {
+        tmp_path(name).with_extension("cms.sqlite")
+    }
+
+    fn full_import_project_path(name: &str) -> PathBuf {
+        let unique = tmp_path(name);
+        let file_name = format!(
+            "{}.cms.sqlite",
+            unique
+                .file_name()
+                .expect("temporary path should have a file name")
+                .to_string_lossy()
+        );
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("cms_full_import");
+        std::fs::create_dir_all(&dir).expect("full import test directory should be created");
+        dir.join(file_name)
+    }
+
+    #[derive(QueryableByName)]
+    struct TableNameRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
+
+    fn table_names(path: &Path) -> Vec<String> {
+        let mut conn =
+            SqliteConnection::establish(path.to_str().expect("test path should be UTF-8"))
+                .expect("test database should open");
+        diesel::sql_query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name ASC")
+            .load::<TableNameRow>(&mut conn)
+            .expect("test database schema should be readable")
+            .into_iter()
+            .map(|row| row.name)
+            .collect()
+    }
+
+    fn create_editorial_project(path: &Path) {
+        chess_material_studio::project::create_project(path, "Protected importer test project")
+            .expect("editorial project should be created");
+    }
+
+    fn assert_project_unchanged(path: &Path, bytes_before: &[u8], tables_before: &[String]) {
+        assert_eq!(
+            std::fs::read(path).expect("project bytes should remain readable"),
+            bytes_before,
+            "rejected importer preflight must not change project bytes"
+        );
+        let tables_after = table_names(path);
+        assert_eq!(
+            tables_after, tables_before,
+            "rejected importer preflight must not change project tables"
+        );
+        assert!(!tables_after.iter().any(|table| table == "puzzles"));
+        assert!(
+            !tables_after
+                .iter()
+                .any(|table| table == "puzzle_import_progress")
+        );
+        assert!(!tables_after.iter().any(|table| table == "favs"));
+    }
+
     #[test]
     fn test_full_import_path_within_target_allowed() {
         let p = PathBuf::from("target/cms_full_import/test.sqlite");
@@ -1035,6 +1185,120 @@ mod tests {
             validate_args(&args).unwrap_err(),
             "Refusing to use protected database: ocp.db"
         );
+    }
+
+    #[test]
+    fn test_validate_limited_cms_sqlite_destination_rejected_before_creation() {
+        let db = project_path("limited_new_project");
+        assert!(!db.exists(), "test destination must start absent");
+        let args = Args {
+            csv: PathBuf::from("tests/fixtures/lichess_puzzles_sample.csv"),
+            db: db.clone(),
+            mode: ImportMode::Limited { max_rows: 100 },
+            chunk_size: 10,
+            resume: false,
+        };
+
+        assert_eq!(
+            validate_args(&args).unwrap_err(),
+            "Refusing to use protected editorial project database: *.cms.sqlite"
+        );
+        assert!(
+            !db.exists(),
+            "project-named destination must be rejected before database creation or migrations"
+        );
+    }
+
+    #[test]
+    fn test_validate_limited_resume_project_cms_sqlite_preserves_project() {
+        let db = project_path("limited_resume_project");
+        create_editorial_project(&db);
+        let bytes_before = std::fs::read(&db).expect("project bytes should be readable");
+        let tables_before = table_names(&db);
+        let args = Args {
+            csv: PathBuf::from("tests/fixtures/lichess_puzzles_sample.csv"),
+            db: db.clone(),
+            mode: ImportMode::Limited { max_rows: 100 },
+            chunk_size: 10,
+            resume: true,
+        };
+
+        assert_eq!(
+            validate_args(&args).unwrap_err(),
+            "Refusing to use protected editorial project database: *.cms.sqlite"
+        );
+        assert_project_unchanged(&db, &bytes_before, &tables_before);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn test_validate_full_project_cms_sqlite_preserves_project() {
+        let db = full_import_project_path("full_project");
+        create_editorial_project(&db);
+        let bytes_before = std::fs::read(&db).expect("project bytes should be readable");
+        let tables_before = table_names(&db);
+        let args = Args {
+            csv: PathBuf::from("tests/fixtures/lichess_puzzles_sample.csv"),
+            db: db.clone(),
+            mode: ImportMode::Full,
+            chunk_size: 50_000,
+            resume: true,
+        };
+
+        assert!(
+            is_path_within_full_import_dir(&db).expect("full import path should normalize"),
+            "test must exercise a project path that otherwise passes full-import confinement"
+        );
+        assert_eq!(
+            validate_args(&args).unwrap_err(),
+            "Refusing to use protected editorial project database: *.cms.sqlite"
+        );
+        assert_project_unchanged(&db, &bytes_before, &tables_before);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn test_validate_renamed_project_database_preserves_project() {
+        let original = project_path("renamed_project_source");
+        let renamed = tmp_path("renamed_project_destination").with_extension("sqlite");
+        create_editorial_project(&original);
+        std::fs::rename(&original, &renamed).expect("project should be renamed for test");
+        assert!(!has_cms_project_extension(&renamed));
+        let bytes_before = std::fs::read(&renamed).expect("project bytes should be readable");
+        let tables_before = table_names(&renamed);
+        let args = Args {
+            csv: PathBuf::from("tests/fixtures/lichess_puzzles_sample.csv"),
+            db: renamed.clone(),
+            mode: ImportMode::Limited { max_rows: 100 },
+            chunk_size: 10,
+            resume: true,
+        };
+
+        assert_eq!(
+            validate_args(&args).unwrap_err(),
+            "Refusing to use protected Chess Material Studio project database"
+        );
+        assert_project_unchanged(&renamed, &bytes_before, &tables_before);
+        std::fs::remove_file(&renamed).ok();
+    }
+
+    #[test]
+    fn test_validate_existing_puzzle_corpus_with_resume_is_allowed() {
+        let db = tmp_path("valid_puzzle_corpus").with_extension("sqlite");
+        {
+            let mut conn = establish_connection(&db).expect("puzzle corpus should open");
+            run_migrations(&mut conn).expect("puzzle corpus migrations should succeed");
+        }
+        let args = Args {
+            csv: PathBuf::from("tests/fixtures/lichess_puzzles_sample.csv"),
+            db: db.clone(),
+            mode: ImportMode::Limited { max_rows: 100 },
+            chunk_size: 10,
+            resume: true,
+        };
+
+        validate_args(&args).expect("valid puzzle corpus resume destination should remain allowed");
+        std::fs::remove_file(&db).ok();
     }
 
     #[test]
