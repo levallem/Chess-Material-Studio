@@ -2078,9 +2078,9 @@ dependencies = [
 
 [[package]]
 name = "iced_drop"
-version = "0.2.48"
+version = "0.2.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1aad93fb81e7eeb0c5b2a0d8653b4c6c9a39907984d45be4f91cc467d4a07b0"
+checksum = "b91fa19c0fc2c2bd3aadd67f97eca230d00654a0b47888e7235bef1a5ecac28a"
 dependencies = [
  "iced",
  "iced_core",
